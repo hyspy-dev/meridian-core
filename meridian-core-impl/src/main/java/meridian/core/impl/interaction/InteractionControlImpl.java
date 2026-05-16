@@ -22,6 +22,7 @@ import meridian.protocol.InteractionChainData;
 import meridian.protocol.InteractionState;
 import meridian.protocol.InteractionSyncData;
 import meridian.protocol.InteractionType;
+import meridian.protocol.MovementStates;
 import meridian.protocol.RootInteraction;
 import meridian.protocol.packets.interaction.SyncInteractionChain;
 import meridian.protocol.packets.interaction.SyncInteractionChains;
@@ -59,9 +60,13 @@ public final class InteractionControlImpl implements InteractionControl {
 
     private volatile ProxySession session;
     private volatile BlockPosition targetBlock;
+    /** The player's last observed movement state — what {@code ConditionInteraction} tests. */
+    private volatile MovementStates movementStates;
     private final AtomicInteger chainId = new AtomicInteger(0);
     /** interaction type &rarr; root id, learned from the player's own chains. */
     private final Map<InteractionType, Integer> observedRoot = new ConcurrentHashMap<>();
+    /** interaction type &rarr; the root a {@code ReplaceInteraction} switched into. */
+    private final Map<InteractionType, Integer> observedReplacement = new ConcurrentHashMap<>();
     /** interaction type &rarr; last real {@code initial=true} chain, for replay. */
     private final Map<InteractionType, SyncInteractionChain> capturedChain = new ConcurrentHashMap<>();
     /** Root ids already dumped to the log (VM-development diagnostics). */
@@ -94,6 +99,13 @@ public final class InteractionControlImpl implements InteractionControl {
         }
     }
 
+    /** Tracks the player's movement state — {@code ConditionInteraction}'s input. */
+    void onMovementStates(MovementStates states) {
+        if (states != null) {
+            this.movementStates = states;
+        }
+    }
+
     /**
      * Learns from the player's own chains: the chainId high-water mark, each
      * interaction type's root id, and — for replay — the last complete
@@ -104,17 +116,24 @@ public final class InteractionControlImpl implements InteractionControl {
             chainId.set(chain.chainId);
         }
         if (chain.initial && chain.interactionData != null && chain.interactionData.length > 0) {
-            boolean firstRoot = true;
+            Integer initialRoot = null;
+            int replacement = InteractionContext.NO_REPLACEMENT;
             for (InteractionSyncData d : chain.interactionData) {
                 if (d != null) {
-                    if (firstRoot) {
-                        observedRoot.put(chain.interactionType, d.rootInteraction);
-                        firstRoot = false;
+                    if (initialRoot == null) {
+                        initialRoot = d.rootInteraction;
+                        observedRoot.put(chain.interactionType, initialRoot);
+                    } else if (d.rootInteraction != initialRoot
+                            && replacement == InteractionContext.NO_REPLACEMENT) {
+                        // A ReplaceInteraction switched the chain into a second
+                        // root (e.g. Seed_Condition -> 3385).
+                        replacement = d.rootInteraction;
                     }
-                    // Dump every distinct root in the chain — ReplaceInteraction
-                    // chains into a second root (e.g. Seed_Condition -> 3385).
                     dumpRootTree(d.rootInteraction);
                 }
+            }
+            if (replacement != InteractionContext.NO_REPLACEMENT) {
+                observedReplacement.put(chain.interactionType, replacement);
             }
             capturedChain.put(chain.interactionType, chain);
             log.info("meridian-core: captured {} chain template ({} ops)",
@@ -135,15 +154,16 @@ public final class InteractionControlImpl implements InteractionControl {
         if (rootId == null) {
             return;
         }
-        RootInteraction root = registry.root(rootId).orElse(null);
-        if (root == null) {
+        CompiledInteraction compiled = compileRoot(rootId);
+        if (compiled == null) {
             return;
         }
-        CompiledInteraction compiled = InteractionFlattener.compile(
-                rootId, root.interactions, id -> registry.interaction(id).orElse(null));
+        // The captured chain itself reveals the ReplaceInteraction target —
+        // the first operation whose root differs from the initial one.
         InteractionContext ctx = contextFor(captured.interactionType,
-                captured.data.blockPosition, DataKind.BLOCK);
-        List<InteractionSyncData> vm = InteractionSimulator.simulate(compiled, ctx);
+                captured.data.blockPosition, DataKind.BLOCK, replacementRootOf(captured));
+        List<InteractionSyncData> vm = InteractionSimulator.simulate(
+                compiled, ctx, this::compileRoot);
 
         StringBuilder real = new StringBuilder();
         StringBuilder sim = new StringBuilder();
@@ -167,7 +187,7 @@ public final class InteractionControlImpl implements InteractionControl {
 
     /** Builds a simulator context: resolves the target block type via the trackers. */
     private InteractionContext contextFor(InteractionType type, BlockPosition target,
-                                          DataKind dataKind) {
+                                          DataKind dataKind, int replacementRoot) {
         BlockType blockType = null;
         if (target != null) {
             int id = chunks.blockIdAt(target.x, target.y, target.z);
@@ -175,9 +195,38 @@ public final class InteractionControlImpl implements InteractionControl {
                 blockType = worldState.blockTypeById(id);
             }
         }
+        MovementStates movement = movementStates;
         return dataKind == DataKind.PLACEMENT
-                ? InteractionContext.ofPlacement(type, target, blockType, meridian.protocol.BlockFace.Up)
-                : InteractionContext.ofBlock(type, target, blockType, meridian.protocol.BlockFace.Up);
+                ? InteractionContext.ofPlacement(type, target, blockType, BlockFace.Up,
+                        movement, replacementRoot)
+                : InteractionContext.ofBlock(type, target, blockType, BlockFace.Up,
+                        movement, replacementRoot);
+    }
+
+    /** Flattens a registry root into its operation list, or {@code null} if absent. */
+    private CompiledInteraction compileRoot(int rootId) {
+        RootInteraction root = registry.root(rootId).orElse(null);
+        if (root == null) {
+            return null;
+        }
+        return InteractionFlattener.compile(
+                rootId, root.interactions, id -> registry.interaction(id).orElse(null));
+    }
+
+    /** The first operation root in {@code chain} that differs from the initial one. */
+    private static int replacementRootOf(SyncInteractionChain chain) {
+        Integer initial = null;
+        for (InteractionSyncData d : chain.interactionData) {
+            if (d == null) {
+                continue;
+            }
+            if (initial == null) {
+                initial = d.rootInteraction;
+            } else if (d.rootInteraction != initial) {
+                return d.rootInteraction;
+            }
+        }
+        return InteractionContext.NO_REPLACEMENT;
     }
 
     /** Flattens a root once and logs its operation tree — VM-development diagnostics. */
@@ -186,12 +235,11 @@ public final class InteractionControlImpl implements InteractionControl {
             return;
         }
         RootInteraction root = registry.root(rootId).orElse(null);
-        if (root == null) {
+        CompiledInteraction compiled = compileRoot(rootId);
+        if (root == null || compiled == null) {
             log.warn("meridian-core: cannot dump root {} — not in registry", rootId);
             return;
         }
-        CompiledInteraction compiled = InteractionFlattener.compile(
-                rootId, root.interactions, id -> registry.interaction(id).orElse(null));
         log.info("meridian-core: VM dump — root '{}' #{}\n{}",
                 root.id, rootId, compiled.describe());
     }
@@ -356,16 +404,16 @@ public final class InteractionControlImpl implements InteractionControl {
                     + "once manually so core can learn it", type);
             return null;
         }
-        RootInteraction root = registry.root(rootId).orElse(null);
-        if (root == null) {
+        CompiledInteraction compiled = compileRoot(rootId);
+        if (compiled == null) {
             log.warn("meridian-core: root {} not in registry", rootId);
             return null;
         }
-        CompiledInteraction compiled = InteractionFlattener.compile(
-                rootId, root.interactions, id -> registry.interaction(id).orElse(null));
 
-        InteractionContext ctx = contextFor(type, targetBlock, dataKind);
-        List<InteractionSyncData> ops = InteractionSimulator.simulate(compiled, ctx);
+        int replacement = observedReplacement.getOrDefault(type, InteractionContext.NO_REPLACEMENT);
+        InteractionContext ctx = contextFor(type, targetBlock, dataKind, replacement);
+        List<InteractionSyncData> ops = InteractionSimulator.simulate(
+                compiled, ctx, this::compileRoot);
         log.info("meridian-core: simulated root {} ({} ops) for {}", rootId, ops.size(), type);
         return ops.toArray(new InteractionSyncData[0]);
     }

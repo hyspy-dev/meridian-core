@@ -1,15 +1,20 @@
 package meridian.core.impl.interaction;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import meridian.protocol.BlockRotation;
 import meridian.protocol.BlockType;
 import meridian.protocol.ChargingInteraction;
+import meridian.protocol.ConditionInteraction;
 import meridian.protocol.Interaction;
 import meridian.protocol.InteractionState;
 import meridian.protocol.InteractionSyncData;
 import meridian.protocol.InteractionType;
+import meridian.protocol.MovementStates;
 import meridian.protocol.PlaceBlockInteraction;
+import meridian.protocol.ReplaceInteraction;
 import meridian.protocol.UseBlockInteraction;
 import meridian.protocol.UseEntityInteraction;
 import org.slf4j.Logger;
@@ -32,6 +37,10 @@ import org.slf4j.LoggerFactory;
  *   <li>{@code UseEntityInteraction} — fails (no entity target).</li>
  *   <li>{@code UseBlockInteraction} — fails unless the target block type has an
  *       interaction for the chain's type.</li>
+ *   <li>{@code ConditionInteraction} — fails unless the player's
+ *       {@code MovementStates} match every set flag (server's {@code tick0}).</li>
+ *   <li>{@code ReplaceInteraction} — finishes, then switches the walk to
+ *       operation 0 of the replacement root ({@code context.execute(nextRoot)}).</li>
  *   <li>{@code ChargingInteraction} — finishes, carrying a {@code chargeValue}.</li>
  *   <li>{@code PlaceBlockInteraction} — finishes, carrying the placed block.</li>
  *   <li>everything else — finishes.</li>
@@ -44,11 +53,23 @@ final class InteractionSimulator {
     /** {@code chargeValue} that tells the server's charge {@code tick0} to finish now. */
     private static final float CHARGE_FINISH_NOW = -2.0f;
 
+    /** Resolves a root id to its flattened form — so the walk can follow a
+     * {@code ReplaceInteraction} into the replacement root. */
+    @FunctionalInterface
+    interface RootResolver {
+        /** The compiled replacement root, or {@code null} if unavailable. */
+        CompiledInteraction resolve(int rootId);
+    }
+
     private InteractionSimulator() {}
 
-    /** Simulates {@code compiled} under {@code ctx} into the executed operations. */
-    static List<InteractionSyncData> simulate(CompiledInteraction compiled, InteractionContext ctx) {
+    /** Simulates {@code root} under {@code ctx} into the executed operations. */
+    static List<InteractionSyncData> simulate(CompiledInteraction root, InteractionContext ctx,
+                                              RootResolver resolver) {
         List<InteractionSyncData> executed = new ArrayList<>();
+        CompiledInteraction compiled = root;
+        Set<Integer> visitedRoots = new HashSet<>();
+        visitedRoots.add(compiled.rootId());
         int counter = 0;
         for (int step = 0; step < MAX_STEPS; step++) {
             FlatOp op = compiled.op(counter);
@@ -68,6 +89,18 @@ final class InteractionSimulator {
             InteractionState state = evaluateState(node.interaction(), ctx);
             executed.add(syncDataFor(node, counter, compiled.rootId(), state, ctx));
 
+            // ReplaceInteraction.tick0 runs context.execute(nextRoot) on success —
+            // the chain continues from operation 0 of the replacement root.
+            if (node.interaction() instanceof ReplaceInteraction && state != InteractionState.Failed) {
+                CompiledInteraction next = switchRoot(compiled, ctx, resolver, visitedRoots);
+                if (next != null) {
+                    compiled = next;
+                    counter = 0;
+                    continue;
+                }
+                break; // replacement root unknown — cannot honestly continue
+            }
+
             if (state == InteractionState.Failed && node.labels().length > 0) {
                 counter = node.labels()[0].index; // failed branch
             } else {
@@ -78,6 +111,29 @@ final class InteractionSimulator {
             log.warn("meridian-core: interaction sim hit the step cap (root {})", compiled.rootId());
         }
         return executed;
+    }
+
+    /** Resolves the {@code ReplaceInteraction} target root, guarding against cycles. */
+    private static CompiledInteraction switchRoot(CompiledInteraction current,
+                                                  InteractionContext ctx, RootResolver resolver,
+                                                  Set<Integer> visitedRoots) {
+        int replacement = ctx.replacementRoot();
+        if (replacement == InteractionContext.NO_REPLACEMENT || resolver == null) {
+            log.warn("meridian-core: ReplaceInteraction in root {} but no replacement root known",
+                    current.rootId());
+            return null;
+        }
+        if (!visitedRoots.add(replacement)) {
+            log.warn("meridian-core: ReplaceInteraction would re-enter root {} — stopping",
+                    replacement);
+            return null;
+        }
+        CompiledInteraction next = resolver.resolve(replacement);
+        if (next == null) {
+            log.warn("meridian-core: ReplaceInteraction target root {} not in registry",
+                    replacement);
+        }
+        return next;
     }
 
     /** Ported {@code simulateTick0} outcome for one node. */
@@ -92,12 +148,44 @@ final class InteractionSimulator {
             return hasBlockInteraction(ctx.targetBlockType(), ctx.interactionType())
                     ? InteractionState.Finished : InteractionState.Failed;
         }
+        if (node instanceof ConditionInteraction condition) {
+            // ConditionInteraction.tick0: success unless a set flag mismatches
+            // the player's movement state.
+            return conditionHolds(condition, ctx)
+                    ? InteractionState.Finished : InteractionState.Failed;
+        }
         return InteractionState.Finished;
     }
 
     private static boolean hasBlockInteraction(BlockType blockType, InteractionType type) {
         return blockType != null && blockType.interactions != null
                 && blockType.interactions.containsKey(type);
+    }
+
+    /**
+     * Ported {@code ConditionInteraction.tick0}: each set flag must equal the
+     * matching {@code MovementStates} field. {@code requiredGameMode} is not
+     * tracked proxy-side and is treated as satisfied. With no movement snapshot
+     * the condition is assumed to hold (the server's {@code success = true} default).
+     */
+    private static boolean conditionHolds(ConditionInteraction c, InteractionContext ctx) {
+        MovementStates m = ctx.movementStates();
+        if (m == null) {
+            return true;
+        }
+        if (c.jumping != null && c.jumping != m.jumping) {
+            return false;
+        }
+        if (c.swimming != null && c.swimming != m.swimming) {
+            return false;
+        }
+        if (c.crouching != null && c.crouching != m.crouching) {
+            return false;
+        }
+        if (c.running != null && c.running != m.running) {
+            return false;
+        }
+        return c.flying == null || c.flying == m.flying;
     }
 
     /** Builds the {@code InteractionSyncData} for one executed operation. */

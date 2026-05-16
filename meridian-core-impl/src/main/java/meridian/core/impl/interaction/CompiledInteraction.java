@@ -1,6 +1,10 @@
 package meridian.core.impl.interaction;
 
 import java.util.List;
+import meridian.protocol.BlockConditionInteraction;
+import meridian.protocol.ConditionInteraction;
+import meridian.protocol.Interaction;
+import meridian.protocol.ReplaceInteraction;
 
 /**
  * A root interaction flattened into an indexed operation list — the proxy-side
@@ -41,10 +45,30 @@ record CompiledInteraction(int rootId, List<FlatOp> ops) {
                         }
                         sb.append(']');
                     }
+                    details(sb, n.interaction());
                 }
                 case FlatOp.Jump j -> sb.append("jump -> ").append(j.target().index);
             }
         }
         return sb.toString();
+    }
+
+    /** Appends the decision-relevant fields of a node — what the simulator branches on. */
+    private static void details(StringBuilder sb, Interaction node) {
+        if (node instanceof ConditionInteraction c) {
+            sb.append(" {");
+            if (c.requiredGameMode != null) sb.append(" gameMode=").append(c.requiredGameMode);
+            if (c.jumping != null) sb.append(" jumping=").append(c.jumping);
+            if (c.swimming != null) sb.append(" swimming=").append(c.swimming);
+            if (c.crouching != null) sb.append(" crouching=").append(c.crouching);
+            if (c.running != null) sb.append(" running=").append(c.running);
+            if (c.flying != null) sb.append(" flying=").append(c.flying);
+            sb.append(" }");
+        } else if (node instanceof ReplaceInteraction r) {
+            sb.append(" {var='").append(r.variable).append("' default=#")
+                    .append(r.defaultValue).append('}');
+        } else if (node instanceof BlockConditionInteraction b) {
+            sb.append(" {matchers=").append(b.matchers == null ? 0 : b.matchers.length).append('}');
+        }
     }
 }
