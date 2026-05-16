@@ -48,6 +48,18 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.registerHandler(Direction.C2S, HandlerPosition.NORMAL,
                 (direction, session) -> new ClientObserver(entityTracker, cameraControl));
 
-        ctx.getLogger().info("meridian-core ready (WorldState, EntityTracker, CameraControl)");
+        // --- Interaction-chain forging foundation ----------------------------
+        // InteractionRegistry: server's interaction catalog (UpdateRootInteractions
+        // / UpdateInteractions). InventoryTracker: held items + active slots.
+        InteractionRegistry interactionRegistry = new InteractionRegistry();
+        ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
+                (direction, session) -> new InteractionRegistryObserver(interactionRegistry));
+
+        InventoryTracker inventoryTracker = new InventoryTracker();
+        ctx.registerHandler(Direction.BOTH, HandlerPosition.MONITOR,
+                (direction, session) -> new InventoryObserver(inventoryTracker));
+
+        ctx.getLogger().info("meridian-core ready (WorldState, EntityTracker, CameraControl, "
+                + "InteractionRegistry, InventoryTracker)");
     }
 }

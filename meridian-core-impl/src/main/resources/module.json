@@ -12,7 +12,11 @@
       "ClientMovement",
       "SetServerCamera",
       "SetFlyCameraMode",
-      "RequestFlyCameraMode"
+      "RequestFlyCameraMode",
+      "UpdateRootInteractions",
+      "UpdateInteractions",
+      "UpdatePlayerInventory",
+      "SetActiveSlot"
     ]
   }
 }
