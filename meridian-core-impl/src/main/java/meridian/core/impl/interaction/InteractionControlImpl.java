@@ -3,6 +3,7 @@ package meridian.core.impl.interaction;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -10,8 +11,11 @@ import meridian.api.packet.PacketHandler;
 import meridian.api.session.ProxySession;
 import meridian.core.api.BlockPos;
 import meridian.core.api.InteractionControl;
+import meridian.core.impl.ChunkTracker;
 import meridian.core.impl.InteractionRegistry;
 import meridian.core.impl.InventoryTracker;
+import meridian.core.impl.WorldStateImpl;
+import meridian.protocol.BlockType;
 import meridian.protocol.BlockFace;
 import meridian.protocol.BlockPosition;
 import meridian.protocol.InteractionChainData;
@@ -35,9 +39,12 @@ import org.slf4j.LoggerFactory;
  * root interaction ({@link InteractionFlattener}) and simulating it
  * ({@link InteractionSimulator}).
  *
- * <p>The root interaction id for water / plant is server-specific; it is
- * learned by observing the player's own chains (per {@link InteractionType}).
- * Until the player performs the action once, that forge is skipped with a log.
+ * <p><b>Capture-and-replay.</b> The interaction VM cannot yet derive which
+ * branches a chain takes without world state, so the primary path is to replay
+ * a real {@code initial=true} chain the player performed — observed via
+ * {@link InteractionObserver}, re-sent with a fresh {@code chainId} and the
+ * block retargeted. The VM ({@link InteractionFlattener} +
+ * {@link InteractionSimulator}) is the fallback when no capture exists yet.
  */
 public final class InteractionControlImpl implements InteractionControl {
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
@@ -47,16 +54,25 @@ public final class InteractionControlImpl implements InteractionControl {
 
     private final InteractionRegistry registry;
     private final InventoryTracker inventory;
+    private final ChunkTracker chunks;
+    private final WorldStateImpl worldState;
 
     private volatile ProxySession session;
     private volatile BlockPosition targetBlock;
     private final AtomicInteger chainId = new AtomicInteger(0);
     /** interaction type &rarr; root id, learned from the player's own chains. */
     private final Map<InteractionType, Integer> observedRoot = new ConcurrentHashMap<>();
+    /** interaction type &rarr; last real {@code initial=true} chain, for replay. */
+    private final Map<InteractionType, SyncInteractionChain> capturedChain = new ConcurrentHashMap<>();
+    /** Root ids already dumped to the log (VM-development diagnostics). */
+    private final Set<Integer> dumpedRoots = ConcurrentHashMap.newKeySet();
 
-    public InteractionControlImpl(InteractionRegistry registry, InventoryTracker inventory) {
+    public InteractionControlImpl(InteractionRegistry registry, InventoryTracker inventory,
+                                  ChunkTracker chunks, WorldStateImpl worldState) {
         this.registry = registry;
         this.inventory = inventory;
+        this.chunks = chunks;
+        this.worldState = worldState;
     }
 
     /** Creates the C2S observer that feeds this control — register at MONITOR. */
@@ -78,19 +94,106 @@ public final class InteractionControlImpl implements InteractionControl {
         }
     }
 
-    /** Learns the chainId high-water mark and the root id of each interaction type. */
+    /**
+     * Learns from the player's own chains: the chainId high-water mark, each
+     * interaction type's root id, and — for replay — the last complete
+     * {@code initial=true} chain of each type.
+     */
     void onClientChain(SyncInteractionChain chain) {
         if (chain.chainId > chainId.get()) {
             chainId.set(chain.chainId);
         }
-        if (chain.initial && chain.interactionData != null) {
+        if (chain.initial && chain.interactionData != null && chain.interactionData.length > 0) {
+            boolean firstRoot = true;
             for (InteractionSyncData d : chain.interactionData) {
                 if (d != null) {
-                    observedRoot.put(chain.interactionType, d.rootInteraction);
-                    break;
+                    if (firstRoot) {
+                        observedRoot.put(chain.interactionType, d.rootInteraction);
+                        firstRoot = false;
+                    }
+                    // Dump every distinct root in the chain — ReplaceInteraction
+                    // chains into a second root (e.g. Seed_Condition -> 3385).
+                    dumpRootTree(d.rootInteraction);
                 }
             }
+            capturedChain.put(chain.interactionType, chain);
+            log.info("meridian-core: captured {} chain template ({} ops)",
+                    chain.interactionType, chain.interactionData.length);
+            validateVm(chain);
         }
+    }
+
+    /**
+     * Runs the VM against an observed chain and logs whether it reproduces the
+     * real operation sequence — the capture is the simulator's test oracle.
+     */
+    private void validateVm(SyncInteractionChain captured) {
+        if (captured.data == null || captured.data.blockPosition == null) {
+            return;
+        }
+        Integer rootId = observedRoot.get(captured.interactionType);
+        if (rootId == null) {
+            return;
+        }
+        RootInteraction root = registry.root(rootId).orElse(null);
+        if (root == null) {
+            return;
+        }
+        CompiledInteraction compiled = InteractionFlattener.compile(
+                rootId, root.interactions, id -> registry.interaction(id).orElse(null));
+        InteractionContext ctx = contextFor(captured.interactionType,
+                captured.data.blockPosition, DataKind.BLOCK);
+        List<InteractionSyncData> vm = InteractionSimulator.simulate(compiled, ctx);
+
+        StringBuilder real = new StringBuilder();
+        StringBuilder sim = new StringBuilder();
+        boolean match = true;
+        for (int i = 0; i < captured.interactionData.length; i++) {
+            InteractionSyncData d = captured.interactionData[i];
+            if (d == null) {
+                continue;
+            }
+            real.append(d.operationCounter).append(' ');
+            InteractionSyncData s = i < vm.size() ? vm.get(i) : null;
+            sim.append(s == null ? "_" : s.operationCounter).append(' ');
+            if (s == null || s.operationCounter != d.operationCounter) {
+                match = false;
+            }
+        }
+        log.info("meridian-core: VM check {} root {} — real=[{}] vm=[{}] {}",
+                captured.interactionType, rootId, real.toString().trim(),
+                sim.toString().trim(), match ? "MATCH" : "MISMATCH");
+    }
+
+    /** Builds a simulator context: resolves the target block type via the trackers. */
+    private InteractionContext contextFor(InteractionType type, BlockPosition target,
+                                          DataKind dataKind) {
+        BlockType blockType = null;
+        if (target != null) {
+            int id = chunks.blockIdAt(target.x, target.y, target.z);
+            if (id > 0) {
+                blockType = worldState.blockTypeById(id);
+            }
+        }
+        return dataKind == DataKind.PLACEMENT
+                ? InteractionContext.ofPlacement(type, target, blockType, meridian.protocol.BlockFace.Up)
+                : InteractionContext.ofBlock(type, target, blockType, meridian.protocol.BlockFace.Up);
+    }
+
+    /** Flattens a root once and logs its operation tree — VM-development diagnostics. */
+    private void dumpRootTree(int rootId) {
+        if (!dumpedRoots.add(rootId)) {
+            return;
+        }
+        RootInteraction root = registry.root(rootId).orElse(null);
+        if (root == null) {
+            log.warn("meridian-core: cannot dump root {} — not in registry", rootId);
+            return;
+        }
+        CompiledInteraction compiled = InteractionFlattener.compile(
+                rootId, root.interactions, id -> registry.interaction(id).orElse(null));
+        log.info("meridian-core: VM dump — root '{}' #{}\n{}",
+                root.id, rootId, compiled.describe());
     }
 
     // ------------------------------------------------------------------
@@ -110,7 +213,9 @@ public final class InteractionControlImpl implements InteractionControl {
 
     @Override
     public void useOnBlock(BlockPos pos) {
-        forge(pos, InteractionType.Use, DataKind.NONE);
+        // Harvest interactions are requiresClient — the server waits for per-op
+        // client data, so a bare chain is not enough. Build it via the VM.
+        forge(pos, InteractionType.Use, DataKind.BLOCK);
     }
 
     @Override
@@ -134,6 +239,79 @@ public final class InteractionControlImpl implements InteractionControl {
             return;
         }
 
+        // Chunk-decode verification: block ids around the target.
+        log.info("meridian-core: blocks at ({},{},{}) — target={}, below={}, above={}",
+                pos.x(), pos.y(), pos.z(),
+                chunks.blockIdAt(pos.x(), pos.y(), pos.z()),
+                chunks.blockIdAt(pos.x(), pos.y() - 1, pos.z()),
+                chunks.blockIdAt(pos.x(), pos.y() + 1, pos.z()));
+
+        SyncInteractionChain template = capturedChain.get(type);
+        SyncInteractionChain chain = template != null
+                ? retargetCaptured(template, pos)
+                : buildFromVm(pos, type, dataKind);
+        if (chain == null) {
+            return; // nothing to send yet — reason already logged
+        }
+
+        SyncInteractionChains packet = new SyncInteractionChains();
+        packet.updates = new SyncInteractionChain[] {chain};
+        s.sendToServer(packet);
+        log.info("meridian-core: forged {} chain {} at ({},{},{}) — {}",
+                type, chain.chainId, pos.x(), pos.y(), pos.z(),
+                template != null ? "replay" : "vm");
+    }
+
+    /**
+     * Clones a captured chain, gives it a fresh {@code chainId} and current
+     * inventory state, and retargets every block position onto {@code pos}.
+     */
+    private SyncInteractionChain retargetCaptured(SyncInteractionChain template, BlockPos pos) {
+        SyncInteractionChain c = template.clone();
+        c.chainId = chainId.incrementAndGet();
+        c.activeHotbarSlot = inventory.activeHotbarSlot();
+        c.activeUtilitySlot = inventory.activeUtilitySlot();
+        c.activeToolsSlot = inventory.activeToolsSlot();
+        c.itemInHandId = inventory.itemInHandId();
+        c.utilityItemId = inventory.utilityItemId();
+        c.toolsItemId = inventory.toolsItemId();
+        c.equipSlot = inventory.activeHotbarSlot();
+
+        if (c.data != null) {
+            c.data = c.data.clone();
+            if (c.data.blockPosition != null) {
+                c.data.blockPosition = new BlockPosition(pos.x(), pos.y(), pos.z());
+            }
+        }
+        if (c.interactionData != null) {
+            InteractionSyncData[] ops = new InteractionSyncData[c.interactionData.length];
+            for (int i = 0; i < ops.length; i++) {
+                InteractionSyncData src = c.interactionData[i];
+                if (src == null) {
+                    continue;
+                }
+                ops[i] = src.clone();
+                // Operations that carried a block position targeted the
+                // interacted block — retarget them too. (A placed block sits
+                // one above the soil; replay keeps the captured offset.)
+                if (src.blockPosition != null) {
+                    int dy = src.blockPosition.y - templateTargetY(template);
+                    ops[i].blockPosition = new BlockPosition(pos.x(), pos.y() + dy, pos.z());
+                }
+            }
+            c.interactionData = ops;
+        }
+        return c;
+    }
+
+    /** The y of the block the captured chain originally targeted. */
+    private static int templateTargetY(SyncInteractionChain template) {
+        return template.data != null && template.data.blockPosition != null
+                ? template.data.blockPosition.y : 0;
+    }
+
+    /** Fallback: build the chain from the interaction VM (no capture available). */
+    private SyncInteractionChain buildFromVm(BlockPos pos, InteractionType type, DataKind dataKind) {
         SyncInteractionChain chain = new SyncInteractionChain();
         chain.activeHotbarSlot = inventory.activeHotbarSlot();
         chain.activeUtilitySlot = inventory.activeUtilitySlot();
@@ -160,19 +338,14 @@ public final class InteractionControlImpl implements InteractionControl {
         chain.data = data;
 
         if (dataKind == DataKind.NONE) {
-            chain.interactionData = null; // server self-runs the chain
+            chain.interactionData = null;
         } else {
             chain.interactionData = buildInteractionData(type, dataKind);
             if (chain.interactionData == null) {
-                return; // root not learned yet — logged in buildInteractionData
+                return null; // root not learned yet — logged in buildInteractionData
             }
         }
-
-        SyncInteractionChains packet = new SyncInteractionChains();
-        packet.updates = new SyncInteractionChain[] {chain};
-        s.sendToServer(packet);
-        log.info("meridian-core: forged {} chain {} at ({},{},{})",
-                type, chain.chainId, pos.x(), pos.y(), pos.z());
+        return chain;
     }
 
     /** Flattens + simulates the root for {@code type} into {@code InteractionSyncData[]}. */
@@ -191,11 +364,7 @@ public final class InteractionControlImpl implements InteractionControl {
         CompiledInteraction compiled = InteractionFlattener.compile(
                 rootId, root.interactions, id -> registry.interaction(id).orElse(null));
 
-        BlockPosition target = targetBlock;
-        InteractionContext ctx = dataKind == DataKind.PLACEMENT
-                ? InteractionContext.ofPlacement(target, BlockFace.Up)
-                : InteractionContext.ofBlock(target, BlockFace.Up);
-
+        InteractionContext ctx = contextFor(type, targetBlock, dataKind);
         List<InteractionSyncData> ops = InteractionSimulator.simulate(compiled, ctx);
         log.info("meridian-core: simulated root {} ({} ops) for {}", rootId, ops.size(), type);
         return ops.toArray(new InteractionSyncData[0]);

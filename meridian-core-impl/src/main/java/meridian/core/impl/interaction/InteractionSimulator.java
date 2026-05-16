@@ -3,30 +3,39 @@ package meridian.core.impl.interaction;
 import java.util.ArrayList;
 import java.util.List;
 import meridian.protocol.BlockRotation;
+import meridian.protocol.BlockType;
 import meridian.protocol.ChargingInteraction;
+import meridian.protocol.Interaction;
 import meridian.protocol.InteractionState;
 import meridian.protocol.InteractionSyncData;
+import meridian.protocol.InteractionType;
 import meridian.protocol.PlaceBlockInteraction;
+import meridian.protocol.UseBlockInteraction;
+import meridian.protocol.UseEntityInteraction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Walks a {@link CompiledInteraction} along its success path and produces the
- * {@code InteractionSyncData[]} a forged {@code SyncInteractionChain} carries —
- * the proxy-side port of the server's interaction tick loop.
+ * Walks a {@link CompiledInteraction} and produces the {@code InteractionSyncData[]}
+ * a forged {@code SyncInteractionChain} carries — the proxy-side port of the
+ * server's interaction tick loop.
  *
- * <p>The walk starts at operation 0 and, per {@code Interaction.simulateTick},
- * either falls through to the next operation or follows a {@link FlatOp.Jump}.
- * Each visited {@link FlatOp.Node} is recorded as one {@code InteractionSyncData}
- * whose {@code operationCounter} is its index in the flattened list — exactly
- * what {@code InteractionEntry.setClientState} validates.
+ * <p>Per {@code Interaction.simulateTick}, each operation resolves to a state:
+ * a {@code Finished} operation falls through to the next; a {@code Failed}
+ * operation with a branch label jumps to it (the server's
+ * {@code SimpleInteraction.tick0}: {@code if Failed && hasLabels jump(label0)}).
+ * Each visited operation is recorded as one {@code InteractionSyncData} whose
+ * {@code operationCounter} is its index in the flattened list.
  *
- * <p><b>v1 scope.</b> The success path: every operation is taken to
- * {@code Finished}, so branching nodes fall through to their primary child.
- * Two node types carry data the server's {@code tick0} requires —
- * {@code ChargingInteraction} (a {@code chargeValue}) and
- * {@code PlaceBlockInteraction} (the placed block). Charge / branch-level
- * selection beyond the success path is refined against live captures.
+ * <p><b>Ported node logic.</b>
+ * <ul>
+ *   <li>{@code UseEntityInteraction} — fails (no entity target).</li>
+ *   <li>{@code UseBlockInteraction} — fails unless the target block type has an
+ *       interaction for the chain's type.</li>
+ *   <li>{@code ChargingInteraction} — finishes, carrying a {@code chargeValue}.</li>
+ *   <li>{@code PlaceBlockInteraction} — finishes, carrying the placed block.</li>
+ *   <li>everything else — finishes.</li>
+ * </ul>
  */
 final class InteractionSimulator {
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
@@ -37,12 +46,7 @@ final class InteractionSimulator {
 
     private InteractionSimulator() {}
 
-    /**
-     * Simulates {@code compiled} under {@code ctx}.
-     *
-     * @return the executed operations as {@code InteractionSyncData}, in order;
-     *         empty if the walk produced nothing
-     */
+    /** Simulates {@code compiled} under {@code ctx} into the executed operations. */
     static List<InteractionSyncData> simulate(CompiledInteraction compiled, InteractionContext ctx) {
         List<InteractionSyncData> executed = new ArrayList<>();
         int counter = 0;
@@ -61,8 +65,14 @@ final class InteractionSimulator {
                 continue;
             }
             FlatOp.Node node = (FlatOp.Node) op;
-            executed.add(syncDataFor(node, counter, compiled.rootId(), ctx));
-            counter++; // success path — fall through to the primary child
+            InteractionState state = evaluateState(node.interaction(), ctx);
+            executed.add(syncDataFor(node, counter, compiled.rootId(), state, ctx));
+
+            if (state == InteractionState.Failed && node.labels().length > 0) {
+                counter = node.labels()[0].index; // failed branch
+            } else {
+                counter++; // fall through to the primary child
+            }
         }
         if (executed.size() >= MAX_STEPS) {
             log.warn("meridian-core: interaction sim hit the step cap (root {})", compiled.rootId());
@@ -70,17 +80,36 @@ final class InteractionSimulator {
         return executed;
     }
 
+    /** Ported {@code simulateTick0} outcome for one node. */
+    private static InteractionState evaluateState(Interaction node, InteractionContext ctx) {
+        if (node instanceof UseEntityInteraction) {
+            // Forged chains never target an entity (data.entityId = -1).
+            return InteractionState.Failed;
+        }
+        if (node instanceof UseBlockInteraction) {
+            // doInteraction: fails unless the target block has an interaction
+            // mapped for this interaction type.
+            return hasBlockInteraction(ctx.targetBlockType(), ctx.interactionType())
+                    ? InteractionState.Finished : InteractionState.Failed;
+        }
+        return InteractionState.Finished;
+    }
+
+    private static boolean hasBlockInteraction(BlockType blockType, InteractionType type) {
+        return blockType != null && blockType.interactions != null
+                && blockType.interactions.containsKey(type);
+    }
+
     /** Builds the {@code InteractionSyncData} for one executed operation. */
-    private static InteractionSyncData syncDataFor(FlatOp.Node node, int counter,
-                                                   int rootId, InteractionContext ctx) {
+    private static InteractionSyncData syncDataFor(FlatOp.Node node, int counter, int rootId,
+                                                   InteractionState state, InteractionContext ctx) {
         InteractionSyncData data = new InteractionSyncData();
         data.operationCounter = counter;
         data.rootInteraction = rootId;
-        data.state = InteractionState.Finished;
+        data.state = state;
 
         if (node.interaction() instanceof ChargingInteraction) {
-            // The server's ChargingInteraction.tick0 keys off chargeValue;
-            // -2.0 means "finish the charge immediately".
+            // ChargingInteraction.tick0 keys off chargeValue; -2.0 = finish now.
             data.chargeValue = CHARGE_FINISH_NOW;
         } else if (node.interaction() instanceof PlaceBlockInteraction && ctx.placeBlock() != null) {
             // PlaceBlockInteraction.tick0 requires a non-null blockPosition +

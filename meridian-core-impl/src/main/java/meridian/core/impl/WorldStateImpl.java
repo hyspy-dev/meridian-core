@@ -41,7 +41,7 @@ import org.slf4j.LoggerFactory;
  * <p>v0.1.0 covers the block-type catalog only. {@link #blockTypeAt} and
  * {@link #ghostBlock} need chunk tracking and are not implemented yet.
  */
-final class WorldStateImpl implements WorldState {
+public final class WorldStateImpl implements WorldState {
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
 
     /** How long override changes are gathered before a single emit. */
@@ -73,6 +73,11 @@ final class WorldStateImpl implements WorldState {
         for (Integer id : overrides.keySet()) {
             markDirty(id);
         }
+    }
+
+    /** Raw server-truth block type by id, or {@code null} if unknown — for Layer-1 use. */
+    public BlockType blockTypeById(int id) {
+        return serverTruth.get(id);
     }
 
     @Override

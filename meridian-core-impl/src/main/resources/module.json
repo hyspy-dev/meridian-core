@@ -18,7 +18,11 @@
       "UpdatePlayerInventory",
       "SetActiveSlot",
       "MouseInteraction",
-      "SyncInteractionChains"
+      "SyncInteractionChains",
+      "SetChunk",
+      "ServerSetBlock",
+      "ServerSetBlocks",
+      "UnloadChunk"
     ]
   }
 }

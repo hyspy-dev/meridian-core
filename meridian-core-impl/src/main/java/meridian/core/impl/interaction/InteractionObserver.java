@@ -34,6 +34,11 @@ final class InteractionObserver implements PacketHandler {
             for (SyncInteractionChain chain : chains.updates) {
                 if (chain != null) {
                     control.onClientChain(chain);
+                    // The client does not stream the looked-at block; its own
+                    // interaction chains are the reliable target source.
+                    if (chain.data != null) {
+                        control.onTargetBlock(chain.data.blockPosition);
+                    }
                 }
             }
         }
