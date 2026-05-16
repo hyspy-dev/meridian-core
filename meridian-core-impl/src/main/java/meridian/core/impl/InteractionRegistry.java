@@ -30,7 +30,7 @@ import org.slf4j.LoggerFactory;
  * {@code docs/interaction-chains.md}). Later stages flatten the trees into
  * operation lists and simulate them.
  */
-final class InteractionRegistry {
+public final class InteractionRegistry {
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
 
     /** Root-interaction id &rarr; definition. */
@@ -107,12 +107,12 @@ final class InteractionRegistry {
     }
 
     /** Root interaction by integer id. */
-    Optional<RootInteraction> root(int id) {
+    public Optional<RootInteraction> root(int id) {
         return Optional.ofNullable(roots.get(id));
     }
 
     /** Operation node by integer id. */
-    Optional<Interaction> interaction(int id) {
+    public Optional<Interaction> interaction(int id) {
         return Optional.ofNullable(interactions.get(id));
     }
 

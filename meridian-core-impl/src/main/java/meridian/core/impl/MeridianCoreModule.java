@@ -6,7 +6,9 @@ import meridian.api.packet.Direction;
 import meridian.api.packet.HandlerPosition;
 import meridian.core.api.CameraControl;
 import meridian.core.api.EntityTracker;
+import meridian.core.api.InteractionControl;
 import meridian.core.api.WorldState;
+import meridian.core.impl.interaction.InteractionControlImpl;
 
 /**
  * meridian-core, v0.2.0.
@@ -59,7 +61,14 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.registerHandler(Direction.BOTH, HandlerPosition.MONITOR,
                 (direction, session) -> new InventoryObserver(inventoryTracker));
 
+        // InteractionControl: forges interaction chains via the registry + VM.
+        InteractionControlImpl interactionControl =
+                new InteractionControlImpl(interactionRegistry, inventoryTracker);
+        ctx.services().provide(InteractionControl.class, interactionControl);
+        ctx.registerHandler(Direction.C2S, HandlerPosition.MONITOR,
+                (direction, session) -> interactionControl.newObserver());
+
         ctx.getLogger().info("meridian-core ready (WorldState, EntityTracker, CameraControl, "
-                + "InteractionRegistry, InventoryTracker)");
+                + "InteractionRegistry, InventoryTracker, InteractionControl)");
     }
 }

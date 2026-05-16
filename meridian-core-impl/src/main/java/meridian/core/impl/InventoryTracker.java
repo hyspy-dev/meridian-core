@@ -18,7 +18,7 @@ import org.slf4j.LoggerFactory;
  * tracker is the source for {@code activeHotbarSlot} / {@code itemInHandId} and
  * their utility / tools counterparts.
  */
-final class InventoryTracker {
+public final class InventoryTracker {
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
 
     // SetActiveSlot section ids — protocol constants (Layer-1 absorbs them).
@@ -74,30 +74,30 @@ final class InventoryTracker {
     // Lookup
     // ------------------------------------------------------------------
 
-    int activeHotbarSlot() {
+    public int activeHotbarSlot() {
         return activeHotbarSlot;
     }
 
-    int activeUtilitySlot() {
+    public int activeUtilitySlot() {
         return activeUtilitySlot;
     }
 
-    int activeToolsSlot() {
+    public int activeToolsSlot() {
         return activeToolsSlot;
     }
 
     /** Item id held in the main hand, or {@code null} for an empty hand. */
-    String itemInHandId() {
+    public String itemInHandId() {
         return hotbar.get(activeHotbarSlot);
     }
 
     /** Item id in the active utility slot, or {@code null}. */
-    String utilityItemId() {
+    public String utilityItemId() {
         return utility.get(activeUtilitySlot);
     }
 
     /** Item id in the active tools slot, or {@code null}. */
-    String toolsItemId() {
+    public String toolsItemId() {
         return tools.get(activeToolsSlot);
     }
 

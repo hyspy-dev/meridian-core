@@ -93,6 +93,16 @@ ported one at a time. Farming nodes first (`SimpleBlockInteraction`,
 `ChargingInteraction`, `ChainingInteraction`, `Condition*`, `PlaceBlockInteraction`,
 `FirstClickInteraction`), the rest as consumers need them.
 
+**Known gaps.**
+- **Flattener** — done for every `compile()` override the client receives,
+  *except* `DamageEntityInteraction` (combat: directional / targeted damage
+  branches). It is currently flattened as a leaf, so any chain containing it
+  produces a wrong operation sequence. Porting it unlocks **combat
+  interactions** — a future combat-assist / PvP module (auto-attack, reach,
+  hit prediction). ⬜ todo.
+- **Simulator** — node `simulateTick` ports are incremental; an unported node
+  falls back to a default and is logged.
+
 ### ⬜ InteractionControl
 
 **What.** A high-level service over the VM: `useOnBlock` / `plantOnBlock` /
@@ -119,6 +129,7 @@ transforms, chat, … Each is the same pattern: observe traffic → neutral serv
 | meridian-farmer | ⬜ | ChunkTracker, InteractionControl, InventoryTracker |
 | meridian-world-downloader | ⬜ | ChunkTracker (+ asset capture) |
 | meridian-printer | ⬜ | ChunkTracker, InteractionControl |
+| combat-assist (auto-attack / reach) | ⬜ | InteractionControl + `DamageEntityInteraction` port, EntityTracker |
 
 Each module stays thin. If a module needs logic that other modules could reuse,
 that logic belongs in core.
