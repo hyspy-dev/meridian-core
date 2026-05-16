@@ -1,0 +1,10 @@
+{
+  "name": "meridian-core",
+  "version": "0.1.0",
+  "main": "meridian.core.impl.MeridianCoreModule",
+  "priority": 10,
+  "updateUrl": "https://github.com/hyspy-dev/meridian-core/releases",
+  "requires": {
+    "packets": ["UpdateBlockTypes"]
+  }
+}
