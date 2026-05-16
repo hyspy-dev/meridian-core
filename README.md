@@ -17,16 +17,22 @@ a Hytale protocol update is absorbed here and never reaches them.
 
 ## What it provides
 
-Currently (**v0.1.0**) one real service:
+Currently (**v0.2.0**) three services:
 
 - **`WorldState`** — the block-type catalog. Reads server-truth block types,
   accepts per-type client-view overrides (`overrideBlockType`), and pushes the
   synchronising packet to the client. Backs X-Ray (hide blocks), Night Vision
   (light blocks), jesus-hack (solidify blocks).
+- **`EntityTracker`** — live entity positions and the local player's pose, built
+  from observed `EntityUpdates` / `ClientMovement` / `SetClientId`. Resolves the
+  nearest entity or the entity under the crosshair.
+- **`CameraControl`** — drives the client camera (first/third person, freecam,
+  follow-cam, entity POV) via the same packets Hytale's own server commands use.
+  Backs [meridian-camera-tweaks](../meridian-camera-tweaks).
 
 meridian-core is **consumer-driven**: services are added one at a time when a real
 Layer-2 consumer needs them. The full target catalog (PlayerState, InventoryState,
-EntityRegistry, ChatService, ...) is described in the proxy's
+ChatService, ...) is described in the proxy's
 [architecture doc](../meridian-proxy/docs/architecture.md) — it is *not* built
 up-front.
 
@@ -50,10 +56,13 @@ Drop `meridian-core-impl-*.jar` into the proxy's modules folder. A Layer-2 modul
 consumes it by:
 
 - depending on `meridian-core-api` (`provided`) at compile time;
-- declaring `"dependsOn": { "meridian-core": ">=0.1.0" }` in its `module.json`;
-- calling `ctx.services().require(WorldState.class)` in `onEnable`.
+- declaring `"dependsOn": { "meridian-core": ">=0.2.0" }` in its `module.json`;
+- calling `ctx.services().require(WorldState.class)` (or `EntityTracker` /
+  `CameraControl`) in `onEnable`.
 
-See [meridian-xray](../meridian-xray) for a worked example.
+See [meridian-xray](../meridian-xray) (`WorldState`) and
+[meridian-camera-tweaks](../meridian-camera-tweaks) (`CameraControl` +
+`EntityTracker`) for worked examples.
 
 ## Versioning
 
