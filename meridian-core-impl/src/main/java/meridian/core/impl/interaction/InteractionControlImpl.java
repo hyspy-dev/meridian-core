@@ -3,10 +3,10 @@ package meridian.core.impl.interaction;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 import meridian.api.packet.PacketHandler;
 import meridian.api.session.ProxySession;
 import meridian.core.api.BlockPos;
@@ -14,6 +14,7 @@ import meridian.core.api.InteractionControl;
 import meridian.core.impl.ChunkTracker;
 import meridian.core.impl.InteractionRegistry;
 import meridian.core.impl.InventoryTracker;
+import meridian.core.impl.ItemRegistry;
 import meridian.core.impl.WorldStateImpl;
 import meridian.protocol.BlockType;
 import meridian.protocol.BlockFace;
@@ -40,12 +41,12 @@ import org.slf4j.LoggerFactory;
  * root interaction ({@link InteractionFlattener}) and simulating it
  * ({@link InteractionSimulator}).
  *
- * <p><b>Capture-and-replay.</b> The interaction VM cannot yet derive which
- * branches a chain takes without world state, so the primary path is to replay
- * a real {@code initial=true} chain the player performed — observed via
- * {@link InteractionObserver}, re-sent with a fresh {@code chainId} and the
- * block retargeted. The VM ({@link InteractionFlattener} +
- * {@link InteractionSimulator}) is the fallback when no capture exists yet.
+ * <p><b>Root resolution.</b> The VM entry point — which root interaction to
+ * flatten — and the {@code ReplaceInteraction} variables come from the held
+ * item's {@link ItemRegistry} asset data, exactly as the server resolves them.
+ * Capture-and-replay re-sends a real {@code initial=true} chain the player
+ * performed; {@code observedRoot} keeps it as a fallback when the item catalog
+ * has not been received yet.
  */
 public final class InteractionControlImpl implements InteractionControl {
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
@@ -53,34 +54,43 @@ public final class InteractionControlImpl implements InteractionControl {
     /** What the simulator should build for the chain's {@code interactionData}. */
     private enum DataKind { NONE, BLOCK, PLACEMENT }
 
+    /** Identifies an interaction the player can perform: a type with a held item. */
+    private record ActionKey(InteractionType type, String item) {
+        static ActionKey of(InteractionType type, String item) {
+            return new ActionKey(type, item == null ? "" : item);
+        }
+    }
+
     private final InteractionRegistry registry;
     private final InventoryTracker inventory;
     private final ChunkTracker chunks;
     private final WorldStateImpl worldState;
+    private final ItemRegistry items;
 
     private volatile ProxySession session;
     private volatile BlockPosition targetBlock;
     /** The player's last observed movement state — what {@code ConditionInteraction} tests. */
     private volatile MovementStates movementStates;
-    private final AtomicInteger chainId = new AtomicInteger(0);
-    /** interaction type &rarr; root id, learned from the player's own chains. */
-    private final Map<InteractionType, Integer> observedRoot = new ConcurrentHashMap<>();
-    /** interaction type &rarr; the root a {@code ReplaceInteraction} switched into. */
-    private final Map<InteractionType, Integer> observedReplacement = new ConcurrentHashMap<>();
-    /** interaction type &rarr; last real {@code initial=true} chain, for replay. */
-    private final Map<InteractionType, SyncInteractionChain> capturedChain = new ConcurrentHashMap<>();
+    /** Chain-id NAT: keeps forged chain ids out of the client's counter space. */
+    private final ChainIdNat nat = new ChainIdNat();
+    /** (type, held item) &rarr; root id — a fallback for the {@link ItemRegistry}. */
+    private final Map<ActionKey, Integer> observedRoot = new ConcurrentHashMap<>();
+    /** (type, held item) &rarr; last real {@code initial=true} chain, for replay. */
+    private final Map<ActionKey, SyncInteractionChain> capturedChain = new ConcurrentHashMap<>();
     /** Root ids already dumped to the log (VM-development diagnostics). */
     private final Set<Integer> dumpedRoots = ConcurrentHashMap.newKeySet();
 
     public InteractionControlImpl(InteractionRegistry registry, InventoryTracker inventory,
-                                  ChunkTracker chunks, WorldStateImpl worldState) {
+                                  ChunkTracker chunks, WorldStateImpl worldState,
+                                  ItemRegistry items) {
         this.registry = registry;
         this.inventory = inventory;
         this.chunks = chunks;
         this.worldState = worldState;
+        this.items = items;
     }
 
-    /** Creates the C2S observer that feeds this control — register at MONITOR. */
+    /** Creates the observer + chain-id NAT handler — register at NORMAL, BOTH directions. */
     public PacketHandler newObserver() {
         return new InteractionObserver(this);
     }
@@ -106,38 +116,49 @@ public final class InteractionControlImpl implements InteractionControl {
         }
     }
 
+    /** The chain-id NAT — used by {@link InteractionObserver} to translate traffic. */
+    ChainIdNat nat() {
+        return nat;
+    }
+
     /**
-     * Learns from the player's own chains: the chainId high-water mark, each
-     * interaction type's root id, and — for replay — the last complete
-     * {@code initial=true} chain of each type.
+     * Learns from the player's own chains: the root id for each (type, held
+     * item) — a fallback for the {@link ItemRegistry} — and the last complete
+     * {@code initial=true} chain, for replay.
      */
     void onClientChain(SyncInteractionChain chain) {
-        if (chain.chainId > chainId.get()) {
-            chainId.set(chain.chainId);
+        // Diagnostic: log every chain's walk, including initial=false
+        // continuations — reveals multi-packet charge progressions (water)
+        // that the initial-only capture below cannot see.
+        if (chain.interactionData != null) {
+            StringBuilder ops = new StringBuilder();
+            for (InteractionSyncData d : chain.interactionData) {
+                if (d != null) {
+                    ops.append(d.operationCounter).append('/').append(d.rootInteraction)
+                            .append('=').append(d.state).append(' ');
+                }
+            }
+            log.info("meridian-core: observed {} chain {} initial={} desync={} state={} ops=[{}]",
+                    chain.interactionType, chain.chainId, chain.initial, chain.desync,
+                    chain.state, ops.toString().trim());
         }
         if (chain.initial && chain.interactionData != null && chain.interactionData.length > 0) {
+            ActionKey key = ActionKey.of(chain.interactionType, chain.itemInHandId);
             Integer initialRoot = null;
-            int replacement = InteractionContext.NO_REPLACEMENT;
             for (InteractionSyncData d : chain.interactionData) {
                 if (d != null) {
                     if (initialRoot == null) {
                         initialRoot = d.rootInteraction;
-                        observedRoot.put(chain.interactionType, initialRoot);
-                    } else if (d.rootInteraction != initialRoot
-                            && replacement == InteractionContext.NO_REPLACEMENT) {
-                        // A ReplaceInteraction switched the chain into a second
-                        // root (e.g. Seed_Condition -> 3385).
-                        replacement = d.rootInteraction;
+                        observedRoot.put(key, initialRoot);
                     }
+                    // Dump every distinct root — a ReplaceInteraction chains
+                    // into a second root (e.g. Seed_Condition -> 3385).
                     dumpRootTree(d.rootInteraction);
                 }
             }
-            if (replacement != InteractionContext.NO_REPLACEMENT) {
-                observedReplacement.put(chain.interactionType, replacement);
-            }
-            capturedChain.put(chain.interactionType, chain);
-            log.info("meridian-core: captured {} chain template ({} ops)",
-                    chain.interactionType, chain.interactionData.length);
+            capturedChain.put(key, chain);
+            log.info("meridian-core: captured {} chain template ({} ops, item {})",
+                    chain.interactionType, chain.interactionData.length, chain.itemInHandId);
             validateVm(chain);
         }
     }
@@ -150,7 +171,7 @@ public final class InteractionControlImpl implements InteractionControl {
         if (captured.data == null || captured.data.blockPosition == null) {
             return;
         }
-        Integer rootId = observedRoot.get(captured.interactionType);
+        Integer rootId = observedRoot.get(ActionKey.of(captured.interactionType, captured.itemInHandId));
         if (rootId == null) {
             return;
         }
@@ -158,10 +179,8 @@ public final class InteractionControlImpl implements InteractionControl {
         if (compiled == null) {
             return;
         }
-        // The captured chain itself reveals the ReplaceInteraction target —
-        // the first operation whose root differs from the initial one.
         InteractionContext ctx = contextFor(captured.interactionType,
-                captured.data.blockPosition, DataKind.BLOCK, replacementRootOf(captured));
+                captured.data.blockPosition, DataKind.BLOCK, captured.itemInHandId);
         List<InteractionSyncData> vm = InteractionSimulator.simulate(
                 compiled, ctx, this::compileRoot);
 
@@ -185,9 +204,12 @@ public final class InteractionControlImpl implements InteractionControl {
                 sim.toString().trim(), match ? "MATCH" : "MISMATCH");
     }
 
-    /** Builds a simulator context: resolves the target block type via the trackers. */
+    /**
+     * Builds a simulator context: the target block type from the trackers and
+     * the held item's {@code interactionVars} from the {@link ItemRegistry}.
+     */
     private InteractionContext contextFor(InteractionType type, BlockPosition target,
-                                          DataKind dataKind, int replacementRoot) {
+                                          DataKind dataKind, String itemId) {
         BlockType blockType = null;
         if (target != null) {
             int id = chunks.blockIdAt(target.x, target.y, target.z);
@@ -196,11 +218,12 @@ public final class InteractionControlImpl implements InteractionControl {
             }
         }
         MovementStates movement = movementStates;
+        Map<String, Integer> vars = items.varsFor(itemId);
         return dataKind == DataKind.PLACEMENT
                 ? InteractionContext.ofPlacement(type, target, blockType, BlockFace.Up,
-                        movement, replacementRoot)
+                        movement, vars)
                 : InteractionContext.ofBlock(type, target, blockType, BlockFace.Up,
-                        movement, replacementRoot);
+                        movement, vars);
     }
 
     /** Flattens a registry root into its operation list, or {@code null} if absent. */
@@ -211,22 +234,6 @@ public final class InteractionControlImpl implements InteractionControl {
         }
         return InteractionFlattener.compile(
                 rootId, root.interactions, id -> registry.interaction(id).orElse(null));
-    }
-
-    /** The first operation root in {@code chain} that differs from the initial one. */
-    private static int replacementRootOf(SyncInteractionChain chain) {
-        Integer initial = null;
-        for (InteractionSyncData d : chain.interactionData) {
-            if (d == null) {
-                continue;
-            }
-            if (initial == null) {
-                initial = d.rootInteraction;
-            } else if (d.rootInteraction != initial) {
-                return d.rootInteraction;
-            }
-        }
-        return InteractionContext.NO_REPLACEMENT;
     }
 
     /** Flattens a root once and logs its operation tree — VM-development diagnostics. */
@@ -294,10 +301,11 @@ public final class InteractionControlImpl implements InteractionControl {
                 chunks.blockIdAt(pos.x(), pos.y() - 1, pos.z()),
                 chunks.blockIdAt(pos.x(), pos.y() + 1, pos.z()));
 
-        SyncInteractionChain template = capturedChain.get(type);
+        String itemId = inventory.itemInHandId();
+        SyncInteractionChain template = capturedChain.get(ActionKey.of(type, itemId));
         SyncInteractionChain chain = template != null
                 ? retargetCaptured(template, pos)
-                : buildFromVm(pos, type, dataKind);
+                : buildFromVm(pos, type, dataKind, itemId);
         if (chain == null) {
             return; // nothing to send yet — reason already logged
         }
@@ -316,7 +324,7 @@ public final class InteractionControlImpl implements InteractionControl {
      */
     private SyncInteractionChain retargetCaptured(SyncInteractionChain template, BlockPos pos) {
         SyncInteractionChain c = template.clone();
-        c.chainId = chainId.incrementAndGet();
+        c.chainId = nat.allocateForged();
         c.activeHotbarSlot = inventory.activeHotbarSlot();
         c.activeUtilitySlot = inventory.activeUtilitySlot();
         c.activeToolsSlot = inventory.activeToolsSlot();
@@ -359,7 +367,8 @@ public final class InteractionControlImpl implements InteractionControl {
     }
 
     /** Fallback: build the chain from the interaction VM (no capture available). */
-    private SyncInteractionChain buildFromVm(BlockPos pos, InteractionType type, DataKind dataKind) {
+    private SyncInteractionChain buildFromVm(BlockPos pos, InteractionType type,
+                                             DataKind dataKind, String itemId) {
         SyncInteractionChain chain = new SyncInteractionChain();
         chain.activeHotbarSlot = inventory.activeHotbarSlot();
         chain.activeUtilitySlot = inventory.activeUtilitySlot();
@@ -372,7 +381,7 @@ public final class InteractionControlImpl implements InteractionControl {
         chain.overrideRootInteraction = Integer.MIN_VALUE;
         chain.interactionType = type;
         chain.equipSlot = inventory.activeHotbarSlot();
-        chain.chainId = chainId.incrementAndGet();
+        chain.chainId = nat.allocateForged();
         chain.forkedId = null;
         chain.state = InteractionState.Finished;
         chain.newForks = null;
@@ -388,33 +397,47 @@ public final class InteractionControlImpl implements InteractionControl {
         if (dataKind == DataKind.NONE) {
             chain.interactionData = null;
         } else {
-            chain.interactionData = buildInteractionData(type, dataKind);
+            chain.interactionData = buildInteractionData(type, dataKind, itemId);
             if (chain.interactionData == null) {
-                return null; // root not learned yet — logged in buildInteractionData
+                return null; // root unresolved — logged in buildInteractionData
             }
         }
         return chain;
     }
 
-    /** Flattens + simulates the root for {@code type} into {@code InteractionSyncData[]}. */
-    private InteractionSyncData[] buildInteractionData(InteractionType type, DataKind dataKind) {
-        Integer rootId = observedRoot.get(type);
-        if (rootId == null) {
-            log.warn("meridian-core: no observed root for {} yet — perform the action "
-                    + "once manually so core can learn it", type);
+    /** Flattens + simulates the root for (type, held item) into {@code InteractionSyncData[]}. */
+    private InteractionSyncData[] buildInteractionData(InteractionType type, DataKind dataKind,
+                                                       String itemId) {
+        OptionalInt rootId = resolveRoot(type, itemId);
+        if (rootId.isEmpty()) {
+            log.warn("meridian-core: no root for {} with item {} — item catalog not "
+                    + "received, or perform the action once manually", type, itemId);
             return null;
         }
-        CompiledInteraction compiled = compileRoot(rootId);
+        CompiledInteraction compiled = compileRoot(rootId.getAsInt());
         if (compiled == null) {
-            log.warn("meridian-core: root {} not in registry", rootId);
+            log.warn("meridian-core: root {} not in registry", rootId.getAsInt());
             return null;
         }
 
-        int replacement = observedReplacement.getOrDefault(type, InteractionContext.NO_REPLACEMENT);
-        InteractionContext ctx = contextFor(type, targetBlock, dataKind, replacement);
+        InteractionContext ctx = contextFor(type, targetBlock, dataKind, itemId);
         List<InteractionSyncData> ops = InteractionSimulator.simulate(
                 compiled, ctx, this::compileRoot);
-        log.info("meridian-core: simulated root {} ({} ops) for {}", rootId, ops.size(), type);
+        log.info("meridian-core: simulated root {} ({} ops) for {} item {}",
+                rootId.getAsInt(), ops.size(), type, itemId);
         return ops.toArray(new InteractionSyncData[0]);
+    }
+
+    /**
+     * The VM entry-point root: the held item's asset binding ({@link ItemRegistry}),
+     * or the chain observed for this (type, item) when the catalog is not in yet.
+     */
+    private OptionalInt resolveRoot(InteractionType type, String itemId) {
+        OptionalInt fromItem = items.rootFor(itemId, type);
+        if (fromItem.isPresent()) {
+            return fromItem;
+        }
+        Integer observed = observedRoot.get(ActionKey.of(type, itemId));
+        return observed == null ? OptionalInt.empty() : OptionalInt.of(observed);
     }
 }

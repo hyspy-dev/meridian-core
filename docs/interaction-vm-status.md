@@ -42,7 +42,15 @@ the fix to take effect.
 Finished/Failed → fall through or jump to the failed label) → `InteractionSyncData[]`.
 
 `InteractionContext` feeds the simulator: chain `interactionType`, target block,
-the target's `BlockType` (resolved `ChunkTracker.blockIdAt` → `WorldStateImpl.blockTypeById`).
+the target's `BlockType` (resolved `ChunkTracker.blockIdAt` → `WorldStateImpl.blockTypeById`),
+the player's `MovementStates`, and the held item's `interactionVars`.
+
+**Root resolution.** The VM entry point — which root to flatten — comes from
+the held item's asset binding: `ItemRegistry` mirrors `UpdateItems` (pkt 54) and
+`UpdateUnarmedInteractions`, so `ItemBase.interactions[type]` gives the root and
+`ItemBase.interactionVars` resolves `ReplaceInteraction`. No manual action is
+needed first; `observedRoot` (keyed by `(type, held item)`) is only a fallback
+for before the item catalog arrives.
 
 **Ported node logic** (`InteractionSimulator.evaluateState`):
 - `UseEntityInteraction` → `Failed` (forged chains have no entity target).
@@ -54,8 +62,8 @@ the target's `BlockType` (resolved `ChunkTracker.blockIdAt` → `WorldStateImpl.
   proxy-side and is treated as satisfied. No movement snapshot → `Finished`.
 - `ReplaceInteraction` → `Finished`, then the walk switches to operation 0 of
   the replacement root (server's `context.execute(nextRoot)`). The replacement
-  root is learned from observed chains (`observedReplacement`, keyed by type);
-  the VM self-check derives it from the captured chain's own op roots.
+  root is resolved exactly as the server does — `interactionVars.get(node.var)`
+  from the held item's `ItemRegistry` entry, else the node's `defaultValue`.
 - `ChargingInteraction` → `Finished`, carries `chargeValue = -2.0`.
 - `PlaceBlockInteraction` → `Finished`, carries the placed block.
 - everything else → `Finished`.
@@ -112,28 +120,48 @@ Two paths in `InteractionControlImpl.forge`:
 
 `forge` currently prefers the captured template, VM is the fallback.
 
+## chainId NAT
+
+`ChainIdNat` removes the forge/player chainId race. The proxy owns one
+server-side chainId space; `InteractionObserver` (now NORMAL, `BOTH`
+directions) rewrites every interaction `chainId`:
+
+- **C2S** — each real client chain id maps to a stable server-side id
+  (`toServer`; continuations reuse it). Identity until the first forge — no
+  re-serialization cost while idle.
+- **forge** — `allocateForged()` draws a fresh id from the same monotonic
+  counter, slotting cleanly between the player's ids.
+- **S2C** — ids are translated back (`toClient`); a chain the proxy forged
+  (`isForged`) is dropped from the packet before it reaches the client.
+
+Also translated: `CancelInteractionChain` (both directions) and nested
+`newForks`. `forkedId` is a structural index (`entryIndex`/`subIndex`), not a
+chainId — left alone. `PlayInteractionFor` carries other entities' chain ids
+(not in the NAT maps) — left alone.
+
 ## Next steps
 
 1. ~~Port water + plant node `simulateTick0`.~~ ✅ done — harvest / water / plant
    all `VM check ... MATCH`.
-2. chainId NAT — forged chains bump the shared counter; currently safe only while
-   the player is idle. Needed before an autonomous farmer.
-3. Then `meridian-farmer` (Layer-2): scan crops via `ChunkTracker`, drive
+2. ~~chainId NAT.~~ ✅ done — `ChainIdNat`, forged ids never collide with the
+   player's counter.
+3. ~~Resolve roots without a prior manual action.~~ ✅ done — `ItemRegistry`
+   reads `UpdateItems` / `UpdateUnarmedInteractions`; root + `interactionVars`
+   come from the held item's asset data.
+4. `meridian-farmer` (Layer-2): scan crops via `ChunkTracker`, drive
    `InteractionControl`.
-4. Optional honest-port polish: `BlockConditionInteraction` matchers,
+5. Optional honest-port polish: `BlockConditionInteraction` matchers,
    `SimpleBlockInteraction` air/chunk checks, `ChargingInteraction` charge
    branches — currently catch-all `Finished`, which matched every observed
    path but is not the full node logic.
 
 ## Open risks / gotchas
 
-- **chainId race** — `InteractionControl` increments one counter; the real client
-  has its own. Forging while the player interacts can desync. NAT not built yet.
 - **Bare `interactionData = null` does not work** — harvest is `requiresClient`;
   the server waits for per-op client data. Every forge needs a populated
   `interactionData` (VM or replay).
-- **VM root** — the VM needs `observedRoot` learned from one real interaction of
-  that type. Resolving roots by name from the registry would remove that.
+- **Capture-replay key** — `capturedChain` / `observedRoot` are keyed by
+  `(type, held item)`, so water and plant (both `Secondary`) no longer collide.
 - **Memory** — `ChunkTracker` keeps `int[32768]` per section (~128 KB each); fine
   for now, may need the compact palette form later.
 

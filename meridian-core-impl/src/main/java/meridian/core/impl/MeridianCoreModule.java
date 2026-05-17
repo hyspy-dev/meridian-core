@@ -66,14 +66,23 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
                 (direction, session) -> new ChunkObserver(chunkTracker));
 
+        // ItemRegistry: item asset catalog — interaction roots + interactionVars.
+        ItemRegistry itemRegistry = new ItemRegistry();
+        ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
+                (direction, session) -> new ItemRegistryObserver(itemRegistry));
+
         // InteractionControl: forges interaction chains via the registry + VM.
+        // The observer runs at NORMAL in BOTH directions — it not only observes
+        // but rewrites interaction chain ids (the chain-id NAT), so forged
+        // chains never collide with the player's own counter.
         InteractionControlImpl interactionControl = new InteractionControlImpl(
-                interactionRegistry, inventoryTracker, chunkTracker, worldState);
+                interactionRegistry, inventoryTracker, chunkTracker, worldState, itemRegistry);
         ctx.services().provide(InteractionControl.class, interactionControl);
-        ctx.registerHandler(Direction.C2S, HandlerPosition.MONITOR,
+        ctx.registerHandler(Direction.BOTH, HandlerPosition.NORMAL,
                 (direction, session) -> interactionControl.newObserver());
 
         ctx.getLogger().info("meridian-core ready (WorldState, EntityTracker, CameraControl, "
-                + "InteractionRegistry, InventoryTracker, ChunkTracker, InteractionControl)");
+                + "InteractionRegistry, InventoryTracker, ChunkTracker, ItemRegistry, "
+                + "InteractionControl)");
     }
 }

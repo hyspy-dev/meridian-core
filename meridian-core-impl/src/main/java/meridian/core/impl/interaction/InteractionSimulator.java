@@ -3,6 +3,7 @@ package meridian.core.impl.interaction;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import meridian.protocol.BlockRotation;
 import meridian.protocol.BlockType;
@@ -91,8 +92,9 @@ final class InteractionSimulator {
 
             // ReplaceInteraction.tick0 runs context.execute(nextRoot) on success —
             // the chain continues from operation 0 of the replacement root.
-            if (node.interaction() instanceof ReplaceInteraction && state != InteractionState.Failed) {
-                CompiledInteraction next = switchRoot(compiled, ctx, resolver, visitedRoots);
+            if (node.interaction() instanceof ReplaceInteraction replace
+                    && state != InteractionState.Failed) {
+                CompiledInteraction next = switchRoot(replace, compiled, ctx, resolver, visitedRoots);
                 if (next != null) {
                     compiled = next;
                     counter = 0;
@@ -113,13 +115,23 @@ final class InteractionSimulator {
         return executed;
     }
 
-    /** Resolves the {@code ReplaceInteraction} target root, guarding against cycles. */
-    private static CompiledInteraction switchRoot(CompiledInteraction current,
+    /**
+     * Resolves the {@code ReplaceInteraction} target root — the server's
+     * {@code doReplace}: {@code interactionVars.get(var)}, else {@code defaultValue}.
+     * Guards against cycles.
+     */
+    private static CompiledInteraction switchRoot(ReplaceInteraction node,
+                                                  CompiledInteraction current,
                                                   InteractionContext ctx, RootResolver resolver,
                                                   Set<Integer> visitedRoots) {
-        int replacement = ctx.replacementRoot();
-        if (replacement == InteractionContext.NO_REPLACEMENT || resolver == null) {
-            log.warn("meridian-core: ReplaceInteraction in root {} but no replacement root known",
+        Map<String, Integer> vars = ctx.interactionVars();
+        Integer replacement = (vars != null && node.variable != null)
+                ? vars.get(node.variable) : null;
+        if (replacement == null) {
+            replacement = node.defaultValue; // server's doReplace fallback
+        }
+        if (resolver == null) {
+            log.warn("meridian-core: ReplaceInteraction in root {} but no root resolver",
                     current.rootId());
             return null;
         }

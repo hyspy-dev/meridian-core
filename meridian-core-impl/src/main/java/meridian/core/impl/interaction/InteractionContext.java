@@ -1,5 +1,6 @@
 package meridian.core.impl.interaction;
 
+import java.util.Map;
 import meridian.protocol.BlockFace;
 import meridian.protocol.BlockPosition;
 import meridian.protocol.BlockType;
@@ -23,9 +24,9 @@ import meridian.protocol.MovementStates;
  * @param movementStates  the player's last observed {@code MovementStates} —
  *                        what {@code ConditionInteraction} tests — or
  *                        {@code null} if none has been seen yet
- * @param replacementRoot the root a {@code ReplaceInteraction} switches to
- *                        ({@code context.execute(nextRoot)}), or
- *                        {@link #NO_REPLACEMENT} when unknown
+ * @param interactionVars the held item's interaction variables — what
+ *                        {@code ReplaceInteraction} resolves its replacement
+ *                        root against (the server's {@code getInteractionVars})
  */
 record InteractionContext(InteractionType interactionType,
                           BlockPosition targetBlock,
@@ -34,26 +35,21 @@ record InteractionContext(InteractionType interactionType,
                           BlockFace blockFace,
                           int placedBlockId,
                           MovementStates movementStates,
-                          int replacementRoot) {
-
-    /** {@code replacementRoot} sentinel: no {@code ReplaceInteraction} target known. */
-    static final int NO_REPLACEMENT = Integer.MIN_VALUE;
+                          Map<String, Integer> interactionVars) {
 
     /** Context for a plain block interaction (harvest / use) — no placement. */
     static InteractionContext ofBlock(InteractionType type, BlockPosition block,
                                       BlockType blockType, BlockFace face,
-                                      MovementStates movement, int replacementRoot) {
-        return new InteractionContext(type, block, blockType, null, face, -1,
-                movement, replacementRoot);
+                                      MovementStates movement, Map<String, Integer> vars) {
+        return new InteractionContext(type, block, blockType, null, face, -1, movement, vars);
     }
 
     /** Context for a block-placing interaction (plant) — block lands at {@code y + 1}. */
     static InteractionContext ofPlacement(InteractionType type, BlockPosition soil,
                                           BlockType soilType, BlockFace face,
-                                          MovementStates movement, int replacementRoot) {
+                                          MovementStates movement, Map<String, Integer> vars) {
         BlockPosition above = soil == null ? null
                 : new BlockPosition(soil.x, soil.y + 1, soil.z);
-        return new InteractionContext(type, soil, soilType, above, face, -1,
-                movement, replacementRoot);
+        return new InteractionContext(type, soil, soilType, above, face, -1, movement, vars);
     }
 }
