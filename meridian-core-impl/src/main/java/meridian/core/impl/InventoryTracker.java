@@ -56,6 +56,21 @@ public final class InventoryTracker {
         }
     }
 
+    /**
+     * Observes the active slots an interaction chain carries.
+     *
+     * <p>The client never sends a standalone {@code SetActiveSlot} for the
+     * hotbar — the server disconnects a client that does
+     * ({@code hotbarChangeWithoutInteraction}). The hotbar slot reaches the
+     * server only as the {@code activeHotbarSlot} field of interaction packets,
+     * so the player's own chains are the one reliable mirror of it.
+     */
+    public void observeActiveSlots(int hotbar, int utility, int tools) {
+        activeHotbarSlot = hotbar;
+        activeUtilitySlot = utility;
+        activeToolsSlot = tools;
+    }
+
     /** Replaces {@code dst} with the contents of {@code section} (if present). */
     private static void load(InventorySection section, Map<Integer, String> dst) {
         if (section == null || section.items == null) {

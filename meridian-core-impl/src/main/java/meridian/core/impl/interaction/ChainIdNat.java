@@ -2,6 +2,8 @@ package meridian.core.impl.interaction;
 
 import java.util.HashMap;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Chain-id NAT for forged interaction chains.
@@ -32,6 +34,8 @@ import java.util.Map;
  * while forging is driven from a module thread.
  */
 final class ChainIdNat {
+    private static final Logger log = LoggerFactory.getLogger("meridian-core");
+
     /** {@code server2client} marker for an id the proxy forged itself. */
     private static final Integer FORGED = Integer.MIN_VALUE;
 
@@ -56,14 +60,23 @@ final class ChainIdNat {
             s = ++highestServerId;
             client2server.put(clientChainId, s);
             server2client.put(s, clientChainId);
+            log.info("meridian-core: NAT map client {} -> server {} (highest={})",
+                    clientChainId, s, highestServerId);
         }
         return s;
     }
 
     /** Allocates a fresh server-side id for a forged chain. */
     synchronized int allocateForged() {
+        // Forging before any client chain was seen means the player has not
+        // interacted yet this session — their counter is still at 0, so the
+        // first forged id (1) is safe, and the next real chain maps above it.
+        boolean wasFresh = !initialised;
+        initialised = true;
         int s = ++highestServerId;
         server2client.put(s, FORGED);
+        log.info("meridian-core: NAT allocate forged server {} (highest={}, freshStart={})",
+                s, highestServerId, wasFresh);
         return s;
     }
 

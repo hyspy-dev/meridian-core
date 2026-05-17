@@ -11,6 +11,8 @@ import meridian.protocol.packets.interaction.SyncInteractionChain;
 import meridian.protocol.packets.interaction.SyncInteractionChains;
 import meridian.protocol.packets.player.ClientMovement;
 import meridian.protocol.packets.player.MouseInteraction;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * NORMAL-position {@code BOTH}-direction handler feeding {@link InteractionControlImpl}
@@ -27,6 +29,8 @@ import meridian.protocol.packets.player.MouseInteraction;
  * back to the client — the client never created it.
  */
 final class InteractionObserver implements PacketHandler {
+    private static final Logger log = LoggerFactory.getLogger("meridian-core");
+
     private final InteractionControlImpl control;
 
     InteractionObserver(InteractionControlImpl control) {
@@ -63,6 +67,8 @@ final class InteractionObserver implements PacketHandler {
             return changed ? Action.MODIFIED : Action.FORWARD;
         } else if (packet instanceof CancelInteractionChain cancel) {
             int translated = control.nat().toServer(cancel.chainId);
+            log.info("meridian-core: NAT C2S cancel chain client={} -> server={}",
+                    cancel.chainId, translated);
             if (translated != cancel.chainId) {
                 cancel.chainId = translated;
                 return Action.MODIFIED;
@@ -75,6 +81,8 @@ final class InteractionObserver implements PacketHandler {
     private boolean translateC2S(SyncInteractionChain chain) {
         boolean changed = false;
         int translated = control.nat().toServer(chain.chainId);
+        log.info("meridian-core: NAT C2S {} chain client={} -> server={} (initial={})",
+                chain.interactionType, chain.chainId, translated, chain.initial);
         if (translated != chain.chainId) {
             chain.chainId = translated;
             changed = true;
@@ -105,10 +113,16 @@ final class InteractionObserver implements PacketHandler {
                 if (control.nat().isForged(chain.chainId)) {
                     // The server's echo of a chain the proxy forged — the real
                     // client never created it, so it must not see it.
+                    log.info("meridian-core: NAT S2C dropped forged chain server={} (initial={})",
+                            chain.chainId, chain.initial);
                     changed = true;
                     continue;
                 }
-                changed |= translateS2C(chain);
+                int before = chain.chainId;
+                boolean chg = translateS2C(chain);
+                log.info("meridian-core: NAT S2C {} chain server={} -> client={} (initial={})",
+                        chain.interactionType, before, chain.chainId, chain.initial);
+                changed |= chg;
                 kept.add(chain);
             }
             if (kept.isEmpty()) {
@@ -120,9 +134,13 @@ final class InteractionObserver implements PacketHandler {
             }
         } else if (packet instanceof CancelInteractionChain cancel) {
             if (control.nat().isForged(cancel.chainId)) {
+                log.info("meridian-core: NAT S2C dropped cancel for forged chain server={}",
+                        cancel.chainId);
                 return Action.DROP;
             }
             int translated = control.nat().toClient(cancel.chainId);
+            log.info("meridian-core: NAT S2C cancel chain server={} -> client={}",
+                    cancel.chainId, translated);
             if (translated != cancel.chainId) {
                 cancel.chainId = translated;
                 return Action.MODIFIED;

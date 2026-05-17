@@ -110,13 +110,23 @@ C2S chains (`observedRoot` map, keyed by `InteractionType`).
 
 ## Capture-replay vs VM
 
-Two paths in `InteractionControlImpl.forge`:
-- **Capture-replay** — re-sends a real `initial=true` chain the player performed,
-  with a fresh `chainId` and retargeted block. Proven in-game for harvest.
-  Per-action-kind; multi-packet chains (water) are not yet captured whole.
-- **VM** (`buildFromVm`) — flatten + simulate. Validated for harvest. Used as the
-  fallback when no capture exists. Needs `observedRoot` populated (one observed
-  interaction of that type).
+Two paths in `InteractionControlImpl.forge`, both multi-packet:
+- **VM** (`buildFromVm`) — flatten + simulate the walk, then `splitPackets`
+  chunks it into the C2S packets a real client sends. An operation a node
+  leaves `NotFinished` (`PlaceBlockInteraction` — its `simulateTick0` never
+  finishes on the first run) ends a packet; the next packet re-sends it
+  `Finished` (the server's `NotFinished` → `Finished` handshake). Harvest stays
+  one packet; plant is opener + continuation. Each packet carries its
+  `operationBaseIndex` — the server reads op `i` as chain index
+  `operationBaseIndex + i`, so a continuation must resume from its real index
+  (plant's continuation: 2), not 0. Used when no capture exists.
+- **Capture-replay** — re-sends the real chain *sequence* the player performed
+  (buffered by client chainId until the terminal chain, `state != NotFinished`),
+  with a fresh forged `chainId` and retargeted block. The fallback / oracle.
+
+Both forge into a `SyncInteractionChain[]` sent as one `SyncInteractionChains`.
+Water's charge path is still not reached by the VM walk (op 5 never fails) —
+replay a real full water to forge it until the charge nodes are ported.
 
 `forge` currently prefers the captured template, VM is the fallback.
 
@@ -130,7 +140,10 @@ directions) rewrites every interaction `chainId`:
   (`toServer`; continuations reuse it). Identity until the first forge — no
   re-serialization cost while idle.
 - **forge** — `allocateForged()` draws a fresh id from the same monotonic
-  counter, slotting cleanly between the player's ids.
+  counter, slotting cleanly between the player's ids. A forge before any client
+  chain (fresh session, `ItemRegistry` removed the need to interact first)
+  marks the NAT initialised so the forge takes id 1 and the player's first real
+  chain maps above it — without this they both mapped to 1 and collided.
 - **S2C** — ids are translated back (`toClient`); a chain the proxy forged
   (`isForged`) is dropped from the packet before it reaches the client.
 
@@ -162,6 +175,11 @@ chainId — left alone. `PlayInteractionFor` carries other entities' chain ids
   `interactionData` (VM or replay).
 - **Capture-replay key** — `capturedChain` / `observedRoot` are keyed by
   `(type, held item)`, so water and plant (both `Secondary`) no longer collide.
+- **Hotbar slot** — the client never sends a standalone `SetActiveSlot` for the
+  hotbar (the server disconnects `hotbarChangeWithoutInteraction`); the slot
+  reaches the server only as `SyncInteractionChain.activeHotbarSlot`.
+  `InventoryTracker.observeActiveSlots` mirrors it from the player's own chains,
+  so a forge mid-session uses the slot from the last observed interaction.
 - **Memory** — `ChunkTracker` keeps `int[32768]` per section (~128 KB each); fine
   for now, may need the compact palette form later.
 

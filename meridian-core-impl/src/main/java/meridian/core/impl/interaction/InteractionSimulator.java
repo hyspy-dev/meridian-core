@@ -16,6 +16,7 @@ import meridian.protocol.InteractionType;
 import meridian.protocol.MovementStates;
 import meridian.protocol.PlaceBlockInteraction;
 import meridian.protocol.ReplaceInteraction;
+import meridian.protocol.SimpleBlockInteraction;
 import meridian.protocol.UseBlockInteraction;
 import meridian.protocol.UseEntityInteraction;
 import org.slf4j.Logger;
@@ -166,7 +167,53 @@ final class InteractionSimulator {
             return conditionHolds(condition, ctx)
                     ? InteractionState.Finished : InteractionState.Failed;
         }
+        if (node instanceof PlaceBlockInteraction) {
+            // PlaceBlockInteraction.simulateTick0 never finishes the op on its
+            // first run — the server must place the block and confirm it. The
+            // op stays NotFinished until a continuation packet (see splitPackets).
+            return InteractionState.NotFinished;
+        }
         return InteractionState.Finished;
+    }
+
+    /**
+     * One C2S packet of a forged chain: its operations and the flat operation
+     * index they start at. The server reads {@code operationBaseIndex + i} as
+     * each operation's position in the chain, so a continuation packet must
+     * carry the index it resumes from — not 0.
+     *
+     * @param baseIndex the chain operation index of {@code ops[0]}
+     * @param ops       the operations carried by this packet
+     */
+    record Packet(int baseIndex, List<InteractionSyncData> ops) {}
+
+    /**
+     * Splits a walk into the C2S packets a real client sends. An operation that
+     * a node leaves {@code NotFinished} (a {@code PlaceBlockInteraction}, a
+     * water charge) ends a packet; the next packet re-sends that operation as
+     * {@code Finished} — the server's {@code NotFinished} &rarr; {@code Finished}
+     * handshake — and carries on with the operations after it. Each packet
+     * records the flat operation index it begins at.
+     */
+    static List<Packet> splitPackets(List<InteractionSyncData> walk) {
+        List<Packet> packets = new ArrayList<>();
+        List<InteractionSyncData> current = new ArrayList<>();
+        int packetStart = 0;
+        for (int j = 0; j < walk.size(); j++) {
+            InteractionSyncData op = walk.get(j);
+            current.add(op);
+            if (op.state == InteractionState.NotFinished) {
+                packets.add(new Packet(packetStart, current));
+                // The continuation re-sends this operation (flat index j) as Finished.
+                current = new ArrayList<>();
+                InteractionSyncData confirmed = op.clone();
+                confirmed.state = InteractionState.Finished;
+                current.add(confirmed);
+                packetStart = j;
+            }
+        }
+        packets.add(new Packet(packetStart, current));
+        return packets;
     }
 
     private static boolean hasBlockInteraction(BlockType blockType, InteractionType type) {
@@ -211,13 +258,19 @@ final class InteractionSimulator {
         if (node.interaction() instanceof ChargingInteraction) {
             // ChargingInteraction.tick0 keys off chargeValue; -2.0 = finish now.
             data.chargeValue = CHARGE_FINISH_NOW;
-        } else if (node.interaction() instanceof PlaceBlockInteraction && ctx.placeBlock() != null) {
+        } else if (node.interaction() instanceof PlaceBlockInteraction place && ctx.placeBlock() != null) {
             // PlaceBlockInteraction.tick0 requires a non-null blockPosition +
-            // blockRotation and reads blockFace.
+            // blockRotation and reads blockFace; placedBlockId is the node's
+            // own block (server falls back to the held item's block at -1).
             data.blockPosition = ctx.placeBlock();
             data.blockRotation = new BlockRotation();
             data.blockFace = ctx.blockFace();
-            data.placedBlockId = ctx.placedBlockId();
+            data.placedBlockId = place.blockId;
+        } else if (node.interaction() instanceof SimpleBlockInteraction && ctx.targetBlock() != null) {
+            // SimpleBlockInteraction.simulateTick0 records the target block and
+            // an Up face — BlockConditionInteraction's matchers test that face.
+            data.blockPosition = ctx.targetBlock();
+            data.blockFace = ctx.blockFace();
         }
         return data;
     }
