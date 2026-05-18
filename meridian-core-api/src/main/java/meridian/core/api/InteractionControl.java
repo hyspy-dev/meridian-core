@@ -44,30 +44,6 @@ public interface InteractionControl {
      */
     void switchHotbarSlot(int slot);
 
-    /**
-     * Full planting cycle: finds seeds in the hotbar, switches to that slot,
-     * plants on every tilled-soil block within {@code radius} of the player
-     * that has space above, then switches the hotbar back. Returns the number
-     * of blocks planted.
-     */
-    int plantNearby(int radius);
-
-    /**
-     * Forges a {@code Use} (harvest) on every crop within {@code radius} of the
-     * player — a non-air block sitting on tilled soil. Returns the number of
-     * blocks harvested. Growth stage is not checked.
-     */
-    int harvestNearby(int radius);
-
-    /**
-     * Waters every tilled-soil block within {@code radius} of the player:
-     * switches to the watering can, replays the captured watering chain on each
-     * block (paced, one after another), then switches the hotbar back. Requires
-     * a watering can in the hotbar and one watering performed manually first
-     * (the charge is replay-only). Returns the number of blocks watered.
-     */
-    int waterNearby(int radius);
-
     /** {@code true} once a client session is live and packets can be sent. */
     boolean available();
 }

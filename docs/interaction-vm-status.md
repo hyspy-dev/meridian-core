@@ -129,6 +129,17 @@ Validated by `validateTickedVm`: it reconstructs the *server-authoritative*
 walk from a real capture (a `desync` packet rewinds the op list, discarding the
 client's mispredicted ops) and compares — water: `VM-tick check ... MATCH`.
 
+## Building-block API — `World` / `Block` / `Player`
+
+core exposes building blocks, not features. The `World` service is the
+position-addressed facade: `world.blockAt(x,y,z)` → a `Block` (`type()`,
+`isAir()`, `use()` / `plant()` / `water()`); `world.player()` → a `Player`
+(`position()`, `heldItem()`, `hotbarSlotOf()`, `selectHotbarSlot()`). A Layer-2
+module writes its own scan / decision logic and acts through these objects —
+core only removes the packet plumbing. The encapsulated `plantNearby` /
+`harvestNearby` / `waterNearby` were removed from `InteractionControl`: that
+orchestration belongs in the module.
+
 ## Forge
 
 `InteractionControlImpl.forge`: **VM primary** — `buildFromVm` runs

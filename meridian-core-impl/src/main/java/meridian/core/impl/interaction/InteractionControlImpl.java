@@ -13,9 +13,7 @@ import meridian.api.module.Scheduler;
 import meridian.api.packet.PacketHandler;
 import meridian.api.session.ProxySession;
 import meridian.core.api.BlockPos;
-import meridian.core.api.EntityTracker;
 import meridian.core.api.InteractionControl;
-import meridian.core.api.Vec3;
 import meridian.core.impl.ChunkTracker;
 import meridian.core.impl.InteractionRegistry;
 import meridian.core.impl.InventoryTracker;
@@ -74,7 +72,6 @@ public final class InteractionControlImpl implements InteractionControl {
     private final ChunkTracker chunks;
     private final WorldStateImpl worldState;
     private final ItemRegistry items;
-    private final EntityTracker entities;
     private final Scheduler scheduler;
 
     private volatile ProxySession session;
@@ -102,14 +99,12 @@ public final class InteractionControlImpl implements InteractionControl {
 
     public InteractionControlImpl(InteractionRegistry registry, InventoryTracker inventory,
                                   ChunkTracker chunks, WorldStateImpl worldState,
-                                  ItemRegistry items, EntityTracker entities,
-                                  Scheduler scheduler) {
+                                  ItemRegistry items, Scheduler scheduler) {
         this.registry = registry;
         this.inventory = inventory;
         this.chunks = chunks;
         this.worldState = worldState;
         this.items = items;
-        this.entities = entities;
         this.scheduler = scheduler;
     }
 
@@ -468,187 +463,6 @@ public final class InteractionControlImpl implements InteractionControl {
         // it so a follow-up forge sends the matching activeHotbarSlot / item.
         inventory.observeActiveSlots(slot, inventory.activeUtilitySlot(),
                 inventory.activeToolsSlot());
-    }
-
-    @Override
-    public int plantNearby(int radius) {
-        if (session == null) {
-            log.warn("meridian-core: plantNearby requested but no session yet");
-            return 0;
-        }
-        int seedSlot = inventory.findHotbarSlot("Seed");
-        if (seedSlot < 0) {
-            log.warn("meridian-core: plantNearby — no seeds in the hotbar");
-            return 0;
-        }
-        Vec3 p = entities.localPosition().orElse(null);
-        if (p == null) {
-            log.warn("meridian-core: plantNearby — player position unknown");
-            return 0;
-        }
-        int px = (int) Math.floor(p.x());
-        int py = (int) Math.floor(p.y());
-        int pz = (int) Math.floor(p.z());
-
-        List<BlockPos> spots = new ArrayList<>();
-        for (int dx = -radius; dx <= radius; dx++) {
-            for (int dz = -radius; dz <= radius; dz++) {
-                for (int dy = -2; dy <= 1; dy++) {
-                    int bx = px + dx, by = py + dy, bz = pz + dz;
-                    if (isPlantable(bx, by, bz)) {
-                        spots.add(new BlockPos(bx, by, bz));
-                    }
-                }
-            }
-        }
-        if (spots.isEmpty()) {
-            log.info("meridian-core: plantNearby — no plantable tilled soil within {}", radius);
-            return 0;
-        }
-
-        int originalSlot = inventory.activeHotbarSlot();
-        log.info("meridian-core: plantNearby — {} spot(s), switching to seed slot {}",
-                spots.size(), seedSlot);
-        switchHotbarSlot(seedSlot);
-        for (BlockPos spot : spots) {
-            plantOnBlock(spot);
-        }
-        switchHotbarSlot(originalSlot);
-        return spots.size();
-    }
-
-    /** A block is plantable if it is tilled soil with empty space above it. */
-    private boolean isPlantable(int x, int y, int z) {
-        int id = chunks.blockIdAt(x, y, z);
-        if (id <= 0) {
-            return false;
-        }
-        BlockType type = worldState.blockTypeById(id);
-        if (type == null || type.name == null || !type.name.contains("Tilled")) {
-            return false;
-        }
-        return chunks.blockIdAt(x, y + 1, z) == 0; // air above
-    }
-
-    @Override
-    public int harvestNearby(int radius) {
-        if (session == null) {
-            log.warn("meridian-core: harvestNearby requested but no session yet");
-            return 0;
-        }
-        Vec3 p = entities.localPosition().orElse(null);
-        if (p == null) {
-            log.warn("meridian-core: harvestNearby — player position unknown");
-            return 0;
-        }
-        int px = (int) Math.floor(p.x());
-        int py = (int) Math.floor(p.y());
-        int pz = (int) Math.floor(p.z());
-
-        List<BlockPos> crops = new ArrayList<>();
-        for (int dx = -radius; dx <= radius; dx++) {
-            for (int dz = -radius; dz <= radius; dz++) {
-                for (int dy = -2; dy <= 2; dy++) {
-                    int bx = px + dx, by = py + dy, bz = pz + dz;
-                    if (isHarvestable(bx, by, bz)) {
-                        crops.add(new BlockPos(bx, by, bz));
-                    }
-                }
-            }
-        }
-        if (crops.isEmpty()) {
-            log.info("meridian-core: harvestNearby — no crops within {}", radius);
-            return 0;
-        }
-        log.info("meridian-core: harvestNearby — {} crop(s)", crops.size());
-        for (BlockPos crop : crops) {
-            useOnBlock(crop);
-        }
-        return crops.size();
-    }
-
-    @Override
-    public int waterNearby(int radius) {
-        if (session == null) {
-            log.warn("meridian-core: waterNearby requested but no session yet");
-            return 0;
-        }
-        int canSlot = inventory.findHotbarSlot("Watering_Can");
-        if (canSlot < 0) {
-            log.warn("meridian-core: waterNearby — no watering can in the hotbar");
-            return 0;
-        }
-        String canItem = inventory.hotbarItem(canSlot);
-        List<TimedChain> seq = canItem == null ? null
-                : capturedSeq.get(ActionKey.of(InteractionType.Secondary, canItem));
-        if (seq == null || seq.isEmpty()) {
-            log.warn("meridian-core: waterNearby — no captured watering chain; water once "
-                    + "manually first (the charge is replay-only)");
-            return 0;
-        }
-        Vec3 p = entities.localPosition().orElse(null);
-        if (p == null) {
-            log.warn("meridian-core: waterNearby — player position unknown");
-            return 0;
-        }
-        int px = (int) Math.floor(p.x());
-        int py = (int) Math.floor(p.y());
-        int pz = (int) Math.floor(p.z());
-
-        List<BlockPos> soil = new ArrayList<>();
-        for (int dx = -radius; dx <= radius; dx++) {
-            for (int dz = -radius; dz <= radius; dz++) {
-                for (int dy = -2; dy <= 1; dy++) {
-                    int bx = px + dx, by = py + dy, bz = pz + dz;
-                    if (isWaterable(bx, by, bz)) {
-                        soil.add(new BlockPos(bx, by, bz));
-                    }
-                }
-            }
-        }
-        if (soil.isEmpty()) {
-            log.info("meridian-core: waterNearby — no tilled soil within {}", radius);
-            return 0;
-        }
-
-        // One watering plays out over the captured sequence's span; space the
-        // blocks by that span so the paced replays do not overlap.
-        long stepMs = (seq.get(seq.size() - 1).nanos() - seq.get(0).nanos()) / 1_000_000L + 400L;
-        int original = inventory.activeHotbarSlot();
-        log.info("meridian-core: waterNearby — {} soil block(s), ~{}ms each, can slot {}",
-                soil.size(), stepMs, canSlot);
-        switchHotbarSlot(canSlot);
-        for (int i = 0; i < soil.size(); i++) {
-            BlockPos block = soil.get(i);
-            scheduler.schedule(() -> waterBlock(block), Duration.ofMillis(i * stepMs));
-        }
-        scheduler.schedule(() -> switchHotbarSlot(original),
-                Duration.ofMillis(soil.size() * stepMs));
-        return soil.size();
-    }
-
-    /** A block is waterable if it is tilled soil. */
-    private boolean isWaterable(int x, int y, int z) {
-        int id = chunks.blockIdAt(x, y, z);
-        if (id <= 0) {
-            return false;
-        }
-        BlockType type = worldState.blockTypeById(id);
-        return type != null && type.name != null && type.name.contains("Tilled");
-    }
-
-    /** A block is a harvestable crop if it is a non-air block standing on tilled soil. */
-    private boolean isHarvestable(int x, int y, int z) {
-        int id = chunks.blockIdAt(x, y, z);
-        if (id <= 0) {
-            return false; // air or unknown
-        }
-        int below = chunks.blockIdAt(x, y - 1, z);
-        if (below <= 0) {
-            return false;
-        }
-        BlockType soil = worldState.blockTypeById(below);
-        return soil != null && soil.name != null && soil.name.contains("Tilled");
     }
 
     // ------------------------------------------------------------------

@@ -7,6 +7,7 @@ import meridian.api.packet.HandlerPosition;
 import meridian.core.api.CameraControl;
 import meridian.core.api.EntityTracker;
 import meridian.core.api.InteractionControl;
+import meridian.core.api.World;
 import meridian.core.api.WorldState;
 import meridian.core.impl.interaction.InteractionControlImpl;
 
@@ -77,13 +78,19 @@ public class MeridianCoreModule implements ProxyModule {
         // chains never collide with the player's own counter.
         InteractionControlImpl interactionControl = new InteractionControlImpl(
                 interactionRegistry, inventoryTracker, chunkTracker, worldState, itemRegistry,
-                entityTracker, ctx.scheduler());
+                ctx.scheduler());
         ctx.services().provide(InteractionControl.class, interactionControl);
         ctx.registerHandler(Direction.BOTH, HandlerPosition.NORMAL,
                 (direction, session) -> interactionControl.newObserver());
 
+        // --- World: position-addressed facade over the trackers --------------
+        // Block / Player building blocks — a Layer-2 module queries and acts,
+        // writing its own logic.
+        ctx.services().provide(World.class, new WorldImpl(
+                chunkTracker, worldState, entityTracker, inventoryTracker, interactionControl));
+
         ctx.getLogger().info("meridian-core ready (WorldState, EntityTracker, CameraControl, "
                 + "InteractionRegistry, InventoryTracker, ChunkTracker, ItemRegistry, "
-                + "InteractionControl)");
+                + "InteractionControl, World)");
     }
 }
