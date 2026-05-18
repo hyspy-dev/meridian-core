@@ -7,8 +7,8 @@ mirror of Hytale's game state and mechanics — a model faithful enough that
 **anyone can build a module against the neutral API without ever touching raw
 packets or the protocol.**
 
-Modules — xray, camera-tweaks, farmer, world-downloader, printer, … — are
-*demonstrations and consumers* of that model. They prove the model is good
+Modules — xray, camera-tweaks, farmer, world-downloader, replay, printer, … —
+are *demonstrations and consumers* of that model. They prove the model is good
 enough; they are not the point. A module is allowed to be thin: all the real
 work lives in core.
 
@@ -24,9 +24,13 @@ palettes), core reproduces the simulation rather than guessing.
   state and mechanics, publishes neutral services. Absorbs all protocol churn.
 - **Layer 2 — modules**: depend only on `meridian-core-api` + `meridian-api`.
   Protocol-neutral; a Hytale update cannot break them.
+- **Layer 1 siblings** — orthogonal observers that write to disk and need no
+  state model (recorder / world archive). They sit on raw packets directly.
 
 See [`interaction-chains.md`](interaction-chains.md) for the interaction-system
-analysis, and the proxy's [`architecture.md`](../../meridian-proxy/docs/architecture.md).
+analysis, [`interaction-vm-status.md`](interaction-vm-status.md) for the VM /
+forging status, and the proxy's
+[`architecture.md`](../../meridian-proxy/docs/architecture.md).
 
 ## Status
 
@@ -37,82 +41,109 @@ analysis, and the proxy's [`architecture.md`](../../meridian-proxy/docs/architec
 | CameraControl — camera packet forging | ✅ done | `CameraControl` |
 | InteractionRegistry — interaction catalog (pkt 66/67) | ✅ done | internal |
 | InventoryTracker — hotbar/utility/tools + held items | ✅ done | internal |
-| ChunkTracker — block ids at any position | ⬜ todo | planned |
-| Interaction VM — flatten + simulate interaction chains | ⬜ todo | planned |
-| InteractionControl — high-level interaction forging | ⬜ todo | planned |
+| ItemRegistry — item assets: roots + `interactionVars` | ✅ done | internal |
+| ChunkTracker — block ids at any position | ✅ done, verified | internal |
+| Interaction VM — flatten + simulate + tick-simulate (60 Hz) | ✅ done, validated | internal |
+| InteractionControl — interaction forging, chainId NAT, forge queue | ✅ done | `InteractionControl` |
+| World / Block / Player — building-block API | ✅ done | `World` |
+
+The interaction track is validated against real captures (`VM check … MATCH`,
+`VM-tick check … MATCH`) for harvest / water / plant. Forges are serialized
+through a queue and exposed asynchronously (`CompletableFuture<Void>`).
+Full detail: [`interaction-vm-status.md`](interaction-vm-status.md).
+
+## What core exposes today
+
+`World` is the position-addressed facade — building blocks, not features:
+
+- `world.blockAt(x,y,z)` → `Block` (`type()`, `isAir()`, `use()` / `plant()` /
+  `water()` — each returns `CompletableFuture<Void>`).
+- `world.player()` → `Player` (`position()`, `heldItem()`, `hotbarSlotOf()`,
+  `selectHotbarSlot()`).
+
+A Layer-2 module writes its own scan / decision logic and acts through these
+objects — core only removes the packet plumbing. Encapsulated `*Nearby(radius)`
+helpers were deliberately removed: that orchestration belongs in the module.
 
 ## Roadmap
 
-### ⬜ ChunkTracker
+### ⬜ meridian-recorder (Layer-1 sibling) — session archive
 
-**What.** A live mirror of loaded chunks — the block id (+ filler + rotation) at
-any world position. Built from S2C `SetChunk` (131), `ServerSetBlock` (140),
-`ServerSetBlocks` (141), `UnloadChunk` (135).
+A raw-packet recorder: tee every framed packet (both directions) with a
+monotonic timestamp to a `.mrec` file, plus a header (session info, protocol
+version, handshake). An orthogonal observer — needs no state model, sits on raw
+packets via `meridian-api` + `meridian-protocol`, like a world archiver.
 
-**The hard part.** `SetChunk.data` is not a raw block array — each 32×32×32
-section is stored as **three palettes** (block ids, filler, rotation), each an
-`AbstractSectionPalette` with bit-packed indices. Honest decoding means
-reproducing the palette format (`PaletteType` / `PaletteTypeEnum`).
+This is the **shared substrate** for the two flagship modules below — both are
+"write the session to disk" of different flavours.
 
-**Why it is needed.**
-- **Farmer** — scan for ripe crops / plantable soil in a radius.
-- **Interaction VM** — `BlockConditionInteraction` and friends read the target
-  block; without chunk data the VM must guess.
-- It is the missing half of `WorldState` (`blockTypeAt` / `ghostBlock` currently
-  throw `UnsupportedOperationException`).
+### ⬜ replay-mode — re-watch a recorded session
 
-**What it unlocks.**
-- **world-downloader module** — export the live world to a local Hytale save.
-- **printer module** — read a structure from the world and replay it block by
-  block (copy / schematic / build automation).
-- **farmer module** — autonomous crop scanning.
+A proxy **launch mode** (`--replay <file>`): the backend is a recorded stream
+instead of a live QUIC server. The proxy re-emits the recorded S→C to a real
+Hytale client at the original cadence; a core/module layer suppresses all C→S
+and drives a free camera via `CameraControl`. The client renders; the viewer
+flies through a frozen, replaying world.
 
-A single subsystem, three modules. This is why it is worth doing properly.
+**Why it leads.** This is the feature that makes Meridian spread — content
+creators promote replay tooling for free. It is mostly *composition* of pieces
+that already exist: the recorder writes the archive, `CameraControl` already
+forges the free camera, the proxy already has pluggable launch modes
+(launcher / standalone).
 
-### ⬜ Interaction VM
+**Honest challenges.**
+- **Auth on playback** — the client must complete a handshake against the
+  proxy-as-fake-server; the recording header carries the recorded handshake, or
+  playback forges a minimal valid one.
+- **C→S during playback** — fully suppressed; the recorded world does not react.
+  The camera is driven independently.
+- **Timeline scrubbing** — forward playback is trivial (re-feed). Seeking
+  backward needs keyframes or replay-from-start. v1: forward + restart-to-seek;
+  keyframes later.
 
-**What.** Reproduce Hytale's interaction interpreter so the proxy can forge a
-valid `SyncInteractionChains` for any action.
+### ⬜ meridian-world-downloader (Layer-1 sibling)
 
-- **Flattener** — port each `Interaction` node's `compile()`: walk the tree from
-  `UpdateRootInteractions`/`UpdateInteractions` into a flat `Operation[]` with
-  labels and jumps; the index is the `operationCounter`.
-- **Simulator** — port each node's `simulateTick()`: walk the operation list,
-  evaluate conditions/charges/chaining, produce the executed operation sequence
-  and the `InteractionSyncData` the server expects.
-- **`InteractionContext`** — the simulation's inputs: held item (InventoryTracker),
-  target block (ChunkTracker / observed `MouseInteraction`), entity state.
+Geometry is doable today: `ChunkTracker` decodes sections, `WorldState` names
+the types. Two real prerequisites:
 
-**Why it is needed.** Forging harvest / plant / water — and any future
-automation — requires `interactionData` whose `operationCounter` + `rootInteraction`
-match the server's own run (`InteractionEntry.setClientState` rejects mismatches).
-See [`interaction-chains.md`](interaction-chains.md).
+1. **A read API on `ChunkTracker`** — currently only point `blockIdAt`; a dump
+   needs enumeration of loaded sections + whole-section reads (a building block,
+   core-side).
+2. **Persist before eviction** — `ChunkTracker` drops sections on `UnloadChunk`;
+   the downloader must write to disk as `SetChunk` arrives, not snapshot at the
+   end.
 
-**Scope.** ~25 `Interaction` node types. The framework is shared; nodes are
-ported one at a time. Farming nodes first (`SimpleBlockInteraction`,
-`ChargingInteraction`, `ChainingInteraction`, `Condition*`, `PlaceBlockInteraction`,
-`FirstClickInteraction`), the rest as consumers need them.
+A faithful Hytale save is a separate, larger track: it needs the **disk** format
+(≠ the network palette) plus capture of block entities / biomes / metadata.
+Until then — dump to an own format + a viewer / re-server.
 
-**Known gaps.**
-- **Flattener** — done for every `compile()` override the client receives,
-  *except* `DamageEntityInteraction` (combat: directional / targeted damage
-  branches). It is currently flattened as a leaf, so any chain containing it
-  produces a wrong operation sequence. Porting it unlocks **combat
-  interactions** — a future combat-assist / PvP module (auto-attack, reach,
-  hit prediction). ⬜ todo.
-- **Simulator** — node `simulateTick` ports are incremental; an unported node
-  falls back to a default and is logged.
+### ⬜ meridian-farmer (Layer 2)
 
-### ⬜ InteractionControl
+Autonomous farming: scan crops via `World.blockAt`, forge harvest / plant /
+water via `InteractionControl`. All logic in the module; core hands out
+`World` / `Block` / `Player`. `meridian-interaction-test` already demonstrates
+the pattern (`useNearby` / `waterNearby` / `plantNearby`).
 
-**What.** A high-level service over the VM: `useOnBlock` / `plantOnBlock` /
-`waterBlock` / … plus `targetedBlock()` (the block the player looks at, from
-observed `MouseInteraction`). Owns the chainId allocator / NAT.
+### ⬜ meridian-printer (Layer 2)
 
-**Why.** Layer-2 modules drive interactions without touching the VM or the
-protocol — they say "harvest this block", core does the rest.
+Read a structure from the world (`ChunkTracker`) → replay it block by block
+(`InteractionControl`). Copy / schematic / build automation.
 
-### ⬜ Future trackers (consumer-driven)
+### ⬜ combat-assist + `DamageEntityInteraction` flattener port
+
+The flattener does not port `DamageEntityInteraction` (directional / targeted
+damage branches) — it is currently flattened as a leaf, so any chain containing
+it produces a wrong operation sequence. Porting it unlocks combat interactions
+→ a combat-assist module (auto-attack, reach, hit prediction) on
+`InteractionControl` + `EntityTracker`.
+
+### ⬜ VM honest-port polish
+
+`BlockConditionInteraction` matchers, `SimpleBlockInteraction` air / chunk
+checks, `ChargingInteraction` charge branches — currently catch-all `Finished`
+(matches every observed path, but not the full node logic).
+
+### ⬜ Future trackers — consumer-driven
 
 Added when a real consumer needs them, never up front: player stats / effects,
 cooldowns, full inventory metadata (durability), entity components beyond
@@ -120,16 +151,18 @@ transforms, chat, … Each is the same pattern: observe traffic → neutral serv
 
 ## Modules — consumers, not the goal
 
-| Module | State | Consumes |
-|--------|-------|----------|
-| meridian-xray | ✅ | WorldState |
-| meridian-camera-tweaks | ✅ | CameraControl, EntityTracker |
-| meridian-packetdump | ✅ | diagnostic (raw) |
-| interaction test module | ⬜ | InteractionControl — demonstrates forging |
-| meridian-farmer | ⬜ | ChunkTracker, InteractionControl, InventoryTracker |
-| meridian-world-downloader | ⬜ | ChunkTracker (+ asset capture) |
-| meridian-printer | ⬜ | ChunkTracker, InteractionControl |
-| combat-assist (auto-attack / reach) | ⬜ | InteractionControl + `DamageEntityInteraction` port, EntityTracker |
+| Module | Layer | State | Consumes |
+|--------|-------|-------|----------|
+| meridian-xray | 2 | ✅ | WorldState |
+| meridian-camera-tweaks | 2 | ✅ | CameraControl, EntityTracker |
+| meridian-packetdump | — | ✅ | diagnostic (raw) |
+| meridian-interaction-test | 2 | ✅ | InteractionControl / World — demonstrates forging |
+| meridian-recorder | 1 sibling | ⬜ | raw packets — session archive |
+| replay-mode | launch mode + core | ⬜ | recorder archive, CameraControl |
+| meridian-world-downloader | 1 sibling | ⬜ | ChunkTracker read API (+ asset capture) |
+| meridian-farmer | 2 | ⬜ | World / Block / Player, InteractionControl |
+| meridian-printer | 2 | ⬜ | ChunkTracker, InteractionControl |
+| combat-assist | 2 | ⬜ | InteractionControl + `DamageEntityInteraction` port, EntityTracker |
 
 Each module stays thin. If a module needs logic that other modules could reuse,
 that logic belongs in core.
@@ -137,12 +170,12 @@ that logic belongs in core.
 ## Build order
 
 1. ✅ WorldState · EntityTracker · CameraControl
-2. ✅ InteractionRegistry · InventoryTracker
-3. ⬜ Interaction VM (framework → farming nodes) → InteractionControl → test module
-4. ⬜ ChunkTracker → completes WorldState; unlocks farmer · world-downloader · printer
-5. ⬜ Autonomous farmer; remaining VM nodes; future trackers as needed
-
-ChunkTracker and the VM are independent — either can come first. The VM is on the
-critical path for the interaction test module (which targets the looked-at block
-via `MouseInteraction`, no chunk data needed), so it leads; ChunkTracker follows
-and unlocks the module cluster above.
+2. ✅ InteractionRegistry · InventoryTracker · ItemRegistry
+3. ✅ ChunkTracker
+4. ✅ Interaction VM (flatten + simulate + tick-simulate) → InteractionControl
+   → World / Block / Player → interaction-test module
+5. ⬜ **meridian-recorder** → **replay-mode** — the session-archive substrate and
+   the flagship viewer feature; the priority, it is what makes Meridian spread.
+6. ⬜ `ChunkTracker` read API → world-downloader · printer · farmer
+7. ⬜ combat-assist (`DamageEntityInteraction` port); remaining VM nodes; future
+   trackers as needed
