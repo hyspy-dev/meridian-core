@@ -1,5 +1,6 @@
 package meridian.core.impl.interaction;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -8,6 +9,7 @@ import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import meridian.api.module.Scheduler;
 import meridian.api.packet.PacketHandler;
 import meridian.api.session.ProxySession;
 import meridian.core.api.BlockPos;
@@ -64,12 +66,16 @@ public final class InteractionControlImpl implements InteractionControl {
         }
     }
 
+    /** One captured packet of a chain, with the wall-clock time it was observed. */
+    private record TimedChain(SyncInteractionChain chain, long nanos) {}
+
     private final InteractionRegistry registry;
     private final InventoryTracker inventory;
     private final ChunkTracker chunks;
     private final WorldStateImpl worldState;
     private final ItemRegistry items;
     private final EntityTracker entities;
+    private final Scheduler scheduler;
 
     private volatile ProxySession session;
     private volatile BlockPosition targetBlock;
@@ -86,9 +92,9 @@ public final class InteractionControlImpl implements InteractionControl {
      * packets — the {@code initial=true} chain plus {@code initial=false}
      * continuations — so the whole sequence is captured, not just the opener.
      */
-    private final Map<ActionKey, List<SyncInteractionChain>> capturedSeq = new ConcurrentHashMap<>();
+    private final Map<ActionKey, List<TimedChain>> capturedSeq = new ConcurrentHashMap<>();
     /** client chainId &rarr; the sequence being assembled (until it terminates). */
-    private final Map<Integer, List<SyncInteractionChain>> pendingSeq = new ConcurrentHashMap<>();
+    private final Map<Integer, List<TimedChain>> pendingSeq = new ConcurrentHashMap<>();
     /** client chainId &rarr; the action key its {@code initial=true} chain belongs to. */
     private final Map<Integer, ActionKey> pendingKey = new ConcurrentHashMap<>();
     /** Root ids already dumped to the log (VM-development diagnostics). */
@@ -96,13 +102,15 @@ public final class InteractionControlImpl implements InteractionControl {
 
     public InteractionControlImpl(InteractionRegistry registry, InventoryTracker inventory,
                                   ChunkTracker chunks, WorldStateImpl worldState,
-                                  ItemRegistry items, EntityTracker entities) {
+                                  ItemRegistry items, EntityTracker entities,
+                                  Scheduler scheduler) {
         this.registry = registry;
         this.inventory = inventory;
         this.chunks = chunks;
         this.worldState = worldState;
         this.items = items;
         this.entities = entities;
+        this.scheduler = scheduler;
     }
 
     /** Creates the observer + chain-id NAT handler — register at NORMAL, BOTH directions. */
@@ -182,20 +190,21 @@ public final class InteractionControlImpl implements InteractionControl {
             validateVm(chain);
         }
 
-        // Buffer every packet of the chain; finalise the sequence on the
-        // terminal chain so replay re-sends the whole multi-packet exchange.
-        List<SyncInteractionChain> seq = pendingSeq.get(chain.chainId);
+        // Buffer every packet of the chain with its arrival time; finalise the
+        // sequence on the terminal chain so replay re-sends the whole exchange
+        // at the original cadence (a water charge plays out over many ticks).
+        List<TimedChain> seq = pendingSeq.get(chain.chainId);
         ActionKey key = pendingKey.get(chain.chainId);
         if (seq != null && key != null) {
-            seq.add(chain);
+            seq.add(new TimedChain(chain, System.nanoTime()));
             if (chain.state != InteractionState.NotFinished) {
                 capturedSeq.put(key, seq);
                 pendingSeq.remove(chain.chainId);
                 pendingKey.remove(chain.chainId);
                 log.info("meridian-core: captured {} sequence ({} packet(s), item {})",
                         key.type(), seq.size(), key.item());
-                for (SyncInteractionChain c : seq) {
-                    dumpChain("CAPTURED", c);
+                for (TimedChain tc : seq) {
+                    dumpChain("CAPTURED", tc.chain());
                 }
             }
         }
@@ -513,42 +522,59 @@ public final class InteractionControlImpl implements InteractionControl {
                 chunks.blockIdAt(pos.x(), pos.y() + 1, pos.z()));
 
         String itemId = inventory.itemInHandId();
-        List<SyncInteractionChain> sequence = capturedSeq.get(ActionKey.of(type, itemId));
-        SyncInteractionChain[] forged;
-        boolean replay = sequence != null && !sequence.isEmpty();
-        if (replay) {
-            forged = retargetSequence(sequence, pos);
-        } else {
-            forged = buildFromVm(pos, type, dataKind, itemId);
-            if (forged == null) {
-                return; // nothing to send yet — reason already logged
-            }
+        List<TimedChain> sequence = capturedSeq.get(ActionKey.of(type, itemId));
+        if (sequence != null && !sequence.isEmpty()) {
+            sendPacedReplay(sequence, pos, type);
+            return;
         }
 
+        SyncInteractionChain[] forged = buildFromVm(pos, type, dataKind, itemId);
+        if (forged == null) {
+            return; // nothing to send yet — reason already logged
+        }
         SyncInteractionChains packet = new SyncInteractionChains();
         packet.updates = forged;
         s.sendToServer(packet);
-        log.info("meridian-core: forged {} chain {} ({} packet(s)) at ({},{},{}) — {}",
-                type, forged[0].chainId, forged.length, pos.x(), pos.y(), pos.z(),
-                replay ? "replay" : "vm");
+        log.info("meridian-core: forged {} chain {} ({} packet(s)) at ({},{},{}) — vm",
+                type, forged[0].chainId, forged.length, pos.x(), pos.y(), pos.z());
         for (SyncInteractionChain c : forged) {
-            dumpChain(replay ? "FORGED-replay" : "FORGED-vm", c);
+            dumpChain("FORGED-vm", c);
         }
     }
 
     /**
-     * Retargets a whole captured sequence onto {@code pos}. Every packet shares
-     * one freshly allocated forged {@code chainId} — the server sees one
-     * multi-packet chain, the {@code initial=true} opener plus its continuations.
+     * Replays a captured chain sequence at its original cadence. A water charge
+     * plays out over many server ticks, and the server validates the charge
+     * against its own clock — so the packets must be delivered spread over time
+     * (one {@code SyncInteractionChains} each), not in one burst.
      */
-    private SyncInteractionChain[] retargetSequence(List<SyncInteractionChain> sequence, BlockPos pos) {
+    private void sendPacedReplay(List<TimedChain> sequence, BlockPos pos, InteractionType type) {
         int forgedId = nat.allocateForged();
-        int templateY = templateTargetY(sequence.get(0));
-        SyncInteractionChain[] out = new SyncInteractionChain[sequence.size()];
-        for (int i = 0; i < sequence.size(); i++) {
-            out[i] = retargetChain(sequence.get(i), pos, forgedId, templateY);
+        int templateY = templateTargetY(sequence.get(0).chain());
+        long t0 = sequence.get(0).nanos();
+        log.info("meridian-core: forged {} chain {} ({} packet(s), paced) at ({},{},{}) — replay",
+                type, forgedId, sequence.size(), pos.x(), pos.y(), pos.z());
+        for (TimedChain tc : sequence) {
+            SyncInteractionChain c = retargetChain(tc.chain(), pos, forgedId, templateY);
+            dumpChain("FORGED-replay", c);
+            long delayMs = Math.max(0L, (tc.nanos() - t0) / 1_000_000L);
+            if (delayMs == 0L) {
+                sendChain(c);
+            } else {
+                scheduler.schedule(() -> sendChain(c), Duration.ofMillis(delayMs));
+            }
         }
-        return out;
+    }
+
+    /** Sends one forged chain to the server as its own {@code SyncInteractionChains}. */
+    private void sendChain(SyncInteractionChain chain) {
+        ProxySession s = session;
+        if (s == null) {
+            return;
+        }
+        SyncInteractionChains packet = new SyncInteractionChains();
+        packet.updates = new SyncInteractionChain[] {chain};
+        s.sendToServer(packet);
     }
 
     /**

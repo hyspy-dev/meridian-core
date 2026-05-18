@@ -124,9 +124,15 @@ Two paths in `InteractionControlImpl.forge`, both multi-packet:
   (buffered by client chainId until the terminal chain, `state != NotFinished`),
   with a fresh forged `chainId` and retargeted block. The fallback / oracle.
 
-Both forge into a `SyncInteractionChain[]` sent as one `SyncInteractionChains`.
-Water's charge path is still not reached by the VM walk (op 5 never fails) —
-replay a real full water to forge it until the charge nodes are ported.
+Each captured packet is stored with its arrival time. Replay is **paced**: the
+packets go out one `SyncInteractionChains` each, at the original inter-packet
+deltas (`sendPacedReplay` + `Scheduler`). A water charge plays out over ~19
+server ticks and the server validates the charge against its own clock — a
+one-burst replay sends `progress` ahead of the server's clock and is cancelled.
+Plant/harvest are 1–2 instant packets, so pacing is a no-op for them.
+
+The VM walk still does not reach water's charge path (op 5 never fails), so
+water is replay-only until the charge nodes are ported.
 
 `forge` currently prefers the captured template, VM is the fallback.
 

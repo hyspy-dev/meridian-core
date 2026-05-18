@@ -59,6 +59,15 @@ public interface InteractionControl {
      */
     int harvestNearby(int radius);
 
+    /**
+     * Waters every tilled-soil block within {@code radius} of the player:
+     * switches to the watering can, replays the captured watering chain on each
+     * block (paced, one after another), then switches the hotbar back. Requires
+     * a watering can in the hotbar and one watering performed manually first
+     * (the charge is replay-only). Returns the number of blocks watered.
+     */
+    int waterNearby(int radius);
+
     /** {@code true} once a client session is live and packets can be sent. */
     boolean available();
 }

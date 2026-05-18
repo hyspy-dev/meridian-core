@@ -77,7 +77,7 @@ public class MeridianCoreModule implements ProxyModule {
         // chains never collide with the player's own counter.
         InteractionControlImpl interactionControl = new InteractionControlImpl(
                 interactionRegistry, inventoryTracker, chunkTracker, worldState, itemRegistry,
-                entityTracker);
+                entityTracker, ctx.scheduler());
         ctx.services().provide(InteractionControl.class, interactionControl);
         ctx.registerHandler(Direction.BOTH, HandlerPosition.NORMAL,
                 (direction, session) -> interactionControl.newObserver());

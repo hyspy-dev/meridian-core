@@ -116,6 +116,11 @@ public final class InventoryTracker {
         return tools.get(activeToolsSlot);
     }
 
+    /** Item id in hotbar {@code slot}, or {@code null} if empty. */
+    public String hotbarItem(int slot) {
+        return hotbar.get(slot);
+    }
+
     /** First hotbar slot holding an item whose id contains {@code substring}, or -1. */
     public int findHotbarSlot(String substring) {
         for (Map.Entry<Integer, String> e : hotbar.entrySet()) {
