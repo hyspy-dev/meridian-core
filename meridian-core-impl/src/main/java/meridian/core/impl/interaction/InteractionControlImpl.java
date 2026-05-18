@@ -1,6 +1,7 @@
 package meridian.core.impl.interaction;
 
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -8,6 +9,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import meridian.api.module.Scheduler;
 import meridian.api.packet.PacketHandler;
@@ -67,6 +69,21 @@ public final class InteractionControlImpl implements InteractionControl {
     /** One captured packet of a chain, with the wall-clock time it was observed. */
     private record TimedChain(SyncInteractionChain chain, long nanos) {}
 
+    /**
+     * A unit of forging work on the serialized queue. {@link #run()} builds and
+     * sends the chain, returning its tick-duration — the number of 60&nbsp;Hz
+     * packets it spreads over — so the queue knows how long to wait before
+     * starting the next forge.
+     */
+    @FunctionalInterface
+    private interface QueuedForge {
+        /** Runs the forge; returns its tick-duration (0 if nothing was sent). */
+        int run();
+    }
+
+    /** A forge waiting on the queue, paired with the future its caller holds. */
+    private record QueuedItem(QueuedForge forge, CompletableFuture<Void> done) {}
+
     private final InteractionRegistry registry;
     private final InventoryTracker inventory;
     private final ChunkTracker chunks;
@@ -96,6 +113,16 @@ public final class InteractionControlImpl implements InteractionControl {
     private final Map<Integer, ActionKey> pendingKey = new ConcurrentHashMap<>();
     /** Root ids already dumped to the log (VM-development diagnostics). */
     private final Set<Integer> dumpedRoots = ConcurrentHashMap.newKeySet();
+
+    /**
+     * The forge queue. core owns the chain-start cadence: forges run strictly
+     * one at a time, each to completion, so two plugins (or one plugin's loop)
+     * can never interleave packets and clobber each other's chains. A plugin
+     * just calls {@code block.water()} in a loop — the spacing is core's job.
+     */
+    private final ArrayDeque<QueuedItem> forgeQueue = new ArrayDeque<>();
+    /** {@code true} while a forge is in flight — guarded by {@code this}. */
+    private boolean forging;
 
     public InteractionControlImpl(InteractionRegistry registry, InventoryTracker inventory,
                                   ChunkTracker chunks, WorldStateImpl worldState,
@@ -387,38 +414,97 @@ public final class InteractionControlImpl implements InteractionControl {
     }
 
     @Override
-    public void useOnBlock(BlockPos pos) {
+    public CompletableFuture<Void> useOnBlock(BlockPos pos) {
         // Harvest interactions are requiresClient — the server waits for per-op
         // client data, so a bare chain is not enough. Build it via the VM.
-        forge(pos, InteractionType.Use, DataKind.BLOCK);
+        return enqueueForge(() -> forge(pos, InteractionType.Use, DataKind.BLOCK));
     }
 
     @Override
-    public void waterBlock(BlockPos pos) {
-        forge(pos, InteractionType.Secondary, DataKind.BLOCK);
+    public CompletableFuture<Void> waterBlock(BlockPos pos) {
+        return enqueueForge(() -> forge(pos, InteractionType.Secondary, DataKind.BLOCK));
     }
 
     @Override
-    public void plantOnBlock(BlockPos pos) {
-        forge(pos, InteractionType.Secondary, DataKind.PLACEMENT);
+    public CompletableFuture<Void> plantOnBlock(BlockPos pos) {
+        return enqueueForge(() -> forge(pos, InteractionType.Secondary, DataKind.PLACEMENT));
     }
 
     @Override
-    public void switchHotbarSlot(int slot) {
+    public CompletableFuture<Void> switchHotbarSlot(int slot) {
+        return enqueueForge(() -> doSwitchHotbarSlot(slot));
+    }
+
+    // ------------------------------------------------------------------
+    // Forge queue — core owns the chain-start cadence
+    // ------------------------------------------------------------------
+
+    /**
+     * Adds a forge to the queue and returns the future that completes when it
+     * has played out. If nothing is in flight it starts immediately; otherwise
+     * it runs once the chains ahead of it have played out. The build happens
+     * when the forge is <em>dequeued</em>, not here — so a queued slot-switch's
+     * inventory mirror is in place before the forges behind it read it.
+     */
+    private synchronized CompletableFuture<Void> enqueueForge(QueuedForge forge) {
+        CompletableFuture<Void> done = new CompletableFuture<>();
+        forgeQueue.addLast(new QueuedItem(forge, done));
+        if (!forging) {
+            runNextForge();
+        }
+        return done;
+    }
+
+    /**
+     * Pulls the next forge off the queue, runs it, and schedules — once this
+     * chain's tick-duration has elapsed — both the completion of its future and
+     * the run of the one after it. The queue only serializes (overlapping
+     * chains of one player are invalid); it adds no padding between forges, so
+     * a burst of instant harvests runs back-to-back at the tick rate. Any
+     * human-like spacing is the calling plugin's choice. Called only with the
+     * {@code this} monitor held.
+     */
+    private synchronized void runNextForge() {
+        QueuedItem next = forgeQueue.pollFirst();
+        if (next == null) {
+            forging = false;
+            return;
+        }
+        forging = true;
+        int ticks;
+        try {
+            ticks = next.forge().run();
+        } catch (RuntimeException ex) {
+            log.warn("meridian-core: queued forge failed", ex);
+            ticks = 0;
+        }
+        // Exactly the chain's tick-duration — one tick minimum, since even an
+        // instant chain occupies the tick its packet lands on.
+        long delayMs = Math.max(ticks, 1) * 1000L / 60L;
+        scheduler.schedule(() -> {
+            // The chain has played out: complete the caller's future (which may
+            // enqueue follow-up forges via .thenRun), then start the next one.
+            next.done().complete(null);
+            runNextForge();
+        }, Duration.ofMillis(delayMs));
+    }
+
+    /** Body of {@link #switchHotbarSlot}; returns the chain's tick-duration. */
+    private int doSwitchHotbarSlot(int slot) {
         ProxySession s = session;
         if (s == null) {
             log.warn("meridian-core: switchHotbarSlot requested but no session yet");
-            return;
+            return 0;
         }
         if (slot == inventory.activeHotbarSlot()) {
-            return; // already on it
+            return 0; // already on it
         }
         // Every item maps SwapFrom -> the ChangeActiveSlot root; resolve via the
         // held item (any item works).
         OptionalInt root = resolveRoot(InteractionType.SwapFrom, inventory.itemInHandId());
         if (root.isEmpty()) {
             log.warn("meridian-core: no SwapFrom root known — cannot switch hotbar slot");
-            return;
+            return 0;
         }
 
         SyncInteractionChain chain = new SyncInteractionChain();
@@ -463,17 +549,19 @@ public final class InteractionControlImpl implements InteractionControl {
         // it so a follow-up forge sends the matching activeHotbarSlot / item.
         inventory.observeActiveSlots(slot, inventory.activeUtilitySlot(),
                 inventory.activeToolsSlot());
+        return 1; // a single-packet, instantly-Finished chain
     }
 
     // ------------------------------------------------------------------
     // Forge
     // ------------------------------------------------------------------
 
-    private void forge(BlockPos pos, InteractionType type, DataKind dataKind) {
+    /** Builds and sends one forged chain; returns its tick-duration (0 if nothing sent). */
+    private int forge(BlockPos pos, InteractionType type, DataKind dataKind) {
         ProxySession s = session;
         if (s == null) {
             log.warn("meridian-core: interaction {} requested but no session yet", type);
-            return;
+            return 0;
         }
 
         // Chunk-decode verification: block ids around the target.
@@ -489,13 +577,13 @@ public final class InteractionControlImpl implements InteractionControl {
         // captured-sequence replay is the fallback when a root cannot be resolved.
         SyncInteractionChain[] forged = buildFromVm(pos, type, dataKind, itemId);
         if (forged != null) {
-            sendPacedVm(forged, type, pos);
-            return;
+            return sendPacedVm(forged, type, pos);
         }
         List<TimedChain> sequence = capturedSeq.get(ActionKey.of(type, itemId));
         if (sequence != null && !sequence.isEmpty()) {
-            sendPacedReplay(sequence, pos, type);
+            return sendPacedReplay(sequence, pos, type);
         }
+        return 0;
     }
 
     /**
@@ -503,7 +591,7 @@ public final class InteractionControlImpl implements InteractionControl {
      * tick, so the server's {@code runTime} / charge clock keeps step with the
      * {@code progress} the packets carry.
      */
-    private void sendPacedVm(SyncInteractionChain[] forged, InteractionType type, BlockPos pos) {
+    private int sendPacedVm(SyncInteractionChain[] forged, InteractionType type, BlockPos pos) {
         log.info("meridian-core: forged {} chain {} ({} packet(s), ticked) at ({},{},{}) — vm",
                 type, forged[0].chainId, forged.length, pos.x(), pos.y(), pos.z());
         for (int i = 0; i < forged.length; i++) {
@@ -516,6 +604,7 @@ public final class InteractionControlImpl implements InteractionControl {
                 scheduler.schedule(() -> sendChain(c), Duration.ofMillis(delayMs));
             }
         }
+        return forged.length; // one packet per 60 Hz tick
     }
 
     /**
@@ -524,22 +613,25 @@ public final class InteractionControlImpl implements InteractionControl {
      * against its own clock — so the packets must be delivered spread over time
      * (one {@code SyncInteractionChains} each), not in one burst.
      */
-    private void sendPacedReplay(List<TimedChain> sequence, BlockPos pos, InteractionType type) {
+    private int sendPacedReplay(List<TimedChain> sequence, BlockPos pos, InteractionType type) {
         int forgedId = nat.allocateForged();
         int templateY = templateTargetY(sequence.get(0).chain());
         long t0 = sequence.get(0).nanos();
+        long spanMs = 0L;
         log.info("meridian-core: forged {} chain {} ({} packet(s), paced) at ({},{},{}) — replay",
                 type, forgedId, sequence.size(), pos.x(), pos.y(), pos.z());
         for (TimedChain tc : sequence) {
             SyncInteractionChain c = retargetChain(tc.chain(), pos, forgedId, templateY);
             dumpChain("FORGED-replay", c);
             long delayMs = Math.max(0L, (tc.nanos() - t0) / 1_000_000L);
+            spanMs = Math.max(spanMs, delayMs);
             if (delayMs == 0L) {
                 sendChain(c);
             } else {
                 scheduler.schedule(() -> sendChain(c), Duration.ofMillis(delayMs));
             }
         }
+        return (int) (spanMs * 60L / 1000L); // wall-clock span expressed in 60 Hz ticks
     }
 
     /** Sends one forged chain to the server as its own {@code SyncInteractionChains}. */

@@ -1,5 +1,6 @@
 package meridian.core.impl;
 
+import java.util.concurrent.CompletableFuture;
 import meridian.core.api.InteractionControl;
 import meridian.core.api.Player;
 import meridian.core.api.Vec3;
@@ -41,7 +42,7 @@ final class PlayerImpl implements Player {
     }
 
     @Override
-    public void selectHotbarSlot(int slot) {
-        interactions.switchHotbarSlot(slot);
+    public CompletableFuture<Void> selectHotbarSlot(int slot) {
+        return interactions.switchHotbarSlot(slot);
     }
 }

@@ -1,5 +1,7 @@
 package meridian.core.api;
 
+import java.util.concurrent.CompletableFuture;
+
 /**
  * The local player — position and hotbar state, plus the hotbar-switch action.
  * Obtained from {@link World#player()}.
@@ -26,6 +28,12 @@ public interface Player {
      * the same one the client sends when the player scrolls the hotbar. The
      * server runs interactions against the item physically in the active slot,
      * so this is the honest way to equip a different item before an action.
+     *
+     * <p>Asynchronous, like every forge — see {@link Block}. The returned future
+     * completes once the switch chain has played out, so an action that needs
+     * the new item can be chained with {@code .thenRun(...)}.
+     *
+     * @return a future completing when the switch chain has played out
      */
-    void selectHotbarSlot(int slot);
+    CompletableFuture<Void> selectHotbarSlot(int slot);
 }
