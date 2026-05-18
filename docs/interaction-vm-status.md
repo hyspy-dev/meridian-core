@@ -180,6 +180,13 @@ chainId — left alone. `PlayInteractionFor` carries other entities' chain ids
   reaches the server only as `SyncInteractionChain.activeHotbarSlot`.
   `InventoryTracker.observeActiveSlots` mirrors it from the player's own chains,
   so a forge mid-session uses the slot from the last observed interaction.
+- **Switching slots** — the server runs an interaction against the item
+  physically in its active slot, so a forge cannot lie about the held item.
+  `InteractionControl.switchHotbarSlot` forges a `SwapFrom` /
+  `ChangeActiveSlotInteraction` (`data.targetSlot` = the slot) — the same chain
+  the client sends on a hotbar scroll — then mirrors the new slot.
+  `plantNearby(radius)` chains it: find seeds → switch → plant tilled soil →
+  switch back.
 - **Memory** — `ChunkTracker` keeps `int[32768]` per section (~128 KB each); fine
   for now, may need the compact palette form later.
 

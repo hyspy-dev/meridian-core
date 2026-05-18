@@ -11,7 +11,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import meridian.api.packet.PacketHandler;
 import meridian.api.session.ProxySession;
 import meridian.core.api.BlockPos;
+import meridian.core.api.EntityTracker;
 import meridian.core.api.InteractionControl;
+import meridian.core.api.Vec3;
 import meridian.core.impl.ChunkTracker;
 import meridian.core.impl.InteractionRegistry;
 import meridian.core.impl.InventoryTracker;
@@ -67,6 +69,7 @@ public final class InteractionControlImpl implements InteractionControl {
     private final ChunkTracker chunks;
     private final WorldStateImpl worldState;
     private final ItemRegistry items;
+    private final EntityTracker entities;
 
     private volatile ProxySession session;
     private volatile BlockPosition targetBlock;
@@ -93,12 +96,13 @@ public final class InteractionControlImpl implements InteractionControl {
 
     public InteractionControlImpl(InteractionRegistry registry, InventoryTracker inventory,
                                   ChunkTracker chunks, WorldStateImpl worldState,
-                                  ItemRegistry items) {
+                                  ItemRegistry items, EntityTracker entities) {
         this.registry = registry;
         this.inventory = inventory;
         this.chunks = chunks;
         this.worldState = worldState;
         this.items = items;
+        this.entities = entities;
     }
 
     /** Creates the observer + chain-id NAT handler — register at NORMAL, BOTH directions. */
@@ -315,6 +319,179 @@ public final class InteractionControlImpl implements InteractionControl {
     @Override
     public void plantOnBlock(BlockPos pos) {
         forge(pos, InteractionType.Secondary, DataKind.PLACEMENT);
+    }
+
+    @Override
+    public void switchHotbarSlot(int slot) {
+        ProxySession s = session;
+        if (s == null) {
+            log.warn("meridian-core: switchHotbarSlot requested but no session yet");
+            return;
+        }
+        if (slot == inventory.activeHotbarSlot()) {
+            return; // already on it
+        }
+        // Every item maps SwapFrom -> the ChangeActiveSlot root; resolve via the
+        // held item (any item works).
+        OptionalInt root = resolveRoot(InteractionType.SwapFrom, inventory.itemInHandId());
+        if (root.isEmpty()) {
+            log.warn("meridian-core: no SwapFrom root known — cannot switch hotbar slot");
+            return;
+        }
+
+        SyncInteractionChain chain = new SyncInteractionChain();
+        chain.activeHotbarSlot = inventory.activeHotbarSlot(); // server is still on this slot
+        chain.activeUtilitySlot = inventory.activeUtilitySlot();
+        chain.activeToolsSlot = inventory.activeToolsSlot();
+        chain.itemInHandId = inventory.itemInHandId();
+        chain.utilityItemId = inventory.utilityItemId();
+        chain.toolsItemId = inventory.toolsItemId();
+        chain.initial = true;
+        chain.desync = false;
+        chain.overrideRootInteraction = Integer.MIN_VALUE;
+        chain.interactionType = InteractionType.SwapFrom;
+        chain.equipSlot = inventory.activeHotbarSlot();
+        chain.chainId = nat.allocateForged();
+        chain.forkedId = null;
+        chain.state = InteractionState.Finished;
+        chain.newForks = null;
+        chain.operationBaseIndex = 0;
+
+        InteractionChainData data = new InteractionChainData();
+        data.entityId = -1;
+        data.proxyId = new UUID(0L, 0L);
+        // ChangeActiveSlotInteraction reads the target slot from data.targetSlot.
+        data.targetSlot = slot;
+        chain.data = data;
+
+        // Root 5 (*Change_Active_Slot) is a single ChangeActiveSlotInteraction op.
+        InteractionSyncData op = new InteractionSyncData();
+        op.operationCounter = 0;
+        op.rootInteraction = root.getAsInt();
+        op.state = InteractionState.Finished;
+        chain.interactionData = new InteractionSyncData[] {op};
+
+        SyncInteractionChains packet = new SyncInteractionChains();
+        packet.updates = new SyncInteractionChain[] {chain};
+        s.sendToServer(packet);
+        log.info("meridian-core: forged SwapFrom chain {} — hotbar slot {} -> {}",
+                chain.chainId, inventory.activeHotbarSlot(), slot);
+
+        // The server's ChangeActiveSlotInteraction always sets the slot — mirror
+        // it so a follow-up forge sends the matching activeHotbarSlot / item.
+        inventory.observeActiveSlots(slot, inventory.activeUtilitySlot(),
+                inventory.activeToolsSlot());
+    }
+
+    @Override
+    public int plantNearby(int radius) {
+        if (session == null) {
+            log.warn("meridian-core: plantNearby requested but no session yet");
+            return 0;
+        }
+        int seedSlot = inventory.findHotbarSlot("Seed");
+        if (seedSlot < 0) {
+            log.warn("meridian-core: plantNearby — no seeds in the hotbar");
+            return 0;
+        }
+        Vec3 p = entities.localPosition().orElse(null);
+        if (p == null) {
+            log.warn("meridian-core: plantNearby — player position unknown");
+            return 0;
+        }
+        int px = (int) Math.floor(p.x());
+        int py = (int) Math.floor(p.y());
+        int pz = (int) Math.floor(p.z());
+
+        List<BlockPos> spots = new ArrayList<>();
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                for (int dy = -2; dy <= 1; dy++) {
+                    int bx = px + dx, by = py + dy, bz = pz + dz;
+                    if (isPlantable(bx, by, bz)) {
+                        spots.add(new BlockPos(bx, by, bz));
+                    }
+                }
+            }
+        }
+        if (spots.isEmpty()) {
+            log.info("meridian-core: plantNearby — no plantable tilled soil within {}", radius);
+            return 0;
+        }
+
+        int originalSlot = inventory.activeHotbarSlot();
+        log.info("meridian-core: plantNearby — {} spot(s), switching to seed slot {}",
+                spots.size(), seedSlot);
+        switchHotbarSlot(seedSlot);
+        for (BlockPos spot : spots) {
+            plantOnBlock(spot);
+        }
+        switchHotbarSlot(originalSlot);
+        return spots.size();
+    }
+
+    /** A block is plantable if it is tilled soil with empty space above it. */
+    private boolean isPlantable(int x, int y, int z) {
+        int id = chunks.blockIdAt(x, y, z);
+        if (id <= 0) {
+            return false;
+        }
+        BlockType type = worldState.blockTypeById(id);
+        if (type == null || type.name == null || !type.name.contains("Tilled")) {
+            return false;
+        }
+        return chunks.blockIdAt(x, y + 1, z) == 0; // air above
+    }
+
+    @Override
+    public int harvestNearby(int radius) {
+        if (session == null) {
+            log.warn("meridian-core: harvestNearby requested but no session yet");
+            return 0;
+        }
+        Vec3 p = entities.localPosition().orElse(null);
+        if (p == null) {
+            log.warn("meridian-core: harvestNearby — player position unknown");
+            return 0;
+        }
+        int px = (int) Math.floor(p.x());
+        int py = (int) Math.floor(p.y());
+        int pz = (int) Math.floor(p.z());
+
+        List<BlockPos> crops = new ArrayList<>();
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                for (int dy = -2; dy <= 2; dy++) {
+                    int bx = px + dx, by = py + dy, bz = pz + dz;
+                    if (isHarvestable(bx, by, bz)) {
+                        crops.add(new BlockPos(bx, by, bz));
+                    }
+                }
+            }
+        }
+        if (crops.isEmpty()) {
+            log.info("meridian-core: harvestNearby — no crops within {}", radius);
+            return 0;
+        }
+        log.info("meridian-core: harvestNearby — {} crop(s)", crops.size());
+        for (BlockPos crop : crops) {
+            useOnBlock(crop);
+        }
+        return crops.size();
+    }
+
+    /** A block is a harvestable crop if it is a non-air block standing on tilled soil. */
+    private boolean isHarvestable(int x, int y, int z) {
+        int id = chunks.blockIdAt(x, y, z);
+        if (id <= 0) {
+            return false; // air or unknown
+        }
+        int below = chunks.blockIdAt(x, y - 1, z);
+        if (below <= 0) {
+            return false;
+        }
+        BlockType soil = worldState.blockTypeById(below);
+        return soil != null && soil.name != null && soil.name.contains("Tilled");
     }
 
     // ------------------------------------------------------------------

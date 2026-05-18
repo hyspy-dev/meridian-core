@@ -76,7 +76,8 @@ public class MeridianCoreModule implements ProxyModule {
         // but rewrites interaction chain ids (the chain-id NAT), so forged
         // chains never collide with the player's own counter.
         InteractionControlImpl interactionControl = new InteractionControlImpl(
-                interactionRegistry, inventoryTracker, chunkTracker, worldState, itemRegistry);
+                interactionRegistry, inventoryTracker, chunkTracker, worldState, itemRegistry,
+                entityTracker);
         ctx.services().provide(InteractionControl.class, interactionControl);
         ctx.registerHandler(Direction.BOTH, HandlerPosition.NORMAL,
                 (direction, session) -> interactionControl.newObserver());

@@ -116,8 +116,8 @@ public final class InventoryTracker {
         return tools.get(activeToolsSlot);
     }
 
-    /** First hotbar slot holding an item whose id contains {@code substring}. */
-    int findHotbarSlot(String substring) {
+    /** First hotbar slot holding an item whose id contains {@code substring}, or -1. */
+    public int findHotbarSlot(String substring) {
         for (Map.Entry<Integer, String> e : hotbar.entrySet()) {
             if (e.getValue().contains(substring)) {
                 return e.getKey();

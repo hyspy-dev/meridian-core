@@ -35,6 +35,30 @@ public interface InteractionControl {
     /** Forges a watering-can interaction on {@code pos}. The held item must be the can. */
     void waterBlock(BlockPos pos);
 
+    /**
+     * Forges a hotbar slot switch — a {@code SwapFrom} / {@code ChangeActiveSlot}
+     * interaction, the same one the client sends when the player scrolls the
+     * hotbar. The server validates interactions against the item physically in
+     * the active slot, so this is the only honest way to "equip" a different
+     * item before forging an interaction that needs it.
+     */
+    void switchHotbarSlot(int slot);
+
+    /**
+     * Full planting cycle: finds seeds in the hotbar, switches to that slot,
+     * plants on every tilled-soil block within {@code radius} of the player
+     * that has space above, then switches the hotbar back. Returns the number
+     * of blocks planted.
+     */
+    int plantNearby(int radius);
+
+    /**
+     * Forges a {@code Use} (harvest) on every crop within {@code radius} of the
+     * player — a non-air block sitting on tilled soil. Returns the number of
+     * blocks harvested. Growth stage is not checked.
+     */
+    int harvestNearby(int radius);
+
     /** {@code true} once a client session is live and packets can be sent. */
     boolean available();
 }
