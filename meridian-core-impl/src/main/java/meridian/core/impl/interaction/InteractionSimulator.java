@@ -17,6 +17,7 @@ import meridian.protocol.MovementStates;
 import meridian.protocol.PlaceBlockInteraction;
 import meridian.protocol.ReplaceInteraction;
 import meridian.protocol.SimpleBlockInteraction;
+import meridian.protocol.SimpleInteraction;
 import meridian.protocol.UseBlockInteraction;
 import meridian.protocol.UseEntityInteraction;
 import org.slf4j.Logger;
@@ -51,9 +52,9 @@ import org.slf4j.LoggerFactory;
 final class InteractionSimulator {
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
     private static final int MAX_STEPS = 256;
-
-    /** {@code chargeValue} that tells the server's charge {@code tick0} to finish now. */
-    private static final float CHARGE_FINISH_NOW = -2.0f;
+    /** Hytale's interaction tick rate — {@code progress} rises ~1/60 per packet. */
+    private static final float TICK_SECONDS = 1.0f / 60.0f;
+    private static final int MAX_TICKS = 1800;
 
     /** Resolves a root id to its flattened form — so the walk can follow a
      * {@code ReplaceInteraction} into the replacement root. */
@@ -114,6 +115,173 @@ final class InteractionSimulator {
             log.warn("meridian-core: interaction sim hit the step cap (root {})", compiled.rootId());
         }
         return executed;
+    }
+
+    /**
+     * Tick-accurate simulation — the proxy port of the server's per-tick
+     * {@code Interaction.tick} loop. Runs the chain at 60&nbsp;Hz: each operation
+     * accumulates elapsed time, {@code tickInternal} marks it {@code NotFinished}
+     * while {@code time < runTime}, the node's own {@code tick0} may override,
+     * and one packet is emitted per tick (the operations resolved that tick plus
+     * the one still running). This is the honest model behind {@link #splitPackets}
+     * — it reproduces a charge / hold playing out over many ticks.
+     */
+    static List<Packet> simulateTicked(CompiledInteraction root, InteractionContext ctx,
+                                       RootResolver resolver) {
+        List<Packet> packets = new ArrayList<>();
+        CompiledInteraction compiled = root;
+        Set<Integer> visitedRoots = new HashSet<>();
+        visitedRoots.add(compiled.rootId());
+        int counter = 0;
+        int flatIndex = 0;
+        float opTime = 0.0f;
+        List<InteractionSyncData> packet = new ArrayList<>();
+        int packetBase = 0;
+
+        for (int tick = 0; tick < MAX_TICKS; tick++) {
+            boolean running = false;
+            for (int step = 0; step < MAX_STEPS; step++) {
+                FlatOp op = compiled.op(counter);
+                if (op == null) {
+                    if (!packet.isEmpty()) {
+                        packets.add(new Packet(packetBase, packet));
+                    }
+                    return packets; // walked off the end — chain complete
+                }
+                if (op instanceof FlatOp.Jump jump) {
+                    // A jump the walk lands on (by fall-through) is an executed
+                    // operation — the server records it; jumps a branch skips
+                    // over are not reached and not recorded.
+                    InteractionSyncData jd = new InteractionSyncData();
+                    jd.operationCounter = counter;
+                    jd.rootInteraction = compiled.rootId();
+                    jd.state = InteractionState.Finished;
+                    jd.progress = 0.0f;
+                    packet.add(jd);
+                    flatIndex++;
+                    counter = jump.target().index;
+                    if (counter == OpLabel.UNRESOLVED) {
+                        log.warn("meridian-core: ticked sim hit an unresolved jump (root {})",
+                                compiled.rootId());
+                        if (!packet.isEmpty()) {
+                            packets.add(new Packet(packetBase, packet));
+                        }
+                        return packets;
+                    }
+                    continue;
+                }
+                FlatOp.Node node = (FlatOp.Node) op;
+                InteractionState state = tickState(node.interaction(), ctx, opTime);
+                // Tap/hold gate: a plain SimpleInteraction whose failed branch
+                // enters a ChargingInteraction. Its Finished branch is the inert
+                // "tap"; a forged interaction holds, so it takes the hold branch.
+                if (state == InteractionState.Finished
+                        && node.interaction().getClass() == SimpleInteraction.class
+                        && node.labels().length > 0
+                        && isChargeOp(compiled.op(node.labels()[0].index))) {
+                    state = InteractionState.Failed;
+                }
+                InteractionSyncData sd = syncDataFor(node, counter, compiled.rootId(), state, ctx);
+                sd.progress = opTime;
+                packet.add(sd);
+
+                if (state == InteractionState.NotFinished) {
+                    // Operation still running — the packet ends here this tick;
+                    // the running operation keeps its flat index for the next.
+                    packets.add(new Packet(packetBase, packet));
+                    packet = new ArrayList<>();
+                    packetBase = flatIndex;
+                    opTime += TICK_SECONDS;
+                    running = true;
+                    break;
+                }
+
+                // Operation resolved this tick.
+                if (node.interaction() instanceof ReplaceInteraction replace
+                        && state != InteractionState.Failed) {
+                    CompiledInteraction next = switchRoot(replace, compiled, ctx, resolver,
+                            visitedRoots);
+                    if (next == null) {
+                        if (!packet.isEmpty()) {
+                            packets.add(new Packet(packetBase, packet));
+                        }
+                        return packets;
+                    }
+                    compiled = next;
+                    counter = 0;
+                } else if (node.interaction() instanceof ChargingInteraction
+                        && state == InteractionState.Finished && node.labels().length > 0) {
+                    // ChargingInteraction.jumpToChargeValue: a finished charge
+                    // routes to a charge-tier label — the basic tier (label 0)
+                    // for a minimal hold.
+                    counter = node.labels()[0].index;
+                } else if (state == InteractionState.Failed && node.labels().length > 0) {
+                    counter = node.labels()[0].index;
+                } else {
+                    counter++;
+                }
+                opTime = 0.0f;
+                flatIndex++;
+            }
+            if (!running) {
+                log.warn("meridian-core: ticked sim hit the step cap (root {})", compiled.rootId());
+                if (!packet.isEmpty()) {
+                    packets.add(new Packet(packetBase, packet));
+                }
+                return packets;
+            }
+        }
+        log.warn("meridian-core: ticked sim hit the tick cap (root {})", compiled.rootId());
+        if (!packet.isEmpty()) {
+            packets.add(new Packet(packetBase, packet));
+        }
+        return packets;
+    }
+
+    /**
+     * Ported per-tick outcome: {@code tickInternal}'s {@code runTime} gate, then
+     * the node's {@code tick0} override.
+     */
+    private static InteractionState tickState(Interaction node, InteractionContext ctx,
+                                              float opTime) {
+        // tickInternal: NotFinished until the elapsed time reaches the runTime.
+        InteractionState timed = opTime < node.runTime
+                ? InteractionState.NotFinished : InteractionState.Finished;
+        if (node instanceof UseEntityInteraction) {
+            return InteractionState.Failed;
+        }
+        if (node instanceof UseBlockInteraction) {
+            return hasBlockInteraction(ctx.targetBlockType(), ctx.interactionType())
+                    ? InteractionState.Finished : InteractionState.Failed;
+        }
+        if (node instanceof ConditionInteraction condition) {
+            return conditionHolds(condition, ctx)
+                    ? InteractionState.Finished : InteractionState.Failed;
+        }
+        if (node instanceof PlaceBlockInteraction) {
+            // simulateTick0: NotFinished on the first run, Finished once confirmed.
+            return opTime <= 0.0f ? InteractionState.NotFinished : InteractionState.Finished;
+        }
+        return timed;
+    }
+
+    /** Whether {@code op} is a {@code ChargingInteraction} node. */
+    private static boolean isChargeOp(FlatOp op) {
+        return op instanceof FlatOp.Node n && n.interaction() instanceof ChargingInteraction;
+    }
+
+    /** The lowest charge threshold of a {@code ChargingInteraction} — its first tier. */
+    private static float lowestChargeKey(ChargingInteraction charging) {
+        if (charging.chargedNext == null || charging.chargedNext.isEmpty()) {
+            return 0.0f;
+        }
+        float min = Float.MAX_VALUE;
+        for (Float key : charging.chargedNext.keySet()) {
+            if (key != null && key < min) {
+                min = key;
+            }
+        }
+        return min == Float.MAX_VALUE ? 0.0f : min;
     }
 
     /**
@@ -255,9 +423,11 @@ final class InteractionSimulator {
         data.rootInteraction = rootId;
         data.state = state;
 
-        if (node.interaction() instanceof ChargingInteraction) {
-            // ChargingInteraction.tick0 keys off chargeValue; -2.0 = finish now.
-            data.chargeValue = CHARGE_FINISH_NOW;
+        if (node.interaction() instanceof ChargingInteraction charging) {
+            // ChargingInteraction.tick0 reads chargeValue and jumpToChargeValue
+            // routes by it — the lowest charge tier (a minimal hold) into the
+            // first charge label.
+            data.chargeValue = lowestChargeKey(charging);
         } else if (node.interaction() instanceof PlaceBlockInteraction place && ctx.placeBlock() != null) {
             // PlaceBlockInteraction.tick0 requires a non-null blockPosition +
             // blockRotation and reads blockFace; placedBlockId is the node's

@@ -108,31 +108,35 @@ Plant place — root 3385  *Plant_Seeds_Sunflower_…   (1 op)
 Root ids are **not** hard-coded — `InteractionControl` learns them from observed
 C2S chains (`observedRoot` map, keyed by `InteractionType`).
 
-## Capture-replay vs VM
+## Tick-simulator (the VM)
 
-Two paths in `InteractionControlImpl.forge`, both multi-packet:
-- **VM** (`buildFromVm`) — flatten + simulate the walk, then `splitPackets`
-  chunks it into the C2S packets a real client sends. An operation a node
-  leaves `NotFinished` (`PlaceBlockInteraction` — its `simulateTick0` never
-  finishes on the first run) ends a packet; the next packet re-sends it
-  `Finished` (the server's `NotFinished` → `Finished` handshake). Harvest stays
-  one packet; plant is opener + continuation. Each packet carries its
-  `operationBaseIndex` — the server reads op `i` as chain index
-  `operationBaseIndex + i`, so a continuation must resume from its real index
-  (plant's continuation: 2), not 0. Used when no capture exists.
-- **Capture-replay** — re-sends the real chain *sequence* the player performed
-  (buffered by client chainId until the terminal chain, `state != NotFinished`),
-  with a fresh forged `chainId` and retargeted block. The fallback / oracle.
+`InteractionSimulator.simulateTicked` is the proxy port of the server's
+per-tick `Interaction.tick` loop. It runs the chain at 60&nbsp;Hz: each
+operation accumulates elapsed time, `tickInternal` marks it `NotFinished` while
+`time < runTime` (`progress = time`), the node's `tick0` may override, and one
+packet is emitted per tick (the ops resolved that tick plus the one running).
+Each packet records its `operationBaseIndex` (the server reads op `i` as chain
+index `operationBaseIndex + i`).
 
-Each captured packet is stored with its arrival time. Replay is **paced**: the
-packets go out one `SyncInteractionChains` each, at the original inter-packet
-deltas (`sendPacedReplay` + `Scheduler`). A water charge plays out over ~19
-server ticks and the server validates the charge against its own clock — a
-one-burst replay sends `progress` ahead of the server's clock and is cancelled.
-Plant/harvest are 1–2 instant packets, so pacing is a no-op for them.
+Ported node decisions: `Condition` (movement flags), `UseBlock`/`UseEntity`,
+`PlaceBlock` (`NotFinished` first run), `ReplaceInteraction` (root switch via
+`interactionVars`), `ChargingInteraction` (Finished → `jumpToChargeValue`,
+`chargeValue` = lowest tier), the **tap/hold gate** (a plain `SimpleInteraction`
+whose failed branch enters a charge → a forged interaction holds → `Failed`),
+and traversed fall-through jumps are emitted as ops.
 
-The VM walk still does not reach water's charge path (op 5 never fails), so
-water is replay-only until the charge nodes are ported.
+Validated by `validateTickedVm`: it reconstructs the *server-authoritative*
+walk from a real capture (a `desync` packet rewinds the op list, discarding the
+client's mispredicted ops) and compares — water: `VM-tick check ... MATCH`.
+
+## Forge
+
+`InteractionControlImpl.forge`: **VM primary** — `buildFromVm` runs
+`simulateTicked` and sends one packet per tick, paced at 60&nbsp;Hz
+(`sendPacedVm`), so the server's `runTime`/charge clock keeps step with the
+`progress` the packets carry. Capture-replay (`sendPacedReplay`, paced from
+recorded arrival times) is the fallback when a root cannot be resolved, and the
+capture still feeds the `VM-tick` oracle.
 
 `forge` currently prefers the captured template, VM is the fallback.
 

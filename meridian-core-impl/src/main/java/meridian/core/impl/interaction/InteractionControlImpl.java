@@ -206,6 +206,7 @@ public final class InteractionControlImpl implements InteractionControl {
                 for (TimedChain tc : seq) {
                     dumpChain("CAPTURED", tc.chain());
                 }
+                validateTickedVm(key, seq);
             }
         }
     }
@@ -249,6 +250,83 @@ public final class InteractionControlImpl implements InteractionControl {
         log.info("meridian-core: VM check {} root {} — real=[{}] vm=[{}] {}",
                 captured.interactionType, rootId, real.toString().trim(),
                 sim.toString().trim(), match ? "MATCH" : "MISMATCH");
+    }
+
+    /**
+     * Runs the tick-accurate simulator against a captured sequence and logs
+     * whether it reproduces the full multi-tick op stream — the oracle for the
+     * Phase-1 tick-simulator. Diagnostic only; the forge path is unaffected.
+     */
+    private void validateTickedVm(ActionKey key, List<TimedChain> seq) {
+        Integer rootId = observedRoot.get(key);
+        if (rootId == null) {
+            return;
+        }
+        CompiledInteraction compiled = compileRoot(rootId);
+        SyncInteractionChain first = seq.get(0).chain();
+        if (compiled == null || first.data == null || first.data.blockPosition == null) {
+            return;
+        }
+        InteractionContext ctx = contextFor(key.type(), first.data.blockPosition,
+                DataKind.BLOCK, key.item());
+        List<InteractionSimulator.Packet> ticked = InteractionSimulator.simulateTicked(
+                compiled, ctx, this::compileRoot);
+
+        // Reconstruct the server-authoritative walk from the capture: each op
+        // lives at flat index operationBaseIndex + i; a desync packet rewinds
+        // the list to its operationBaseIndex, discarding the client's
+        // mispredicted ops. The final state at each index is what the server saw.
+        List<InteractionSyncData> realWalk = new ArrayList<>();
+        for (TimedChain tc : seq) {
+            SyncInteractionChain c = tc.chain();
+            if (c.interactionData == null) {
+                continue;
+            }
+            if (c.desync) {
+                while (realWalk.size() > c.operationBaseIndex) {
+                    realWalk.remove(realWalk.size() - 1);
+                }
+            }
+            placeOps(realWalk, c.operationBaseIndex, c.interactionData);
+        }
+        List<InteractionSyncData> simWalk = new ArrayList<>();
+        for (InteractionSimulator.Packet p : ticked) {
+            placeOps(simWalk, p.baseIndex(), p.ops().toArray(new InteractionSyncData[0]));
+        }
+
+        String realStr = walkString(realWalk);
+        String simStr = walkString(simWalk);
+        boolean match = realStr.equals(simStr);
+        log.info("meridian-core: VM-tick check {} root {} — {}", key.type(), rootId,
+                match ? "MATCH" : "MISMATCH");
+        log.info("meridian-core: VM-tick real=[{}]", realStr);
+        log.info("meridian-core: VM-tick  sim=[{}]", simStr);
+    }
+
+    /** Places {@code ops} into {@code walk} at flat indices {@code base + i}. */
+    private static void placeOps(List<InteractionSyncData> walk, int base,
+                                 InteractionSyncData[] ops) {
+        for (int i = 0; i < ops.length; i++) {
+            if (ops[i] == null) {
+                continue;
+            }
+            int flat = base + i;
+            while (walk.size() <= flat) {
+                walk.add(null);
+            }
+            walk.set(flat, ops[i]);
+        }
+    }
+
+    /** Renders a flat walk as {@code counter=state} entries. */
+    private static String walkString(List<InteractionSyncData> walk) {
+        StringBuilder sb = new StringBuilder();
+        for (InteractionSyncData d : walk) {
+            if (d != null) {
+                sb.append(d.operationCounter).append('=').append(d.state).append(' ');
+            }
+        }
+        return sb.toString().trim();
     }
 
     /**
@@ -489,6 +567,76 @@ public final class InteractionControlImpl implements InteractionControl {
         return crops.size();
     }
 
+    @Override
+    public int waterNearby(int radius) {
+        if (session == null) {
+            log.warn("meridian-core: waterNearby requested but no session yet");
+            return 0;
+        }
+        int canSlot = inventory.findHotbarSlot("Watering_Can");
+        if (canSlot < 0) {
+            log.warn("meridian-core: waterNearby — no watering can in the hotbar");
+            return 0;
+        }
+        String canItem = inventory.hotbarItem(canSlot);
+        List<TimedChain> seq = canItem == null ? null
+                : capturedSeq.get(ActionKey.of(InteractionType.Secondary, canItem));
+        if (seq == null || seq.isEmpty()) {
+            log.warn("meridian-core: waterNearby — no captured watering chain; water once "
+                    + "manually first (the charge is replay-only)");
+            return 0;
+        }
+        Vec3 p = entities.localPosition().orElse(null);
+        if (p == null) {
+            log.warn("meridian-core: waterNearby — player position unknown");
+            return 0;
+        }
+        int px = (int) Math.floor(p.x());
+        int py = (int) Math.floor(p.y());
+        int pz = (int) Math.floor(p.z());
+
+        List<BlockPos> soil = new ArrayList<>();
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                for (int dy = -2; dy <= 1; dy++) {
+                    int bx = px + dx, by = py + dy, bz = pz + dz;
+                    if (isWaterable(bx, by, bz)) {
+                        soil.add(new BlockPos(bx, by, bz));
+                    }
+                }
+            }
+        }
+        if (soil.isEmpty()) {
+            log.info("meridian-core: waterNearby — no tilled soil within {}", radius);
+            return 0;
+        }
+
+        // One watering plays out over the captured sequence's span; space the
+        // blocks by that span so the paced replays do not overlap.
+        long stepMs = (seq.get(seq.size() - 1).nanos() - seq.get(0).nanos()) / 1_000_000L + 400L;
+        int original = inventory.activeHotbarSlot();
+        log.info("meridian-core: waterNearby — {} soil block(s), ~{}ms each, can slot {}",
+                soil.size(), stepMs, canSlot);
+        switchHotbarSlot(canSlot);
+        for (int i = 0; i < soil.size(); i++) {
+            BlockPos block = soil.get(i);
+            scheduler.schedule(() -> waterBlock(block), Duration.ofMillis(i * stepMs));
+        }
+        scheduler.schedule(() -> switchHotbarSlot(original),
+                Duration.ofMillis(soil.size() * stepMs));
+        return soil.size();
+    }
+
+    /** A block is waterable if it is tilled soil. */
+    private boolean isWaterable(int x, int y, int z) {
+        int id = chunks.blockIdAt(x, y, z);
+        if (id <= 0) {
+            return false;
+        }
+        BlockType type = worldState.blockTypeById(id);
+        return type != null && type.name != null && type.name.contains("Tilled");
+    }
+
     /** A block is a harvestable crop if it is a non-air block standing on tilled soil. */
     private boolean isHarvestable(int x, int y, int z) {
         int id = chunks.blockIdAt(x, y, z);
@@ -522,23 +670,37 @@ public final class InteractionControlImpl implements InteractionControl {
                 chunks.blockIdAt(pos.x(), pos.y() + 1, pos.z()));
 
         String itemId = inventory.itemInHandId();
+
+        // VM is the primary path — it honestly simulates the server walk. The
+        // captured-sequence replay is the fallback when a root cannot be resolved.
+        SyncInteractionChain[] forged = buildFromVm(pos, type, dataKind, itemId);
+        if (forged != null) {
+            sendPacedVm(forged, type, pos);
+            return;
+        }
         List<TimedChain> sequence = capturedSeq.get(ActionKey.of(type, itemId));
         if (sequence != null && !sequence.isEmpty()) {
             sendPacedReplay(sequence, pos, type);
-            return;
         }
+    }
 
-        SyncInteractionChain[] forged = buildFromVm(pos, type, dataKind, itemId);
-        if (forged == null) {
-            return; // nothing to send yet — reason already logged
-        }
-        SyncInteractionChains packet = new SyncInteractionChains();
-        packet.updates = forged;
-        s.sendToServer(packet);
-        log.info("meridian-core: forged {} chain {} ({} packet(s)) at ({},{},{}) — vm",
+    /**
+     * Sends a VM-built chain paced at the 60&nbsp;Hz tick rate — one packet per
+     * tick, so the server's {@code runTime} / charge clock keeps step with the
+     * {@code progress} the packets carry.
+     */
+    private void sendPacedVm(SyncInteractionChain[] forged, InteractionType type, BlockPos pos) {
+        log.info("meridian-core: forged {} chain {} ({} packet(s), ticked) at ({},{},{}) — vm",
                 type, forged[0].chainId, forged.length, pos.x(), pos.y(), pos.z());
-        for (SyncInteractionChain c : forged) {
+        for (int i = 0; i < forged.length; i++) {
+            SyncInteractionChain c = forged[i];
             dumpChain("FORGED-vm", c);
+            long delayMs = i * 1000L / 60L;
+            if (delayMs == 0L) {
+                sendChain(c);
+            } else {
+                scheduler.schedule(() -> sendChain(c), Duration.ofMillis(delayMs));
+            }
         }
     }
 
@@ -684,26 +846,39 @@ public final class InteractionControlImpl implements InteractionControl {
     }
 
     /**
-     * Fallback: build the chain from the interaction VM (no capture available).
-     * The simulated walk is split into the C2S packets a real client sends —
-     * an interaction with a {@code NotFinished} operation (plant's
-     * {@code PlaceBlockInteraction}) spans an opener plus continuation(s).
+     * Builds the chain from the interaction VM: the tick-accurate simulator
+     * ({@link InteractionSimulator#simulateTicked}) produces one packet per
+     * 60&nbsp;Hz tick — instant ops resolve in the opener, a {@code runTime}
+     * charge / hold spans many. {@code null} if the root cannot be resolved.
      */
     private SyncInteractionChain[] buildFromVm(BlockPos pos, InteractionType type,
                                                DataKind dataKind, String itemId) {
-        List<InteractionSyncData> walk = simulateWalk(pos, type, dataKind, itemId);
-        if (walk == null || walk.isEmpty()) {
-            return null; // root unresolved — logged in simulateWalk
+        OptionalInt rootId = resolveRoot(type, itemId);
+        if (rootId.isEmpty()) {
+            log.warn("meridian-core: no root for {} with item {} — item catalog not "
+                    + "received, or perform the action once manually", type, itemId);
+            return null;
         }
-        List<InteractionSimulator.Packet> packets = InteractionSimulator.splitPackets(walk);
+        CompiledInteraction compiled = compileRoot(rootId.getAsInt());
+        if (compiled == null) {
+            log.warn("meridian-core: root {} not in registry", rootId.getAsInt());
+            return null;
+        }
+        InteractionContext ctx = contextFor(type,
+                new BlockPosition(pos.x(), pos.y(), pos.z()), dataKind, itemId);
+        List<InteractionSimulator.Packet> packets = InteractionSimulator.simulateTicked(
+                compiled, ctx, this::compileRoot);
+        if (packets.isEmpty()) {
+            return null;
+        }
         int forgedId = nat.allocateForged();
         SyncInteractionChain[] chains = new SyncInteractionChain[packets.size()];
         for (int i = 0; i < packets.size(); i++) {
             chains[i] = vmChain(pos, type, forgedId, i == 0, i == packets.size() - 1,
                     packets.get(i));
         }
-        log.info("meridian-core: VM built {} sequence ({} packet(s)) for item {}",
-                type, chains.length, itemId);
+        log.info("meridian-core: VM ticked root {} ({} packet(s)) for {} item {}",
+                rootId.getAsInt(), chains.length, type, itemId);
         return chains;
     }
 
@@ -740,29 +915,6 @@ public final class InteractionControlImpl implements InteractionControl {
 
         chain.interactionData = packet.ops().toArray(new InteractionSyncData[0]);
         return chain;
-    }
-
-    /** Resolves the root for (type, held item), flattens and simulates it against {@code pos}. */
-    private List<InteractionSyncData> simulateWalk(BlockPos pos, InteractionType type,
-                                                   DataKind dataKind, String itemId) {
-        OptionalInt rootId = resolveRoot(type, itemId);
-        if (rootId.isEmpty()) {
-            log.warn("meridian-core: no root for {} with item {} — item catalog not "
-                    + "received, or perform the action once manually", type, itemId);
-            return null;
-        }
-        CompiledInteraction compiled = compileRoot(rootId.getAsInt());
-        if (compiled == null) {
-            log.warn("meridian-core: root {} not in registry", rootId.getAsInt());
-            return null;
-        }
-        BlockPosition target = new BlockPosition(pos.x(), pos.y(), pos.z());
-        InteractionContext ctx = contextFor(type, target, dataKind, itemId);
-        List<InteractionSyncData> walk = InteractionSimulator.simulate(
-                compiled, ctx, this::compileRoot);
-        log.info("meridian-core: simulated root {} ({} ops) for {} item {}",
-                rootId.getAsInt(), walk.size(), type, itemId);
-        return walk;
     }
 
     /**

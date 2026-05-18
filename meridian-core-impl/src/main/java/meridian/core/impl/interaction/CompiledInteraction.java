@@ -55,6 +55,7 @@ record CompiledInteraction(int rootId, List<FlatOp> ops) {
 
     /** Appends the decision-relevant fields of a node — what the simulator branches on. */
     private static void details(StringBuilder sb, Interaction node) {
+        sb.append(" wait=").append(node.waitForDataFrom).append(" rt=").append(node.runTime);
         if (node instanceof ConditionInteraction c) {
             sb.append(" {");
             if (c.requiredGameMode != null) sb.append(" gameMode=").append(c.requiredGameMode);
