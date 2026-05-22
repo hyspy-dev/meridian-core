@@ -30,16 +30,23 @@ final class ClientObserver implements PacketHandler {
 
     @Override
     public Action handleC2S(ChannelHandlerContext ctx, Packet packet, ProxySession session) {
-        camera.bind(session);
+        // ClientMovement / RequestFlyCameraMode travel on the Default channel —
+        // binding the camera only on these keeps its session off any other
+        // C2S stream, so SetFlyCameraMode / SetServerCamera go out on Default.
         if (packet instanceof ClientMovement movement) {
+            camera.bind(session);
             tracker.onClientMovement(movement);
             return Action.FORWARD;
         }
-        if (packet instanceof RequestFlyCameraMode request && camera.autoGrantFreecam()) {
-            // Answer the keybind ourselves; do not relay the request to the server.
-            session.sendToClient(new SetFlyCameraMode(request.entering));
-            log.info("meridian-core: auto-granted freecam keybind (entering={})", request.entering);
-            return Action.DROP;
+        if (packet instanceof RequestFlyCameraMode request) {
+            camera.bind(session);
+            if (camera.autoGrantFreecam()) {
+                // Answer the keybind ourselves; do not relay the request.
+                session.sendToClient(new SetFlyCameraMode(request.entering));
+                log.info("meridian-core: auto-granted freecam keybind (entering={})",
+                        request.entering);
+                return Action.DROP;
+            }
         }
         return Action.FORWARD;
     }

@@ -23,10 +23,14 @@ final class ServerObserver implements PacketHandler {
 
     @Override
     public Action handleS2C(ChannelHandlerContext ctx, Packet packet, ProxySession session) {
-        camera.bind(session);
+        // SetClientId / EntityUpdates travel on the Default channel — binding the
+        // camera only on these keeps its session off the Chunks (or any other)
+        // stream, so SetFlyCameraMode / SetServerCamera go out on Default.
         if (packet instanceof SetClientId setClientId) {
+            camera.bind(session);
             tracker.onSetClientId(setClientId);
         } else if (packet instanceof EntityUpdates updates) {
+            camera.bind(session);
             tracker.onEntityUpdates(updates);
         }
         return Action.FORWARD;
