@@ -22,24 +22,29 @@ final class ClientObserver implements PacketHandler {
 
     private final EntityTrackerImpl tracker;
     private final CameraControlImpl camera;
+    private final DebugRenderImpl debugRender;
 
-    ClientObserver(EntityTrackerImpl tracker, CameraControlImpl camera) {
+    ClientObserver(EntityTrackerImpl tracker, CameraControlImpl camera,
+                   DebugRenderImpl debugRender) {
         this.tracker = tracker;
         this.camera = camera;
+        this.debugRender = debugRender;
     }
 
     @Override
     public Action handleC2S(ChannelHandlerContext ctx, Packet packet, ProxySession session) {
         // ClientMovement / RequestFlyCameraMode travel on the Default channel —
-        // binding the camera only on these keeps its session off any other
-        // C2S stream, so SetFlyCameraMode / SetServerCamera go out on Default.
+        // binding the camera / debug-render session only on these keeps it off
+        // any other C2S stream, so their packets go out on Default.
         if (packet instanceof ClientMovement movement) {
             camera.bind(session);
+            debugRender.bind(session);
             tracker.onClientMovement(movement);
             return Action.FORWARD;
         }
         if (packet instanceof RequestFlyCameraMode request) {
             camera.bind(session);
+            debugRender.bind(session);
             if (camera.autoGrantFreecam()) {
                 // Answer the keybind ourselves; do not relay the request.
                 session.sendToClient(new SetFlyCameraMode(request.entering));

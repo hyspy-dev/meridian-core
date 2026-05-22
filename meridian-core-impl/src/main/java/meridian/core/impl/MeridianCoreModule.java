@@ -5,6 +5,7 @@ import meridian.api.module.ProxyModule;
 import meridian.api.packet.Direction;
 import meridian.api.packet.HandlerPosition;
 import meridian.core.api.CameraControl;
+import meridian.core.api.DebugRender;
 import meridian.core.api.EntityTracker;
 import meridian.core.api.InteractionControl;
 import meridian.core.api.World;
@@ -38,18 +39,20 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
                 (direction, session) -> new BlockTypeObserver(worldState));
 
-        // --- EntityTracker + CameraControl -----------------------------------
+        // --- EntityTracker + CameraControl + DebugRender ---------------------
         EntityTrackerImpl entityTracker = new EntityTrackerImpl();
         CameraControlImpl cameraControl = new CameraControlImpl();
+        DebugRenderImpl debugRender = new DebugRenderImpl(entityTracker);
         ctx.services().provide(EntityTracker.class, entityTracker);
         ctx.services().provide(CameraControl.class, cameraControl);
+        ctx.services().provide(DebugRender.class, debugRender);
 
         // S2C: learn the local id, track entity transforms, capture the session.
         ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
-                (direction, session) -> new ServerObserver(entityTracker, cameraControl));
+                (direction, session) -> new ServerObserver(entityTracker, cameraControl, debugRender));
         // C2S: track the player's pose and (optionally) auto-grant the freecam key.
         ctx.registerHandler(Direction.C2S, HandlerPosition.NORMAL,
-                (direction, session) -> new ClientObserver(entityTracker, cameraControl));
+                (direction, session) -> new ClientObserver(entityTracker, cameraControl, debugRender));
 
         // --- Interaction-chain forging foundation ----------------------------
         // InteractionRegistry: server's interaction catalog (UpdateRootInteractions

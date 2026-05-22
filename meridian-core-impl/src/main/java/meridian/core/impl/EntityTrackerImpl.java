@@ -3,6 +3,7 @@ package meridian.core.impl;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import meridian.core.api.EntityTracker;
 import meridian.core.api.Vec3;
@@ -108,6 +109,11 @@ final class EntityTrackerImpl implements EntityTracker {
     @Override
     public int trackedCount() {
         return positions.size();
+    }
+
+    @Override
+    public Set<Integer> trackedEntities() {
+        return Set.copyOf(positions.keySet());
     }
 
     @Override

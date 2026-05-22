@@ -2,6 +2,7 @@ package meridian.core.api;
 
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 
 /**
  * Live registry of entities the server has spawned for this client — a
@@ -28,6 +29,9 @@ public interface EntityTracker {
 
     /** Number of entities currently tracked. */
     int trackedCount();
+
+    /** Network ids of every currently tracked entity (includes the local player). */
+    Set<Integer> trackedEntities();
 
     /**
      * Network id of the entity nearest the local player, excluding the player
