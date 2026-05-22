@@ -24,6 +24,7 @@ import meridian.core.impl.WorldStateImpl;
 import meridian.protocol.BlockType;
 import meridian.protocol.BlockFace;
 import meridian.protocol.BlockPosition;
+import meridian.protocol.ForkedChainId;
 import meridian.protocol.InteractionChainData;
 import meridian.protocol.InteractionState;
 import meridian.protocol.InteractionSyncData;
@@ -292,7 +293,7 @@ public final class InteractionControlImpl implements InteractionControl {
         InteractionContext ctx = contextFor(key.type(), first.data.blockPosition,
                 DataKind.BLOCK, key.item());
         List<InteractionSimulator.Packet> ticked = InteractionSimulator.simulateTicked(
-                compiled, ctx, this::compileRoot);
+                compiled, ctx, this::compileRoot).packets();
 
         // Reconstruct the server-authoritative walk from the capture: each op
         // lives at flat index operationBaseIndex + i; a desync packet rewinds
@@ -418,6 +419,15 @@ public final class InteractionControlImpl implements InteractionControl {
         // Harvest interactions are requiresClient — the server waits for per-op
         // client data, so a bare chain is not enough. Build it via the VM.
         return enqueueForge(() -> forge(pos, InteractionType.Use, DataKind.BLOCK));
+    }
+
+    @Override
+    public CompletableFuture<Void> hitBlock(BlockPos pos) {
+        // A hit is a Primary (left-click) interaction — the held item's Primary
+        // root carries a BreakBlockInteraction the server resolves into block
+        // damage. One forge = one hit; the server decides the HP removed, so a
+        // block may need several hits to break.
+        return enqueueForge(() -> forge(pos, InteractionType.Primary, DataKind.BLOCK));
     }
 
     @Override
@@ -575,7 +585,7 @@ public final class InteractionControlImpl implements InteractionControl {
 
         // VM is the primary path — it honestly simulates the server walk. The
         // captured-sequence replay is the fallback when a root cannot be resolved.
-        SyncInteractionChain[] forged = buildFromVm(pos, type, dataKind, itemId);
+        SyncInteractionChains[] forged = buildFromVm(pos, type, dataKind, itemId);
         if (forged != null) {
             return sendPacedVm(forged, type, pos);
         }
@@ -591,20 +601,23 @@ public final class InteractionControlImpl implements InteractionControl {
      * tick, so the server's {@code runTime} / charge clock keeps step with the
      * {@code progress} the packets carry.
      */
-    private int sendPacedVm(SyncInteractionChain[] forged, InteractionType type, BlockPos pos) {
-        log.info("meridian-core: forged {} chain {} ({} packet(s), ticked) at ({},{},{}) — vm",
-                type, forged[0].chainId, forged.length, pos.x(), pos.y(), pos.z());
+    private int sendPacedVm(SyncInteractionChains[] forged, InteractionType type, BlockPos pos) {
+        int chainId = forged[0].updates.length > 0 ? forged[0].updates[0].chainId : -1;
+        log.info("meridian-core: forged {} chain {} ({} tick(s), ticked) at ({},{},{}) — vm",
+                type, chainId, forged.length, pos.x(), pos.y(), pos.z());
         for (int i = 0; i < forged.length; i++) {
-            SyncInteractionChain c = forged[i];
-            dumpChain("FORGED-vm", c);
+            SyncInteractionChains scs = forged[i];
+            for (SyncInteractionChain c : scs.updates) {
+                dumpChain("FORGED-vm", c);
+            }
             long delayMs = i * 1000L / 60L;
             if (delayMs == 0L) {
-                sendChain(c);
+                sendChains(scs);
             } else {
-                scheduler.schedule(() -> sendChain(c), Duration.ofMillis(delayMs));
+                scheduler.schedule(() -> sendChains(scs), Duration.ofMillis(delayMs));
             }
         }
-        return forged.length; // one packet per 60 Hz tick
+        return forged.length; // one SyncInteractionChains per 60 Hz tick
     }
 
     /**
@@ -643,6 +656,14 @@ public final class InteractionControlImpl implements InteractionControl {
         SyncInteractionChains packet = new SyncInteractionChains();
         packet.updates = new SyncInteractionChain[] {chain};
         s.sendToServer(packet);
+    }
+
+    /** Sends a pre-batched {@code SyncInteractionChains} (main chain + forks). */
+    private void sendChains(SyncInteractionChains packet) {
+        ProxySession s = session;
+        if (s != null) {
+            s.sendToServer(packet);
+        }
     }
 
     /**
@@ -751,13 +772,20 @@ public final class InteractionControlImpl implements InteractionControl {
                 ? template.data.blockPosition.y : 0;
     }
 
+    /** A simulated parallel fork: its spec and its per-tick packets. */
+    private record ForkBuild(InteractionSimulator.Fork fork,
+                             List<InteractionSimulator.Packet> packets) {}
+
     /**
-     * Builds the chain from the interaction VM: the tick-accurate simulator
-     * ({@link InteractionSimulator#simulateTicked}) produces one packet per
-     * 60&nbsp;Hz tick — instant ops resolve in the opener, a {@code runTime}
-     * charge / hold spans many. {@code null} if the root cannot be resolved.
+     * Builds the forged chain from the interaction VM. {@link InteractionSimulator}
+     * produces the main chain's per-tick packets plus any parallel forks a
+     * {@code ParallelInteraction} spawned; each fork root is simulated in turn.
+     * The result is one {@code SyncInteractionChains} per 60&nbsp;Hz tick — the
+     * main chain plus every fork active that tick — with the forks announced in
+     * {@code newForks} on the packet that resolved the {@code ParallelInteraction}.
+     * {@code null} if the root cannot be resolved.
      */
-    private SyncInteractionChain[] buildFromVm(BlockPos pos, InteractionType type,
+    private SyncInteractionChains[] buildFromVm(BlockPos pos, InteractionType type,
                                                DataKind dataKind, String itemId) {
         OptionalInt rootId = resolveRoot(type, itemId);
         if (rootId.isEmpty()) {
@@ -772,26 +800,100 @@ public final class InteractionControlImpl implements InteractionControl {
         }
         InteractionContext ctx = contextFor(type,
                 new BlockPosition(pos.x(), pos.y(), pos.z()), dataKind, itemId);
-        List<InteractionSimulator.Packet> packets = InteractionSimulator.simulateTicked(
+        InteractionSimulator.TickedResult main = InteractionSimulator.simulateTicked(
                 compiled, ctx, this::compileRoot);
-        if (packets.isEmpty()) {
+        List<InteractionSimulator.Packet> mainPackets = main.packets();
+        if (mainPackets.isEmpty()) {
             return null;
         }
         int forgedId = nat.allocateForged();
-        SyncInteractionChain[] chains = new SyncInteractionChain[packets.size()];
-        for (int i = 0; i < packets.size(); i++) {
-            chains[i] = vmChain(pos, type, forgedId, i == 0, i == packets.size() - 1,
-                    packets.get(i));
+
+        // Simulate each ParallelInteraction fork root into its own packet list.
+        List<ForkBuild> forks = new ArrayList<>();
+        for (InteractionSimulator.Fork fork : main.forks()) {
+            CompiledInteraction forkRoot = compileRoot(fork.rootId());
+            if (forkRoot == null) {
+                log.warn("meridian-core: fork root {} not in registry — skipped", fork.rootId());
+                continue;
+            }
+            InteractionSimulator.TickedResult fr = InteractionSimulator.simulateTicked(
+                    forkRoot, ctx, this::compileRoot);
+            if (!fr.forks().isEmpty()) {
+                log.warn("meridian-core: nested forks in root {} not emitted", fork.rootId());
+            }
+            forks.add(new ForkBuild(fork, fr.packets()));
         }
-        log.info("meridian-core: VM ticked root {} ({} packet(s)) for {} item {}",
-                rootId.getAsInt(), chains.length, type, itemId);
-        return chains;
+
+        // The forks are announced on the main packet that carries the
+        // ParallelInteraction op, and run starting the tick after it.
+        int announceIdx = 0;
+        if (!forks.isEmpty()) {
+            int entryIndex = forks.get(0).fork().entryIndex();
+            for (int i = 0; i < mainPackets.size(); i++) {
+                InteractionSimulator.Packet p = mainPackets.get(i);
+                if (entryIndex >= p.baseIndex()
+                        && entryIndex < p.baseIndex() + p.ops().size()) {
+                    announceIdx = i;
+                    break;
+                }
+            }
+        }
+        int forkStartTick = announceIdx + 1;
+
+        int total = mainPackets.size();
+        for (ForkBuild fb : forks) {
+            total = Math.max(total, forkStartTick + fb.packets().size());
+        }
+
+        SyncInteractionChains[] perTick = new SyncInteractionChains[total];
+        for (int t = 0; t < total; t++) {
+            List<SyncInteractionChain> chains = new ArrayList<>();
+            if (t < mainPackets.size()) {
+                InteractionSimulator.Packet p = mainPackets.get(t);
+                SyncInteractionChain mc = vmChain(pos, type, forgedId, null, t == 0,
+                        t == mainPackets.size() - 1, p.baseIndex(),
+                        p.ops().toArray(new InteractionSyncData[0]));
+                if (t == announceIdx && !forks.isEmpty()) {
+                    SyncInteractionChain[] announce =
+                            new SyncInteractionChain[forks.size()];
+                    for (int k = 0; k < forks.size(); k++) {
+                        InteractionSimulator.Fork f = forks.get(k).fork();
+                        announce[k] = vmChain(pos, type, forgedId,
+                                new ForkedChainId(f.entryIndex(), f.subIndex(), null),
+                                true, false, 0, null);
+                    }
+                    mc.newForks = announce;
+                }
+                chains.add(mc);
+            }
+            for (ForkBuild fb : forks) {
+                int fj = t - forkStartTick;
+                if (fj >= 0 && fj < fb.packets().size()) {
+                    InteractionSimulator.Packet fp = fb.packets().get(fj);
+                    InteractionSimulator.Fork f = fb.fork();
+                    chains.add(vmChain(pos, type, forgedId,
+                            new ForkedChainId(f.entryIndex(), f.subIndex(), null),
+                            false, fj == fb.packets().size() - 1, fp.baseIndex(),
+                            fp.ops().toArray(new InteractionSyncData[0])));
+                }
+            }
+            SyncInteractionChains scs = new SyncInteractionChains();
+            scs.updates = chains.toArray(new SyncInteractionChain[0]);
+            perTick[t] = scs;
+        }
+        log.info("meridian-core: VM ticked root {} ({} tick(s), {} fork(s)) for {} item {}",
+                rootId.getAsInt(), total, forks.size(), type, itemId);
+        return perTick;
     }
 
-    /** Builds one forged chain packet from a simulated operation list. */
+    /**
+     * Builds one forged {@code SyncInteractionChain}. {@code forkedId} is set
+     * for a fork (null for the main chain); {@code ops} is null for a fork
+     * announcement (the server reads only {@code state} for a null-data packet).
+     */
     private SyncInteractionChain vmChain(BlockPos pos, InteractionType type, int forgedId,
-                                         boolean first, boolean last,
-                                         InteractionSimulator.Packet packet) {
+                                         ForkedChainId forkedId, boolean first, boolean last,
+                                         int baseIndex, InteractionSyncData[] ops) {
         SyncInteractionChain chain = new SyncInteractionChain();
         chain.activeHotbarSlot = inventory.activeHotbarSlot();
         chain.activeUtilitySlot = inventory.activeUtilitySlot();
@@ -805,12 +907,12 @@ public final class InteractionControlImpl implements InteractionControl {
         chain.interactionType = type;
         chain.equipSlot = inventory.activeHotbarSlot();
         chain.chainId = forgedId;
-        chain.forkedId = null;
+        chain.forkedId = forkedId;
         chain.state = last ? InteractionState.Finished : InteractionState.NotFinished;
         chain.newForks = null;
         // The server reads each op's chain index as operationBaseIndex + i, so a
         // continuation packet must resume from where the previous one ended.
-        chain.operationBaseIndex = packet.baseIndex();
+        chain.operationBaseIndex = baseIndex;
 
         InteractionChainData data = new InteractionChainData();
         data.entityId = -1;
@@ -819,7 +921,7 @@ public final class InteractionControlImpl implements InteractionControl {
         data.targetSlot = Integer.MIN_VALUE;
         chain.data = data;
 
-        chain.interactionData = packet.ops().toArray(new InteractionSyncData[0]);
+        chain.interactionData = ops;
         return chain;
     }
 

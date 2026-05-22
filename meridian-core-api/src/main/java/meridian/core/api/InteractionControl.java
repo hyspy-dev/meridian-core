@@ -43,6 +43,15 @@ public interface InteractionControl {
     CompletableFuture<Void> useOnBlock(BlockPos pos);
 
     /**
+     * Forges a {@code Primary} (left-click) interaction on {@code pos} — a
+     * single hit. The held item acts as the tool; the server applies the
+     * damage, so a block may need several hits to break.
+     *
+     * @return a future completing when the forged chain has played out
+     */
+    CompletableFuture<Void> hitBlock(BlockPos pos);
+
+    /**
      * Forges a seed-planting interaction on {@code pos} (tilled soil); the crop
      * block lands at {@code y + 1}. The held item must be the seed.
      *

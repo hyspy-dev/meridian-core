@@ -42,6 +42,15 @@ public interface Block {
     CompletableFuture<Void> use();
 
     /**
+     * Forges a {@code Primary} (left-click) interaction on this block — a single
+     * hit. The held item acts as the tool; the server applies the damage, so a
+     * harder block or a weaker tool may need several hits to break.
+     *
+     * @return a future completing when the forged chain has played out
+     */
+    CompletableFuture<Void> hit();
+
+    /**
      * Forges a seed-planting interaction; the crop block lands one above.
      *
      * @return a future completing when the forged chain has played out

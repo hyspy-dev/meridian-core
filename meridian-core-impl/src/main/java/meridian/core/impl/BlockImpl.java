@@ -58,6 +58,11 @@ final class BlockImpl implements Block {
     }
 
     @Override
+    public CompletableFuture<Void> hit() {
+        return interactions.hitBlock(new BlockPos(x, y, z));
+    }
+
+    @Override
     public CompletableFuture<Void> plant() {
         return interactions.plantOnBlock(new BlockPos(x, y, z));
     }
