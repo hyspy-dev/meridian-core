@@ -8,6 +8,7 @@ import meridian.core.api.CameraControl;
 import meridian.core.api.DebugRender;
 import meridian.core.api.EntityTracker;
 import meridian.core.api.InteractionControl;
+import meridian.core.api.SelectionBus;
 import meridian.core.api.World;
 import meridian.core.api.WorldState;
 import meridian.core.impl.interaction.InteractionControlImpl;
@@ -92,8 +93,13 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.services().provide(World.class, new WorldImpl(
                 chunkTracker, worldState, entityTracker, inventoryTracker, interactionControl));
 
+        // --- SelectionBus: cross-module "user picked this target" pub/sub ----
+        // Lets ESP's nearest-* lists drive interaction-test's X/Y/Z fields
+        // (and any future consumer) without either module knowing the other.
+        ctx.services().provide(SelectionBus.class, new SelectionBusImpl());
+
         ctx.getLogger().info("meridian-core ready (WorldState, EntityTracker, CameraControl, "
                 + "InteractionRegistry, InventoryTracker, ChunkTracker, ItemRegistry, "
-                + "InteractionControl, World)");
+                + "InteractionControl, World, SelectionBus)");
     }
 }
