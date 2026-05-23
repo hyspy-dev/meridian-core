@@ -24,6 +24,18 @@ public interface EntityTracker {
     /** Last-known position of entity {@code entityId}. */
     Optional<Vec3> positionOf(int entityId);
 
+    /**
+     * Asset/prefab path that identifies what kind of entity this is — populated
+     * from observed {@code ModelUpdate.model.path}. Stable across instances of
+     * the same species, so callers can group/filter entities by type (e.g. a
+     * minimap mob-hide list, or ESP per-species colouring).
+     *
+     * <p>Empty until the server has sent at least one {@code ModelUpdate} for
+     * the entity; some entities (raw projectiles, server-side-only) may never
+     * receive one.
+     */
+    Optional<String> entityTypeOf(int entityId);
+
     /** Last-known position of the local player. */
     Optional<Vec3> localPosition();
 
