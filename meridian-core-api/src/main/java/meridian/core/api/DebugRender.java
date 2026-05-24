@@ -18,10 +18,24 @@ public interface DebugRender {
     /**
      * Draws a wireframe box centred on {@code (x, y, z)} with the given full
      * dimensions, RGB colour (each channel 0..1) and lifetime in seconds.
+     * Uses a default opacity that reads well over most terrain — modules
+     * that need a different opacity should call the
+     * {@linkplain #box(double, double, double, double, double, double, float, float, float, float, float) opacity overload}.
      */
     void box(double x, double y, double z,
              double sizeX, double sizeY, double sizeZ,
              float red, float green, float blue, float seconds);
+
+    /**
+     * Draws a depth-tested solid+wireframe box at {@code (x, y, z)} with the
+     * given full dimensions, RGB colour (each channel 0..1), {@code opacity}
+     * in {@code [0, 1]} and lifetime in seconds. The default-opacity overload
+     * ({@link #box(double, double, double, double, double, double, float, float, float, float)})
+     * delegates here with {@code opacity = 0.5}.
+     */
+    void box(double x, double y, double z,
+             double sizeX, double sizeY, double sizeZ,
+             float red, float green, float blue, float opacity, float seconds);
 
     /** Clears every debug shape currently shown. */
     void clear();

@@ -24,7 +24,9 @@ final class DebugRenderImpl implements DebugRender {
     // Solid + wireframe (no flags): a wireframe-only DebugShape renders untinted,
     // so the box must be filled to carry its colour. Opacity keeps it see-through.
     private static final byte FLAGS = 0;
-    private static final float OPACITY = 0.5f;
+    /** Default opacity for the no-opacity {@code box(...)} overload — picked
+     *  to read well over typical terrain without burying the geometry under it. */
+    private static final float DEFAULT_OPACITY = 0.5f;
 
     private final EntityTracker entityTracker;
     private volatile ProxySession session;
@@ -47,6 +49,13 @@ final class DebugRenderImpl implements DebugRender {
     public void box(double x, double y, double z,
                     double sizeX, double sizeY, double sizeZ,
                     float red, float green, float blue, float seconds) {
+        box(x, y, z, sizeX, sizeY, sizeZ, red, green, blue, DEFAULT_OPACITY, seconds);
+    }
+
+    @Override
+    public void box(double x, double y, double z,
+                    double sizeX, double sizeY, double sizeZ,
+                    float red, float green, float blue, float opacity, float seconds) {
         ProxySession s = session;
         if (s == null) {
             return;
@@ -63,7 +72,7 @@ final class DebugRenderImpl implements DebugRender {
         matrix[14] = (float) z;
         matrix[15] = 1.0f;
         s.sendToClient(new DisplayDebug(DebugShape.Cube, matrix,
-                new Vector3f(red, green, blue), seconds, FLAGS, null, OPACITY));
+                new Vector3f(red, green, blue), seconds, FLAGS, null, opacity));
     }
 
     @Override
