@@ -15,18 +15,27 @@ import meridian.protocol.packets.player.SetClientId;
 final class ServerObserver implements PacketHandler {
     private final EntityTrackerImpl tracker;
     private final CameraControlImpl camera;
+    private final DebugRenderImpl debugRender;
 
-    ServerObserver(EntityTrackerImpl tracker, CameraControlImpl camera) {
+    ServerObserver(EntityTrackerImpl tracker, CameraControlImpl camera,
+                   DebugRenderImpl debugRender) {
         this.tracker = tracker;
         this.camera = camera;
+        this.debugRender = debugRender;
     }
 
     @Override
     public Action handleS2C(ChannelHandlerContext ctx, Packet packet, ProxySession session) {
-        camera.bind(session);
+        // SetClientId / EntityUpdates travel on the Default channel — binding the
+        // camera / debug-render session only on these keeps it off the Chunks
+        // (or any other) stream, so their packets go out on Default.
         if (packet instanceof SetClientId setClientId) {
+            camera.bind(session);
+            debugRender.bind(session);
             tracker.onSetClientId(setClientId);
         } else if (packet instanceof EntityUpdates updates) {
+            camera.bind(session);
+            debugRender.bind(session);
             tracker.onEntityUpdates(updates);
         }
         return Action.FORWARD;

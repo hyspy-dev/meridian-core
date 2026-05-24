@@ -73,6 +73,10 @@ final class CameraControlImpl implements CameraControl {
 
     @Override
     public void freecam(boolean enable) {
+        // SetFlyCameraMode is a bare on/off — the client's fly camera keeps its
+        // own persistent position, and ignores the current camera on entry, so
+        // the proxy cannot make it start at the player. (A snap-to-player via
+        // SetServerCamera was tried and had no effect.)
         send(new SetFlyCameraMode(enable), "freecam=" + enable);
     }
 

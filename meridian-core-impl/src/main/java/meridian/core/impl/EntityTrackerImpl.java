@@ -3,12 +3,14 @@ package meridian.core.impl;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import meridian.core.api.EntityTracker;
 import meridian.core.api.Vec3;
 import meridian.protocol.ComponentUpdate;
 import meridian.protocol.Direction;
 import meridian.protocol.ModelTransform;
+import meridian.protocol.ModelUpdate;
 import meridian.protocol.Position;
 import meridian.protocol.TransformUpdate;
 import meridian.protocol.packets.entities.EntityUpdates;
@@ -29,6 +31,13 @@ final class EntityTrackerImpl implements EntityTracker {
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
 
     private final Map<Integer, Vec3> positions = new ConcurrentHashMap<>();
+    /**
+     * Per-entity asset path from observed {@code ModelUpdate.model.path}.
+     * Sticky once known — Hytale only resends the Model component when the
+     * entity transforms (mount, polymorph, etc.); the last value remains
+     * authoritative for the species filter / type-aware overlays.
+     */
+    private final Map<Integer, String> types = new ConcurrentHashMap<>();
     private volatile int localId = Integer.MIN_VALUE;
     private volatile Vec3 localPos;
     /** Look orientation of the local player, radians. */
@@ -49,6 +58,7 @@ final class EntityTrackerImpl implements EntityTracker {
         if (packet.removed != null) {
             for (int id : packet.removed) {
                 positions.remove(id);
+                types.remove(id);
             }
         }
         if (packet.updates != null) {
@@ -60,6 +70,11 @@ final class EntityTrackerImpl implements EntityTracker {
                         if (pos != null) {
                             positions.put(update.networkId, pos);
                         }
+                    } else if (component instanceof ModelUpdate modelUpdate
+                            && modelUpdate.model != null
+                            && modelUpdate.model.path != null
+                            && !modelUpdate.model.path.isEmpty()) {
+                        types.put(update.networkId, modelUpdate.model.path);
                     }
                 }
             }
@@ -101,6 +116,11 @@ final class EntityTrackerImpl implements EntityTracker {
     }
 
     @Override
+    public Optional<String> entityTypeOf(int entityId) {
+        return Optional.ofNullable(types.get(entityId));
+    }
+
+    @Override
     public Optional<Vec3> localPosition() {
         return Optional.ofNullable(localPos);
     }
@@ -108,6 +128,11 @@ final class EntityTrackerImpl implements EntityTracker {
     @Override
     public int trackedCount() {
         return positions.size();
+    }
+
+    @Override
+    public Set<Integer> trackedEntities() {
+        return Set.copyOf(positions.keySet());
     }
 
     @Override

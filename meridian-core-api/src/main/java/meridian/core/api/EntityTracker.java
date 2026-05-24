@@ -2,6 +2,7 @@ package meridian.core.api;
 
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 
 /**
  * Live registry of entities the server has spawned for this client — a
@@ -23,11 +24,26 @@ public interface EntityTracker {
     /** Last-known position of entity {@code entityId}. */
     Optional<Vec3> positionOf(int entityId);
 
+    /**
+     * Asset/prefab path that identifies what kind of entity this is — populated
+     * from observed {@code ModelUpdate.model.path}. Stable across instances of
+     * the same species, so callers can group/filter entities by type (e.g. a
+     * minimap mob-hide list, or ESP per-species colouring).
+     *
+     * <p>Empty until the server has sent at least one {@code ModelUpdate} for
+     * the entity; some entities (raw projectiles, server-side-only) may never
+     * receive one.
+     */
+    Optional<String> entityTypeOf(int entityId);
+
     /** Last-known position of the local player. */
     Optional<Vec3> localPosition();
 
     /** Number of entities currently tracked. */
     int trackedCount();
+
+    /** Network ids of every currently tracked entity (includes the local player). */
+    Set<Integer> trackedEntities();
 
     /**
      * Network id of the entity nearest the local player, excluding the player

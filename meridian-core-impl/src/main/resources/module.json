@@ -1,6 +1,6 @@
 {
   "name": "meridian-core",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "main": "meridian.core.impl.MeridianCoreModule",
   "priority": 10,
   "updateUrl": "https://github.com/hyspy-dev/meridian-core/releases",
@@ -12,7 +12,20 @@
       "ClientMovement",
       "SetServerCamera",
       "SetFlyCameraMode",
-      "RequestFlyCameraMode"
+      "RequestFlyCameraMode",
+      "UpdateRootInteractions",
+      "UpdateInteractions",
+      "UpdateUnarmedInteractions",
+      "UpdateItems",
+      "UpdatePlayerInventory",
+      "SetActiveSlot",
+      "MouseInteraction",
+      "SyncInteractionChains",
+      "CancelInteractionChain",
+      "SetChunk",
+      "ServerSetBlock",
+      "ServerSetBlocks",
+      "UnloadChunk"
     ]
   }
 }
