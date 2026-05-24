@@ -29,6 +29,10 @@ public final class WorldImpl implements World {
         this.worldState = worldState;
         this.interactions = interactions;
         this.player = new PlayerImpl(entities, inventory, interactions);
+        // Late binding — PlayerImpl needs us for lookedAtBlock's raycast.
+        // Doing this after the fields are assigned keeps the leaked-this
+        // window as narrow as possible.
+        this.player.bindWorld(this);
     }
 
     @Override

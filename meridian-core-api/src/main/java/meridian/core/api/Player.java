@@ -1,5 +1,6 @@
 package meridian.core.api;
 
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -10,6 +11,31 @@ public interface Player {
 
     /** The player's current position. */
     Vec3 position();
+
+    /**
+     * Unit vector for the player's look direction in world space — derived
+     * from the most recently observed {@code lookOrientation} (yaw + pitch
+     * in radians). {@code null} until the client has sent at least one
+     * {@code ClientMovement} carrying an orientation.
+     *
+     * <p>Pitch sign matches Hytale's convention: pitch &lt; 0 looks down,
+     * pitch &gt; 0 looks up. Magnitude is always 1.
+     */
+    Vec3 lookDirection();
+
+    /**
+     * First non-air block hit by a ray from the player's eye along
+     * {@link #lookDirection()} — the in-game crosshair, computed proxy-side.
+     * Empty when the player has no observed position / orientation yet, or
+     * when the ray exits range without striking anything.
+     *
+     * <p>Range defaults to Hytale's normal block-interact reach (12 blocks);
+     * use the {@link #lookedAtBlock(double)} overload for a different cap.
+     */
+    Optional<BlockPos> lookedAtBlock();
+
+    /** Range-bounded variant of {@link #lookedAtBlock()}. */
+    Optional<BlockPos> lookedAtBlock(double maxRange);
 
     /** The id of the item in the active hotbar slot, or {@code null} for an empty hand. */
     String heldItem();

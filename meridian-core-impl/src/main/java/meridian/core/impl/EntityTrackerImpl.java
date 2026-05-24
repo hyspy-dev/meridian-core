@@ -125,6 +125,26 @@ final class EntityTrackerImpl implements EntityTracker {
         return Optional.ofNullable(localPos);
     }
 
+    /**
+     * Unit vector for the local player's current look direction, or
+     * {@code null} if no orientation has been observed yet. Package-private
+     * accessor used by {@link PlayerImpl#lookDirection}; the formula mirrors
+     * {@link #entityInCrosshair} so both stay in sync.
+     */
+    Vec3 localLookDirection() {
+        if (!haveLook) return null;
+        // Match Hytale's own forward formula
+        // (TriggerVolumeTestCommand.java: forwardX = -sin(yaw), forwardZ = -cos(yaw)).
+        // Both axes carry a negative sign — yaw=0 looks toward -Z, yaw=π/2
+        // looks toward -X. An earlier draft of this method had +cos which
+        // sent the raycast directly behind the player.
+        double cosPitch = Math.cos(lookPitch);
+        double lx = -Math.sin(lookYaw) * cosPitch;
+        double ly = Math.sin(lookPitch);
+        double lz = -Math.cos(lookYaw) * cosPitch;
+        return new Vec3(lx, ly, lz);
+    }
+
     @Override
     public int trackedCount() {
         return positions.size();
@@ -163,10 +183,13 @@ final class EntityTrackerImpl implements EntityTracker {
 
         // Look unit vector. Hytale Direction is (yaw, pitch) in radians:
         // pitch < 0 looks down (a topdown camera uses pitch = -PI/2).
+        // Yaw → forward formula mirrors the server's own builtin
+        // (TriggerVolumeTestCommand): forwardX = -sin(yaw), forwardZ = -cos(yaw).
+        // Kept in sync with {@link #localLookDirection}.
         double cosPitch = Math.cos(lookPitch);
         double lx = -Math.sin(lookYaw) * cosPitch;
         double ly = Math.sin(lookPitch);
-        double lz = Math.cos(lookYaw) * cosPitch;
+        double lz = -Math.cos(lookYaw) * cosPitch;
 
         double maxRangeSq = maxRange * maxRange;
         double minCos = Math.cos(Math.toRadians(maxAngleDeg));
