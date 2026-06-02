@@ -12,11 +12,14 @@ import org.slf4j.LoggerFactory;
 /**
  * The player's hotbar / utility / tools inventory, mirrored inside the proxy.
  *
- * <p>Built from observed S2C {@code UpdatePlayerInventory} (per-slot item ids)
- * and {@code SetActiveSlot} (the active slot of each section). Forging an
- * interaction chain requires these to match server truth exactly, so this
- * tracker is the source for {@code activeHotbarSlot} / {@code itemInHandId} and
- * their utility / tools counterparts.
+ * <p>Slot <b>contents</b> come from S2C {@code UpdatePlayerInventory} (the server
+ * pushes it on every inventory change). The <b>active slot</b> comes from the
+ * player's own interaction chains — the client never sends a standalone
+ * {@code SetActiveSlot} for the hotbar (the server disconnects a client that
+ * does), so a hotbar switch reaches us only as a {@code SwapFrom} chain.
+ *
+ * <p>Together these give {@code activeHotbarSlot} / {@code itemInHandId} (and the
+ * utility / tools counterparts), which a forge must set to server truth.
  */
 public final class InventoryTracker {
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
@@ -26,7 +29,7 @@ public final class InventoryTracker {
     private static final int SECTION_UTILITY = -5;
     private static final int SECTION_TOOLS = -8;
 
-    /** slot index → item id, per section. */
+    /** slot index → item id, per section (from S2C {@code UpdatePlayerInventory}). */
     private final Map<Integer, String> hotbar = new ConcurrentHashMap<>();
     private final Map<Integer, String> utility = new ConcurrentHashMap<>();
     private final Map<Integer, String> tools = new ConcurrentHashMap<>();
@@ -57,13 +60,14 @@ public final class InventoryTracker {
     }
 
     /**
-     * Observes the active slots an interaction chain carries.
+     * Mirrors the active slots from an observed interaction chain. The hotbar
+     * slot reaches the server only on interaction packets, so the player's own
+     * chains are the one reliable mirror of it.
      *
-     * <p>The client never sends a standalone {@code SetActiveSlot} for the
-     * hotbar — the server disconnects a client that does
-     * ({@code hotbarChangeWithoutInteraction}). The hotbar slot reaches the
-     * server only as the {@code activeHotbarSlot} field of interaction packets,
-     * so the player's own chains are the one reliable mirror of it.
+     * <p><b>Caller must pass the resulting slot for a {@code SwapFrom}</b> — that
+     * chain's {@code activeHotbarSlot} is the slot <i>before</i> the switch; the
+     * new active slot is its {@code data.targetSlot}. Passing the wrong one reads
+     * the held item from the previous slot (the "wrong block" bug).
      */
     public void observeActiveSlots(int hotbar, int utility, int tools) {
         activeHotbarSlot = hotbar;

@@ -4,6 +4,7 @@ import java.util.concurrent.CompletableFuture;
 import meridian.core.api.Block;
 import meridian.core.api.BlockPos;
 import meridian.core.api.BlockView;
+import meridian.core.api.Face;
 import meridian.core.api.InteractionControl;
 
 /**
@@ -65,6 +66,16 @@ final class BlockImpl implements Block {
     @Override
     public CompletableFuture<Void> plant() {
         return interactions.plantOnBlock(new BlockPos(x, y, z));
+    }
+
+    @Override
+    public CompletableFuture<Void> place() {
+        return interactions.placeOnBlock(new BlockPos(x, y, z));
+    }
+
+    @Override
+    public CompletableFuture<Void> place(Face face) {
+        return interactions.placeOnBlock(new BlockPos(x, y, z), face);
     }
 
     @Override

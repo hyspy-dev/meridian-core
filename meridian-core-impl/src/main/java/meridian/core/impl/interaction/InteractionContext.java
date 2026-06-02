@@ -44,12 +44,33 @@ record InteractionContext(InteractionType interactionType,
         return new InteractionContext(type, block, blockType, null, face, -1, movement, vars);
     }
 
-    /** Context for a block-placing interaction (plant) — block lands at {@code y + 1}. */
-    static InteractionContext ofPlacement(InteractionType type, BlockPosition soil,
-                                          BlockType soilType, BlockFace face,
+    /**
+     * Context for a block-placing interaction — the placed block lands in the
+     * cell adjacent to {@code target} across {@code face} (server convention:
+     * {@code placed = target + face.normal}). {@code BlockFace.Up} reproduces
+     * plant's "lands at {@code y + 1}".
+     */
+    static InteractionContext ofPlacement(InteractionType type, BlockPosition target,
+                                          BlockType targetType, BlockFace face,
                                           MovementStates movement, Map<String, Integer> vars) {
-        BlockPosition above = soil == null ? null
-                : new BlockPosition(soil.x, soil.y + 1, soil.z);
-        return new InteractionContext(type, soil, soilType, above, face, -1, movement, vars);
+        BlockPosition placed = target == null ? null
+                : new BlockPosition(target.x + normalX(face),
+                                    target.y + normalY(face),
+                                    target.z + normalZ(face));
+        return new InteractionContext(type, target, targetType, placed, face, -1, movement, vars);
+    }
+
+    // Face normals, matching the server (Vector3iUtil / BlockFace.getDirection):
+    // EAST = +X, WEST = -X, UP = +Y, DOWN = -Y, SOUTH = +Z, NORTH = -Z.
+    private static int normalX(BlockFace f) {
+        return f == BlockFace.East ? 1 : f == BlockFace.West ? -1 : 0;
+    }
+
+    private static int normalY(BlockFace f) {
+        return f == BlockFace.Up ? 1 : f == BlockFace.Down ? -1 : 0;
+    }
+
+    private static int normalZ(BlockFace f) {
+        return f == BlockFace.South ? 1 : f == BlockFace.North ? -1 : 0;
     }
 }

@@ -60,6 +60,30 @@ public interface InteractionControl {
     CompletableFuture<Void> plantOnBlock(BlockPos pos);
 
     /**
+     * Forges a block placement on the top face of {@code pos} (lands at
+     * {@code y + 1}). Shorthand for {@link #placeOnBlock(BlockPos, Face)} with
+     * {@link Face#UP}.
+     *
+     * @return a future completing when the forged chain has played out
+     */
+    CompletableFuture<Void> placeOnBlock(BlockPos pos);
+
+    /**
+     * Forges a block placement against {@code target}'s {@code face}: the held
+     * building block lands in the adjacent cell {@code face.from(target)}. Same
+     * {@code Secondary} / {@code PlaceBlockInteraction} mechanism as
+     * {@link #plantOnBlock}, but any face — so you can build sideways (bridge)
+     * or below, not just on top.
+     *
+     * <p>The server places the block at the resolved cell with only a reach
+     * (distance) check — no adjacent-support requirement — so {@code target}
+     * just needs to be a block you click and the destination cell within reach.
+     *
+     * @return a future completing when the forged chain has played out
+     */
+    CompletableFuture<Void> placeOnBlock(BlockPos target, Face face);
+
+    /**
      * Forges a watering-can interaction on {@code pos}. The held item must be
      * the can.
      *

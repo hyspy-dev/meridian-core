@@ -15,6 +15,7 @@ import meridian.api.module.Scheduler;
 import meridian.api.packet.PacketHandler;
 import meridian.api.session.ProxySession;
 import meridian.core.api.BlockPos;
+import meridian.core.api.Face;
 import meridian.core.api.InteractionControl;
 import meridian.core.impl.ChunkTracker;
 import meridian.core.impl.InteractionRegistry;
@@ -174,10 +175,19 @@ public final class InteractionControlImpl implements InteractionControl {
      * ({@code state != NotFinished}) arrives.
      */
     void onClientChain(SyncInteractionChain chain) {
-        // The hotbar slot reaches the server only on interaction packets — the
-        // client never sends a standalone SetActiveSlot for it — so the
-        // player's own chains are the reliable mirror of the active slots.
-        inventory.observeActiveSlots(chain.activeHotbarSlot, chain.activeUtilitySlot,
+        // The hotbar slot reaches the server only on interaction packets, so the
+        // player's own chains are the reliable mirror of the active slot. For a
+        // SwapFrom/SwapTo (a hotbar switch) the chain's activeHotbarSlot is the
+        // slot BEFORE the switch — the new active slot is data.targetSlot. Using
+        // activeHotbarSlot there left us reading the held item from the previous
+        // slot (the "wrong block" bug). Item contents come from the inventory map.
+        int hotbarSlot = chain.activeHotbarSlot;
+        if ((chain.interactionType == InteractionType.SwapFrom
+                || chain.interactionType == InteractionType.SwapTo)
+                && chain.data != null && chain.data.targetSlot >= 0) {
+            hotbarSlot = chain.data.targetSlot;
+        }
+        inventory.observeActiveSlots(hotbarSlot, chain.activeUtilitySlot,
                 chain.activeToolsSlot);
 
         // Diagnostic: log every chain's walk, including initial=false continuations.
@@ -251,7 +261,7 @@ public final class InteractionControlImpl implements InteractionControl {
             return;
         }
         InteractionContext ctx = contextFor(captured.interactionType,
-                captured.data.blockPosition, DataKind.BLOCK, captured.itemInHandId);
+                captured.data.blockPosition, DataKind.BLOCK, captured.itemInHandId, BlockFace.Up);
         List<InteractionSyncData> vm = InteractionSimulator.simulate(
                 compiled, ctx, this::compileRoot);
 
@@ -291,7 +301,7 @@ public final class InteractionControlImpl implements InteractionControl {
             return;
         }
         InteractionContext ctx = contextFor(key.type(), first.data.blockPosition,
-                DataKind.BLOCK, key.item());
+                DataKind.BLOCK, key.item(), BlockFace.Up);
         List<InteractionSimulator.Packet> ticked = InteractionSimulator.simulateTicked(
                 compiled, ctx, this::compileRoot).packets();
 
@@ -357,7 +367,7 @@ public final class InteractionControlImpl implements InteractionControl {
      * the held item's {@code interactionVars} from the {@link ItemRegistry}.
      */
     private InteractionContext contextFor(InteractionType type, BlockPosition target,
-                                          DataKind dataKind, String itemId) {
+                                          DataKind dataKind, String itemId, BlockFace face) {
         BlockType blockType = null;
         if (target != null) {
             int id = chunks.blockIdAt(target.x, target.y, target.z);
@@ -368,9 +378,9 @@ public final class InteractionControlImpl implements InteractionControl {
         MovementStates movement = movementStates;
         Map<String, Integer> vars = items.varsFor(itemId);
         return dataKind == DataKind.PLACEMENT
-                ? InteractionContext.ofPlacement(type, target, blockType, BlockFace.Up,
+                ? InteractionContext.ofPlacement(type, target, blockType, face,
                         movement, vars)
-                : InteractionContext.ofBlock(type, target, blockType, BlockFace.Up,
+                : InteractionContext.ofBlock(type, target, blockType, face,
                         movement, vars);
     }
 
@@ -438,6 +448,32 @@ public final class InteractionControlImpl implements InteractionControl {
     @Override
     public CompletableFuture<Void> plantOnBlock(BlockPos pos) {
         return enqueueForge(() -> forge(pos, InteractionType.Secondary, DataKind.PLACEMENT));
+    }
+
+    @Override
+    public CompletableFuture<Void> placeOnBlock(BlockPos pos) {
+        return placeOnBlock(pos, Face.UP);
+    }
+
+    @Override
+    public CompletableFuture<Void> placeOnBlock(BlockPos target, Face face) {
+        // Same Secondary / PlaceBlockInteraction forge as plant — the server
+        // places whatever block the held item maps to, not just a crop — but
+        // against the chosen face, so the block can land sideways / below.
+        BlockFace bf = toBlockFace(face);
+        return enqueueForge(() ->
+                forge(target, InteractionType.Secondary, DataKind.PLACEMENT, bf));
+    }
+
+    private static BlockFace toBlockFace(Face face) {
+        return switch (face) {
+            case UP -> BlockFace.Up;
+            case DOWN -> BlockFace.Down;
+            case NORTH -> BlockFace.North;
+            case SOUTH -> BlockFace.South;
+            case EAST -> BlockFace.East;
+            case WEST -> BlockFace.West;
+        };
     }
 
     @Override
@@ -568,6 +604,11 @@ public final class InteractionControlImpl implements InteractionControl {
 
     /** Builds and sends one forged chain; returns its tick-duration (0 if nothing sent). */
     private int forge(BlockPos pos, InteractionType type, DataKind dataKind) {
+        return forge(pos, type, dataKind, BlockFace.Up);
+    }
+
+    /** Forge variant that carries the placement face (ignored for non-placement). */
+    private int forge(BlockPos pos, InteractionType type, DataKind dataKind, BlockFace face) {
         ProxySession s = session;
         if (s == null) {
             log.warn("meridian-core: interaction {} requested but no session yet", type);
@@ -585,7 +626,7 @@ public final class InteractionControlImpl implements InteractionControl {
 
         // VM is the primary path — it honestly simulates the server walk. The
         // captured-sequence replay is the fallback when a root cannot be resolved.
-        SyncInteractionChains[] forged = buildFromVm(pos, type, dataKind, itemId);
+        SyncInteractionChains[] forged = buildFromVm(pos, type, dataKind, itemId, face);
         if (forged != null) {
             return sendPacedVm(forged, type, pos);
         }
@@ -786,7 +827,7 @@ public final class InteractionControlImpl implements InteractionControl {
      * {@code null} if the root cannot be resolved.
      */
     private SyncInteractionChains[] buildFromVm(BlockPos pos, InteractionType type,
-                                               DataKind dataKind, String itemId) {
+                                               DataKind dataKind, String itemId, BlockFace face) {
         OptionalInt rootId = resolveRoot(type, itemId);
         if (rootId.isEmpty()) {
             log.warn("meridian-core: no root for {} with item {} — item catalog not "
@@ -799,7 +840,7 @@ public final class InteractionControlImpl implements InteractionControl {
             return null;
         }
         InteractionContext ctx = contextFor(type,
-                new BlockPosition(pos.x(), pos.y(), pos.z()), dataKind, itemId);
+                new BlockPosition(pos.x(), pos.y(), pos.z()), dataKind, itemId, face);
         InteractionSimulator.TickedResult main = InteractionSimulator.simulateTicked(
                 compiled, ctx, this::compileRoot);
         List<InteractionSimulator.Packet> mainPackets = main.packets();

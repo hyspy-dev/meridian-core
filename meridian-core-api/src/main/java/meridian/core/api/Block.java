@@ -58,6 +58,23 @@ public interface Block {
     CompletableFuture<Void> plant();
 
     /**
+     * Forges a block placement on this block's top face (one above). Shorthand
+     * for {@link #place(Face)} with {@link Face#UP}.
+     *
+     * @return a future completing when the forged chain has played out
+     */
+    CompletableFuture<Void> place();
+
+    /**
+     * Forges a block placement against this block's {@code face}; the held
+     * building block lands in the adjacent cell. Any face — build sideways
+     * (bridge) or below, not just on top.
+     *
+     * @return a future completing when the forged chain has played out
+     */
+    CompletableFuture<Void> place(Face face);
+
+    /**
      * Forges a watering-can interaction on this block.
      *
      * @return a future completing when the forged charge has played out
