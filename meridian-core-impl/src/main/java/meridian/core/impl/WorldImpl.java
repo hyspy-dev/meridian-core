@@ -24,11 +24,11 @@ public final class WorldImpl implements World {
 
     public WorldImpl(ChunkTracker chunks, WorldStateImpl worldState,
                      EntityTrackerImpl entities, InventoryTracker inventory,
-                     InteractionControl interactions) {
+                     InteractionControl interactions, MovementControlImpl movement) {
         this.chunks = chunks;
         this.worldState = worldState;
         this.interactions = interactions;
-        this.player = new PlayerImpl(entities, inventory, interactions);
+        this.player = new PlayerImpl(entities, inventory, interactions, movement);
         // Late binding — PlayerImpl needs us for lookedAtBlock's raycast.
         // Doing this after the fields are assigned keeps the leaked-this
         // window as narrow as possible.

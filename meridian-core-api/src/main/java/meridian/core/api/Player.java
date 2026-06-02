@@ -62,4 +62,39 @@ public interface Player {
      * @return a future completing when the switch chain has played out
      */
     CompletableFuture<Void> selectHotbarSlot(int slot);
+
+    /**
+     * Teleports the player to {@code position} — a real teleport the player sees.
+     *
+     * <p>Because Hytale movement is client-authoritative, two packets are sent:
+     * a {@code ClientTeleport} <b>to the client</b> (the same packet the server
+     * uses for {@code /tp} — moves the player's own view) and a forged
+     * {@code ClientMovement} carrying the new absolute <b>to the server</b> (a
+     * server-initiated teleport only makes the client send back a
+     * {@code teleportAck}, not a fresh absolute, so without this the server keeps
+     * the old position and snaps the client back). The server accepts any finite
+     * absolute with no distance check ({@code ValidateUtil.isSafePosition} =
+     * finite-only; a large jump just warns and resets velocity), so client and
+     * server agree with no roll-back.
+     *
+     * <p>Needs an established session (the player must be in a world); a call
+     * before then is a logged no-op.
+     */
+    void teleport(Vec3 position);
+
+    /**
+     * <b>Server-side offset</b> (advanced). Continuously shifts the player's
+     * <i>reported</i> position so the server and other players see them at, and
+     * moving relative to, {@code target} — while the player's own client stays
+     * where it is. The constant offset ({@code target} − the player's real
+     * position) is captured on the next movement packet and added to every
+     * outgoing absolute position until {@link #clearHold}.
+     *
+     * <p>For an ordinary teleport the player actually moves to, use
+     * {@link #teleport} instead.
+     */
+    void holdPosition(Vec3 target);
+
+    /** Stops a {@link #holdPosition} hold; the player's real position is reported again. */
+    void clearHold();
 }

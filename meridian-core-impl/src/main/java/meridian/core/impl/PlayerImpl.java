@@ -35,15 +35,17 @@ final class PlayerImpl implements Player {
     private final EntityTrackerImpl entities;
     private final InventoryTracker inventory;
     private final InteractionControl interactions;
+    private final MovementControlImpl movement;
     /** Set by {@link WorldImpl} after the world finishes building; needed
      *  to scan blocks for {@link #lookedAtBlock}. */
     private volatile World world;
 
     PlayerImpl(EntityTrackerImpl entities, InventoryTracker inventory,
-               InteractionControl interactions) {
+               InteractionControl interactions, MovementControlImpl movement) {
         this.entities = entities;
         this.inventory = inventory;
         this.interactions = interactions;
+        this.movement = movement;
     }
 
     /** Late binding from {@link WorldImpl} once its own fields are set. */
@@ -142,5 +144,20 @@ final class PlayerImpl implements Player {
     @Override
     public CompletableFuture<Void> selectHotbarSlot(int slot) {
         return interactions.switchHotbarSlot(slot);
+    }
+
+    @Override
+    public void teleport(Vec3 position) {
+        movement.teleport(position.x(), position.y(), position.z());
+    }
+
+    @Override
+    public void holdPosition(Vec3 target) {
+        movement.holdPosition(target.x(), target.y(), target.z());
+    }
+
+    @Override
+    public void clearHold() {
+        movement.clearHold();
     }
 }

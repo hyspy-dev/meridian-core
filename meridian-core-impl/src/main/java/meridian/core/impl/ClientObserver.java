@@ -23,12 +23,14 @@ final class ClientObserver implements PacketHandler {
     private final EntityTrackerImpl tracker;
     private final CameraControlImpl camera;
     private final DebugRenderImpl debugRender;
+    private final MovementControlImpl movement;
 
     ClientObserver(EntityTrackerImpl tracker, CameraControlImpl camera,
-                   DebugRenderImpl debugRender) {
+                   DebugRenderImpl debugRender, MovementControlImpl movement) {
         this.tracker = tracker;
         this.camera = camera;
         this.debugRender = debugRender;
+        this.movement = movement;
     }
 
     @Override
@@ -36,11 +38,16 @@ final class ClientObserver implements PacketHandler {
         // ClientMovement / RequestFlyCameraMode travel on the Default channel —
         // binding the camera / debug-render session only on these keeps it off
         // any other C2S stream, so their packets go out on Default.
-        if (packet instanceof ClientMovement movement) {
+        if (packet instanceof ClientMovement clientMovement) {
             camera.bind(session);
             debugRender.bind(session);
-            tracker.onClientMovement(movement);
-            return Action.FORWARD;
+            movement.bind(session);
+            // Feed the tracker the player's TRUE position before any rewrite, so
+            // position() / raycast / ESP keep reflecting where the client really
+            // is, even while a teleport/hold sends a different position upstream.
+            tracker.onClientMovement(clientMovement);
+            // Then let MovementControl forge the outgoing position if armed.
+            return movement.rewrite(clientMovement) ? Action.MODIFIED : Action.FORWARD;
         }
         if (packet instanceof RequestFlyCameraMode request) {
             camera.bind(session);

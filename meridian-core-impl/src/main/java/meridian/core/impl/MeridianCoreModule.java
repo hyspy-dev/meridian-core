@@ -44,6 +44,9 @@ public class MeridianCoreModule implements ProxyModule {
         EntityTrackerImpl entityTracker = new EntityTrackerImpl();
         CameraControlImpl cameraControl = new CameraControlImpl();
         DebugRenderImpl debugRender = new DebugRenderImpl(entityTracker);
+        // MovementControl: forges the player's own position by rewriting outgoing
+        // ClientMovement (the server trusts absolute coords). Backs Player.teleport.
+        MovementControlImpl movementControl = new MovementControlImpl(ctx.scheduler());
         ctx.services().provide(EntityTracker.class, entityTracker);
         ctx.services().provide(CameraControl.class, cameraControl);
         ctx.services().provide(DebugRender.class, debugRender);
@@ -51,9 +54,10 @@ public class MeridianCoreModule implements ProxyModule {
         // S2C: learn the local id, track entity transforms, capture the session.
         ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
                 (direction, session) -> new ServerObserver(entityTracker, cameraControl, debugRender));
-        // C2S: track the player's pose and (optionally) auto-grant the freecam key.
+        // C2S: track the player's pose, forge movement when armed, and
+        // (optionally) auto-grant the freecam key.
         ctx.registerHandler(Direction.C2S, HandlerPosition.NORMAL,
-                (direction, session) -> new ClientObserver(entityTracker, cameraControl, debugRender));
+                (direction, session) -> new ClientObserver(entityTracker, cameraControl, debugRender, movementControl));
 
         // --- Interaction-chain forging foundation ----------------------------
         // InteractionRegistry: server's interaction catalog (UpdateRootInteractions
@@ -91,7 +95,8 @@ public class MeridianCoreModule implements ProxyModule {
         // Block / Player building blocks — a Layer-2 module queries and acts,
         // writing its own logic.
         ctx.services().provide(World.class, new WorldImpl(
-                chunkTracker, worldState, entityTracker, inventoryTracker, interactionControl));
+                chunkTracker, worldState, entityTracker, inventoryTracker, interactionControl,
+                movementControl));
 
         // --- SelectionBus: cross-module "user picked this target" pub/sub ----
         // Lets ESP's nearest-* lists drive interaction-test's X/Y/Z fields
