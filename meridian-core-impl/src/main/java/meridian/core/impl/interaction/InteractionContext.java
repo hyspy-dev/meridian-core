@@ -1,5 +1,6 @@
 package meridian.core.impl.interaction;
 
+import java.util.List;
 import java.util.Map;
 import meridian.protocol.BlockFace;
 import meridian.protocol.BlockPosition;
@@ -35,13 +36,26 @@ record InteractionContext(InteractionType interactionType,
                           BlockFace blockFace,
                           int placedBlockId,
                           MovementStates movementStates,
-                          Map<String, Integer> interactionVars) {
+                          Map<String, Integer> interactionVars,
+                          List<BlockPosition> hitBlocks) {
 
     /** Context for a plain block interaction (harvest / use) — no placement. */
     static InteractionContext ofBlock(InteractionType type, BlockPosition block,
                                       BlockType blockType, BlockFace face,
                                       MovementStates movement, Map<String, Integer> vars) {
-        return new InteractionContext(type, block, blockType, null, face, -1, movement, vars);
+        return new InteractionContext(type, block, blockType, null, face, -1, movement, vars, null);
+    }
+
+    /** Copy with a different acting block — used to point each dig fork at its block. */
+    InteractionContext withTarget(BlockPosition block) {
+        return new InteractionContext(interactionType, block, targetBlockType, placeBlock,
+                blockFace, placedBlockId, movementStates, interactionVars, hitBlocks);
+    }
+
+    /** Copy carrying the area-dig target blocks ({@code SelectInteraction} forks one per block). */
+    InteractionContext withHitBlocks(List<BlockPosition> blocks) {
+        return new InteractionContext(interactionType, targetBlock, targetBlockType, placeBlock,
+                blockFace, placedBlockId, movementStates, interactionVars, blocks);
     }
 
     /**
@@ -57,7 +71,7 @@ record InteractionContext(InteractionType interactionType,
                 : new BlockPosition(target.x + normalX(face),
                                     target.y + normalY(face),
                                     target.z + normalZ(face));
-        return new InteractionContext(type, target, targetType, placed, face, -1, movement, vars);
+        return new InteractionContext(type, target, targetType, placed, face, -1, movement, vars, null);
     }
 
     // Face normals, matching the server (Vector3iUtil / BlockFace.getDirection):

@@ -102,6 +102,20 @@ public interface InteractionControl {
      */
     CompletableFuture<Void> switchHotbarSlot(int slot);
 
+    /**
+     * Forges one native dig swing of the held tool, aimed at {@code aim}. Only the
+     * main {@code Primary} chain is sent; the tool's {@code SelectInteraction} runs
+     * <em>server-side</em>, so the server picks the swing area itself and spawns a
+     * break fork per block, which core answers reactively — the swing clears the
+     * tool's real area (a shovel's AoE), not a set of blocks the caller chose.
+     * {@code aim} is just the swing's aim/reach point (a block in front of the
+     * player). A tool without a {@code SelectInteraction} (e.g. a pickaxe) simply
+     * breaks the aimed block.
+     *
+     * @return a future completing when the forged swing's main chain has played out
+     */
+    CompletableFuture<Void> digSwing(BlockPos aim);
+
     /** {@code true} once a client session is live and packets can be sent. */
     boolean available();
 }

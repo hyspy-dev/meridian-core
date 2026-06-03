@@ -7,8 +7,10 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import meridian.protocol.BlockPosition;
 import meridian.protocol.BlockRotation;
 import meridian.protocol.BlockType;
+import meridian.protocol.BreakBlockInteraction;
 import meridian.protocol.ChainingInteraction;
 import meridian.protocol.ChargingInteraction;
 import meridian.protocol.ConditionInteraction;
@@ -20,6 +22,7 @@ import meridian.protocol.MovementStates;
 import meridian.protocol.ParallelInteraction;
 import meridian.protocol.PlaceBlockInteraction;
 import meridian.protocol.ReplaceInteraction;
+import meridian.protocol.SelectInteraction;
 import meridian.protocol.SimpleBlockInteraction;
 import meridian.protocol.SimpleInteraction;
 import meridian.protocol.UseBlockInteraction;
@@ -181,7 +184,8 @@ final class InteractionSimulator {
      * — it reproduces a charge / hold playing out over many ticks.
      */
     static TickedResult simulateTicked(CompiledInteraction root, InteractionContext ctx,
-                                       RootResolver resolver) {
+                                       RootResolver resolver,
+                                       Map<Integer, Integer> selectHitBlock) {
         List<Packet> packets = new ArrayList<>();
         List<Fork> forks = new ArrayList<>();
         CompiledInteraction compiled = root;
@@ -296,7 +300,7 @@ final class InteractionSimulator {
                     // interactions[1..] spawn parallel fork chains — recorded
                     // here, flatIndex being this op's index (the fork entryIndex).
                     for (int f = 1; f < parallel.next.length; f++) {
-                        forks.add(new Fork(flatIndex, f - 1, parallel.next[f]));
+                        forks.add(new Fork(flatIndex, f - 1, parallel.next[f], null));
                     }
                     CompiledInteraction sub = enterRoot(parallel.next[0], resolver,
                             visitedRoots);
@@ -307,6 +311,29 @@ final class InteractionSimulator {
                     } else {
                         counter++;
                     }
+                } else if (node.interaction() instanceof SelectInteraction
+                        && state != InteractionState.Failed) {
+                    // SelectInteraction picks blocks in an area and spawns a fork
+                    // running its HitBlock interaction PER block — the shovel dig
+                    // swing. The HitBlock root isn't on the wire (the server
+                    // resolves it), so we learn it (selectHitBlock). We spawn one
+                    // fork per target block (ctx.hitBlocks for an area dig, else
+                    // the single target); each fork's BreakBlock breaks its block.
+                    Integer hitBlock = selectHitBlock.get(node.interactionId());
+                    if (hitBlock != null && hitBlock > 0) {
+                        List<BlockPosition> targets = ctx.hitBlocks();
+                        if (targets == null || targets.isEmpty()) {
+                            if (ctx.targetBlock() != null) {
+                                forks.add(new Fork(flatIndex, 0, hitBlock, ctx.targetBlock()));
+                            }
+                        } else {
+                            int sub = 0;
+                            for (BlockPosition b : targets) {
+                                forks.add(new Fork(flatIndex, sub++, hitBlock, b));
+                            }
+                        }
+                    }
+                    counter++;
                 } else if (node.interaction() instanceof ChargingInteraction
                         && state == InteractionState.Finished && node.labels().length > 0) {
                     // ChargingInteraction.jumpToChargeValue: a finished charge
@@ -502,7 +529,8 @@ final class InteractionSimulator {
      * {@code ForkedChainId.entryIndex}); {@code subIndex} is the fork's 0-based
      * position among that node's forks.
      */
-    record Fork(int entryIndex, int subIndex, int rootId) {}
+    /** A spawned fork: its structural id, root, and (for a dig HitBlock fork) the block it breaks. */
+    record Fork(int entryIndex, int subIndex, int rootId, BlockPosition block) {}
 
     /** A ticked simulation: the chain's packets and the forks it spawned. */
     record TickedResult(List<Packet> packets, List<Fork> forks) {}
@@ -597,6 +625,11 @@ final class InteractionSimulator {
         } else if (node.interaction() instanceof SimpleBlockInteraction && ctx.targetBlock() != null) {
             // SimpleBlockInteraction.simulateTick0 records the target block and
             // an Up face — BlockConditionInteraction's matchers test that face.
+            data.blockPosition = ctx.targetBlock();
+            data.blockFace = ctx.blockFace();
+        } else if (node.interaction() instanceof BreakBlockInteraction && ctx.targetBlock() != null) {
+            // BreakBlockInteraction breaks the block it carries — the dig HitBlock
+            // fork reports the target block + the hit face here.
             data.blockPosition = ctx.targetBlock();
             data.blockFace = ctx.blockFace();
         }

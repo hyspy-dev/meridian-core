@@ -112,7 +112,10 @@ final class InteractionObserver implements PacketHandler {
                 }
                 if (control.nat().isForged(chain.chainId)) {
                     // The server's echo of a chain the proxy forged — the real
-                    // client never created it, so it must not see it.
+                    // client never created it, so it must not see it. First, if it
+                    // carries the server's own area forks for a reactive dig swing,
+                    // answer them (the server hands us the HitBlock root here).
+                    control.onServerForkAnnounce(chain);
                     log.info("meridian-core: NAT S2C dropped forged chain server={} (initial={})",
                             chain.chainId, chain.initial);
                     changed = true;
