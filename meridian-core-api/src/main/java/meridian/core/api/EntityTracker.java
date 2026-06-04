@@ -36,6 +36,17 @@ public interface EntityTracker {
      */
     Optional<String> entityTypeOf(int entityId);
 
+    /**
+     * Whether entity {@code entityId} is a player — true once the server has
+     * sent a {@code PlayerSkin} component for it. Players are the only entities
+     * that carry a skin, so this is a definitive signal independent of the
+     * model path (handy for a players-only ESP filter).
+     *
+     * <p>False for non-players and for players whose skin component hasn't been
+     * observed yet; sticky once true (the local player included).
+     */
+    boolean isPlayer(int entityId);
+
     /** Last-known position of the local player. */
     Optional<Vec3> localPosition();
 

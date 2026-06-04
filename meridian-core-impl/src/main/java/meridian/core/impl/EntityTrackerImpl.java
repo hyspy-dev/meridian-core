@@ -11,6 +11,7 @@ import meridian.protocol.ComponentUpdate;
 import meridian.protocol.Direction;
 import meridian.protocol.ModelTransform;
 import meridian.protocol.ModelUpdate;
+import meridian.protocol.PlayerSkinUpdate;
 import meridian.protocol.Position;
 import meridian.protocol.TransformUpdate;
 import meridian.protocol.packets.entities.EntityUpdates;
@@ -38,6 +39,12 @@ final class EntityTrackerImpl implements EntityTracker {
      * authoritative for the species filter / type-aware overlays.
      */
     private final Map<Integer, String> types = new ConcurrentHashMap<>();
+    /**
+     * Network ids that have carried a {@code PlayerSkin} component — i.e. real
+     * players. Sticky once added (cleared only on removal), mirroring how the
+     * {@link #types} map treats the model path.
+     */
+    private final Set<Integer> players = ConcurrentHashMap.newKeySet();
     private volatile int localId = Integer.MIN_VALUE;
     private volatile Vec3 localPos;
     /** Look orientation of the local player, radians. */
@@ -59,6 +66,7 @@ final class EntityTrackerImpl implements EntityTracker {
             for (int id : packet.removed) {
                 positions.remove(id);
                 types.remove(id);
+                players.remove(id);
             }
         }
         if (packet.updates != null) {
@@ -75,6 +83,10 @@ final class EntityTrackerImpl implements EntityTracker {
                             && modelUpdate.model.path != null
                             && !modelUpdate.model.path.isEmpty()) {
                         types.put(update.networkId, modelUpdate.model.path);
+                    } else if (component instanceof PlayerSkinUpdate) {
+                        // Only players carry a skin component — definitive
+                        // player marker, independent of the model path.
+                        players.add(update.networkId);
                     }
                 }
             }
@@ -118,6 +130,11 @@ final class EntityTrackerImpl implements EntityTracker {
     @Override
     public Optional<String> entityTypeOf(int entityId) {
         return Optional.ofNullable(types.get(entityId));
+    }
+
+    @Override
+    public boolean isPlayer(int entityId) {
+        return players.contains(entityId);
     }
 
     @Override
