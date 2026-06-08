@@ -619,7 +619,11 @@ final class InteractionSimulator {
             // blockRotation and reads blockFace; placedBlockId is the node's
             // own block (server falls back to the held item's block at -1).
             data.blockPosition = ctx.placeBlock();
-            data.blockRotation = new BlockRotation();
+            // Some blocks (logs / beams) orient by blockRotation, not blockFace;
+            // the context carries the rotation learned from the player's own
+            // placement for this face, or null → a default (no-rotation) one.
+            data.blockRotation = ctx.blockRotation() != null
+                    ? ctx.blockRotation().clone() : new BlockRotation();
             data.blockFace = ctx.blockFace();
             data.placedBlockId = place.blockId;
         } else if (node.interaction() instanceof SimpleBlockInteraction && ctx.targetBlock() != null) {

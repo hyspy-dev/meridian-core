@@ -24,14 +24,20 @@ import meridian.core.impl.ItemRegistry;
 import meridian.core.impl.WorldStateImpl;
 import meridian.protocol.BlockType;
 import meridian.protocol.BlockFace;
+import meridian.protocol.BlockPlacementRotationMode;
 import meridian.protocol.BlockPosition;
+import meridian.protocol.BlockRotation;
+import meridian.protocol.Direction;
+import meridian.protocol.Rotation;
 import meridian.protocol.ForkedChainId;
 import meridian.protocol.InteractionChainData;
 import meridian.protocol.InteractionState;
 import meridian.protocol.InteractionSyncData;
 import meridian.protocol.InteractionType;
 import meridian.protocol.MovementStates;
+import meridian.protocol.PlaceBlockInteraction;
 import meridian.protocol.RootInteraction;
+import meridian.protocol.VariantRotation;
 import meridian.protocol.SelectInteraction;
 import meridian.protocol.packets.interaction.SyncInteractionChain;
 import meridian.protocol.packets.interaction.SyncInteractionChains;
@@ -98,6 +104,9 @@ public final class InteractionControlImpl implements InteractionControl {
     private volatile BlockPosition targetBlock;
     /** The player's last observed movement state — what {@code ConditionInteraction} tests. */
     private volatile MovementStates movementStates;
+    /** Player's last observed look yaw (radians) — drives FacingPlayer placement. */
+    private volatile float lookYaw;
+    private volatile boolean haveLook;
     /** Chain-id NAT: keeps forged chain ids out of the client's counter space. */
     private final ChainIdNat nat = new ChainIdNat();
     /** (type, held item) &rarr; root id — a fallback for the {@link ItemRegistry}. */
@@ -140,6 +149,8 @@ public final class InteractionControlImpl implements InteractionControl {
     private final Map<Integer, ActionKey> pendingKey = new ConcurrentHashMap<>();
     /** Root ids already dumped to the log (VM-development diagnostics). */
     private final Set<Integer> dumpedRoots = ConcurrentHashMap.newKeySet();
+    /** (item|face) combos whose computed placement rotation has been logged once. */
+    private final Set<String> loggedPlacementRot = ConcurrentHashMap.newKeySet();
 
     /**
      * The forge queue. core owns the chain-start cadence: forges run strictly
@@ -185,6 +196,14 @@ public final class InteractionControlImpl implements InteractionControl {
     void onMovementStates(MovementStates states) {
         if (states != null) {
             this.movementStates = states;
+        }
+    }
+
+    /** Tracks the player's look yaw — the input for FacingPlayer placement rotation. */
+    void onPlayerLook(Direction look) {
+        if (look != null) {
+            this.lookYaw = look.yaw;
+            this.haveLook = true;
         }
     }
 
@@ -321,6 +340,108 @@ public final class InteractionControlImpl implements InteractionControl {
     }
 
     /**
+     * The {@code blockRotation} a placed block must carry to come out oriented
+     * the way the client would place it. The client just sends a rotation and the
+     * server stores it; the rotation behaviour is driven by the block's
+     * {@link VariantRotation} (a fixed {@code BlockType} field that parses
+     * reliably — {@code placementSettings} often arrives empty).
+     *
+     * <ul>
+     *   <li><b>Pipe / DoublePipe / All</b> (logs, beams, pillars) — lies along the
+     *       axis of the clicked face ({@link #axisRotation}). Verified against
+     *       real {@code Wood_Beech_Trunk} captures.</li>
+     *   <li><b>NESW / UpDownNESW / Wall</b> (stairs, furniture) — faces the player,
+     *       yaw from look direction ({@link #facingPlayerRotation}).</li>
+     *   <li><b>UpDown</b> — vertical, flipped on a ceiling face
+     *       ({@link #upDownRotation}).</li>
+     *   <li><b>None</b> — no rotation.</li>
+     * </ul>
+     *
+     * @return the rotation to send, or {@code null} for "default (no rotation)"
+     */
+    private BlockRotation placementRotationFor(int placedBlockId, String itemId, BlockFace face) {
+        VariantRotation variant = placedBlockId >= 0
+                ? worldState.variantRotationForBlock(placedBlockId) : VariantRotation.None;
+        BlockRotation rot = switch (variant) {
+            case Pipe, DoublePipe, All -> axisRotation(face);
+            case NESW, UpDownNESW, Wall -> facingPlayerRotation();
+            case UpDown -> upDownRotation(face);
+            default -> null;   // None — block isn't orientable
+        };
+        // One line per (item, face) so we can confirm the variant resolved and
+        // what orientation a forged placement carries — without flooding the log.
+        if (loggedPlacementRot.add(itemId + "|" + face)) {
+            log.info("meridian-core: placement rotation — item {} block {} variant {} face {} -> {}",
+                    itemId, placedBlockId, variant, face, rot == null ? "default(none)"
+                            : rot.rotationYaw + "/" + rot.rotationPitch + "/" + rot.rotationRoll);
+        }
+        return rot;
+    }
+
+    /** Vertical orientation for an {@code UpDown} block — flipped on a ceiling. */
+    private static BlockRotation upDownRotation(BlockFace face) {
+        return face == BlockFace.Down
+                ? new BlockRotation(Rotation.None, Rotation.OneEighty, Rotation.None)
+                : new BlockRotation(Rotation.None, Rotation.None, Rotation.None);
+    }
+
+    /** The block id a {@code PlaceBlockInteraction} in {@code compiled} places, or -1. */
+    private static int placedBlockIdOf(CompiledInteraction compiled) {
+        for (FlatOp op : compiled.ops()) {
+            if (op instanceof FlatOp.Node n && n.interaction() instanceof PlaceBlockInteraction pb) {
+                return pb.blockId;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * The {@code FacingPlayer} rotation: the block turns so its front faces the
+     * player, i.e. opposite the player's look direction, quantised to a cardinal.
+     *
+     * <p>Derived from the engine convention: look dir is
+     * {@code (-sin(yaw), …, -cos(yaw))} ({@code Vector3dUtil.setYawPitch}) so
+     * yaw 0°=North, 90°=West, 180°=South, 270°=East; the block's default front is
+     * {@code +Z} (South) and {@code Rotation.rotateY} turns it, which works out to
+     * {@code yaw = closestOfDegrees(playerYawDegrees)} (matches a real capture:
+     * a placement at look-yaw ≈90° → {@code Ninety}). {@code StairFacingPlayer}
+     * shares the yaw; its up/down (ceiling) pitch variant is not reproduced.
+     *
+     * @return the rotation, or {@code null} if no look has been observed yet
+     */
+    private BlockRotation facingPlayerRotation() {
+        if (!haveLook) {
+            return null;
+        }
+        double deg = Math.toDegrees(lookYaw);
+        int q = (int) Math.floorMod(Math.round(deg / 90.0), 4L);
+        Rotation yaw = switch (q) {
+            case 1 -> Rotation.Ninety;
+            case 2 -> Rotation.OneEighty;
+            case 3 -> Rotation.TwoSeventy;
+            default -> Rotation.None;
+        };
+        return new BlockRotation(yaw, Rotation.None, Rotation.None);
+    }
+
+    /**
+     * Axis orientation for a {@code Pipe}-family block (log / beam / pillar): it
+     * lies along the <em>axis</em> of the clicked face — opposite faces share a
+     * rotation (East==West, North==South). Matches the server {@code Pipe}
+     * variant's rotation set and real {@code Wood_Beech_Trunk} captures:
+     * East/West → {@code yaw=90,pitch=90} (X), North/South → {@code pitch=90} (Z),
+     * Up/Down → none (Y).
+     */
+    private static BlockRotation axisRotation(BlockFace face) {
+        return switch (face) {
+            case Up, Down     -> new BlockRotation(Rotation.None,   Rotation.None,   Rotation.None);
+            case North, South -> new BlockRotation(Rotation.None,   Rotation.Ninety, Rotation.None);
+            case East, West   -> new BlockRotation(Rotation.Ninety, Rotation.Ninety, Rotation.None);
+            default           -> null;
+        };
+    }
+
+    /**
      * Runs the VM against an observed chain and logs whether it reproduces the
      * real operation sequence — the capture is the simulator's test oracle.
      */
@@ -453,9 +574,11 @@ public final class InteractionControlImpl implements InteractionControl {
         }
         MovementStates movement = movementStates;
         Map<String, Integer> vars = items.varsFor(itemId);
+        // Placement rotation is filled in by buildFromVm (it knows the placed
+        // block id) via withBlockRotation; null here means "default for now".
         return dataKind == DataKind.PLACEMENT
                 ? InteractionContext.ofPlacement(type, target, blockType, face,
-                        movement, vars)
+                        null, movement, vars)
                 : InteractionContext.ofBlock(type, target, blockType, face,
                         movement, vars);
     }
@@ -545,7 +668,7 @@ public final class InteractionControlImpl implements InteractionControl {
         // spawns no forks — the server owns the area selection.
         int[] forgedOut = new int[] {-1};
         SyncInteractionChains[] forged = buildFromVm(pos, InteractionType.Primary, DataKind.BLOCK,
-                itemId, BlockFace.Up, null, Map.of(), forgedOut);
+                itemId, BlockFace.Up, null, Map.of(), forgedOut, BlockFace.Up);
         if (forged == null) {
             log.warn("meridian-core: dig swing — no Primary root for item {}", itemId);
             return 0;
@@ -707,12 +830,20 @@ public final class InteractionControlImpl implements InteractionControl {
 
     @Override
     public CompletableFuture<Void> placeOnBlock(BlockPos target, Face face) {
+        return placeOnBlock(target, face, face);
+    }
+
+    @Override
+    public CompletableFuture<Void> placeOnBlock(BlockPos target, Face face, Face orient) {
         // Same Secondary / PlaceBlockInteraction forge as plant — the server
         // places whatever block the held item maps to, not just a crop — but
-        // against the chosen face, so the block can land sideways / below.
+        // against the chosen face, so the block can land sideways / below. The
+        // orientation is derived from a separate face: the server stores the
+        // sent rotation verbatim, so facing is independent of the attach side.
         BlockFace bf = toBlockFace(face);
+        BlockFace ob = toBlockFace(orient);
         return enqueueForge(() ->
-                forge(target, InteractionType.Secondary, DataKind.PLACEMENT, bf));
+                forge(target, InteractionType.Secondary, DataKind.PLACEMENT, bf, null, ob));
     }
 
     private static BlockFace toBlockFace(Face face) {
@@ -858,7 +989,7 @@ public final class InteractionControlImpl implements InteractionControl {
     }
 
     private int forge(BlockPos pos, InteractionType type, DataKind dataKind, BlockFace face) {
-        return forge(pos, type, dataKind, face, null);
+        return forge(pos, type, dataKind, face, null, face);
     }
 
     /**
@@ -867,6 +998,15 @@ public final class InteractionControlImpl implements InteractionControl {
      */
     private int forge(BlockPos pos, InteractionType type, DataKind dataKind, BlockFace face,
                       List<BlockPos> hitBlocks) {
+        return forge(pos, type, dataKind, face, hitBlocks, face);
+    }
+
+    /**
+     * Forge variant taking a separate {@code orientFace} for the placed block's
+     * rotation, independent of the geometry {@code face} it attaches against.
+     */
+    private int forge(BlockPos pos, InteractionType type, DataKind dataKind, BlockFace face,
+                      List<BlockPos> hitBlocks, BlockFace orientFace) {
         ProxySession s = session;
         if (s == null) {
             log.warn("meridian-core: interaction {} requested but no session yet", type);
@@ -885,7 +1025,7 @@ public final class InteractionControlImpl implements InteractionControl {
         // VM is the primary path — it honestly simulates the server walk. The
         // captured-sequence replay is the fallback when a root cannot be resolved.
         SyncInteractionChains[] forged = buildFromVm(pos, type, dataKind, itemId, face, hitBlocks,
-                selectHitBlock, null);
+                selectHitBlock, null, orientFace);
         if (forged != null) {
             return sendPacedVm(forged, type, pos);
         }
@@ -1088,7 +1228,8 @@ public final class InteractionControlImpl implements InteractionControl {
     private SyncInteractionChains[] buildFromVm(BlockPos pos, InteractionType type,
                                                DataKind dataKind, String itemId, BlockFace face,
                                                List<BlockPos> hitBlocks,
-                                               Map<Integer, Integer> hitBlockMap, int[] forgedOut) {
+                                               Map<Integer, Integer> hitBlockMap, int[] forgedOut,
+                                               BlockFace orientFace) {
         OptionalInt rootId = resolveRoot(type, itemId);
         if (rootId.isEmpty()) {
             log.warn("meridian-core: no root for {} with item {} — item catalog not "
@@ -1102,6 +1243,16 @@ public final class InteractionControlImpl implements InteractionControl {
         }
         InteractionContext ctx = contextFor(type,
                 new BlockPosition(pos.x(), pos.y(), pos.z()), dataKind, itemId, face);
+        if (dataKind == DataKind.PLACEMENT) {
+            // Resolve the block being placed: the PlaceBlock node's id, or — when
+            // it's the generic -1 ("place the held item's block") — the item
+            // catalog's blockId. Then send the right orientation for its mode.
+            int placedId = placedBlockIdOf(compiled);
+            if (placedId < 0) {
+                placedId = items.blockIdOf(itemId).orElse(-1);
+            }
+            ctx = ctx.withBlockRotation(placementRotationFor(placedId, itemId, orientFace));
+        }
         if (hitBlocks != null && !hitBlocks.isEmpty()) {
             List<BlockPosition> targets = new ArrayList<>(hitBlocks.size());
             for (BlockPos b : hitBlocks) {

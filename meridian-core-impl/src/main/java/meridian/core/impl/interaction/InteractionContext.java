@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Map;
 import meridian.protocol.BlockFace;
 import meridian.protocol.BlockPosition;
+import meridian.protocol.BlockRotation;
 import meridian.protocol.BlockType;
 import meridian.protocol.InteractionType;
 import meridian.protocol.MovementStates;
@@ -20,6 +21,10 @@ import meridian.protocol.MovementStates;
  * @param placeBlock      where a placed block lands ({@code targetBlock.y + 1}),
  *                        or {@code null} when nothing is placed
  * @param blockFace       the face used for placement / targeting
+ * @param blockRotation   the orientation a placed block is set with, or
+ *                        {@code null} to send a default (no-rotation) one — some
+ *                        block types ignore it and orient by {@code blockFace},
+ *                        others (logs / beams) require it set per face
  * @param placedBlockId   block id to place, or {@code -1} to let the server
  *                        fall back to the held item's block
  * @param movementStates  the player's last observed {@code MovementStates} —
@@ -34,6 +39,7 @@ record InteractionContext(InteractionType interactionType,
                           BlockType targetBlockType,
                           BlockPosition placeBlock,
                           BlockFace blockFace,
+                          BlockRotation blockRotation,
                           int placedBlockId,
                           MovementStates movementStates,
                           Map<String, Integer> interactionVars,
@@ -43,19 +49,26 @@ record InteractionContext(InteractionType interactionType,
     static InteractionContext ofBlock(InteractionType type, BlockPosition block,
                                       BlockType blockType, BlockFace face,
                                       MovementStates movement, Map<String, Integer> vars) {
-        return new InteractionContext(type, block, blockType, null, face, -1, movement, vars, null);
+        return new InteractionContext(type, block, blockType, null, face, null, -1,
+                movement, vars, null);
+    }
+
+    /** Copy carrying the placement {@code blockRotation} to send (orientation). */
+    InteractionContext withBlockRotation(BlockRotation rotation) {
+        return new InteractionContext(interactionType, targetBlock, targetBlockType, placeBlock,
+                blockFace, rotation, placedBlockId, movementStates, interactionVars, hitBlocks);
     }
 
     /** Copy with a different acting block — used to point each dig fork at its block. */
     InteractionContext withTarget(BlockPosition block) {
         return new InteractionContext(interactionType, block, targetBlockType, placeBlock,
-                blockFace, placedBlockId, movementStates, interactionVars, hitBlocks);
+                blockFace, blockRotation, placedBlockId, movementStates, interactionVars, hitBlocks);
     }
 
     /** Copy carrying the area-dig target blocks ({@code SelectInteraction} forks one per block). */
     InteractionContext withHitBlocks(List<BlockPosition> blocks) {
         return new InteractionContext(interactionType, targetBlock, targetBlockType, placeBlock,
-                blockFace, placedBlockId, movementStates, interactionVars, blocks);
+                blockFace, blockRotation, placedBlockId, movementStates, interactionVars, blocks);
     }
 
     /**
@@ -66,12 +79,14 @@ record InteractionContext(InteractionType interactionType,
      */
     static InteractionContext ofPlacement(InteractionType type, BlockPosition target,
                                           BlockType targetType, BlockFace face,
+                                          BlockRotation rotation,
                                           MovementStates movement, Map<String, Integer> vars) {
         BlockPosition placed = target == null ? null
                 : new BlockPosition(target.x + normalX(face),
                                     target.y + normalY(face),
                                     target.z + normalZ(face));
-        return new InteractionContext(type, target, targetType, placed, face, -1, movement, vars, null);
+        return new InteractionContext(type, target, targetType, placed, face, rotation, -1,
+                movement, vars, null);
     }
 
     // Face normals, matching the server (Vector3iUtil / BlockFace.getDirection):

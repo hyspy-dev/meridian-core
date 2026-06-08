@@ -16,8 +16,10 @@ import meridian.api.session.ProxySession;
 import meridian.core.api.BlockPos;
 import meridian.core.api.BlockView;
 import meridian.core.api.WorldState;
+import meridian.protocol.BlockPlacementRotationMode;
 import meridian.protocol.BlockType;
 import meridian.protocol.UpdateType;
+import meridian.protocol.VariantRotation;
 import meridian.protocol.packets.assets.UpdateBlockTypes;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -78,6 +80,47 @@ public final class WorldStateImpl implements WorldState {
     /** Raw server-truth block type by id, or {@code null} if unknown — for Layer-1 use. */
     public BlockType blockTypeById(int id) {
         return serverTruth.get(id);
+    }
+
+    /**
+     * The {@link BlockPlacementRotationMode} of the block whose item key is
+     * {@code itemKey} — i.e. how the block this item places is oriented. Found by
+     * matching {@link BlockType#item} in the server catalog; {@code Default} if no
+     * block carries that item or the catalog hasn't arrived. Layer-1 use, for
+     * reproducing the client's placement rotation.
+     */
+    public BlockPlacementRotationMode placementRotationModeForItem(String itemKey) {
+        if (itemKey != null) {
+            for (BlockType bt : serverTruth.values()) {
+                if (itemKey.equals(bt.item) && bt.placementSettings != null) {
+                    return bt.placementSettings.rotationMode;
+                }
+            }
+        }
+        return BlockPlacementRotationMode.Default;
+    }
+
+    /**
+     * The {@link BlockPlacementRotationMode} of block id {@code blockId} — a direct
+     * catalog lookup (more reliable than matching by item key). {@code Default} if
+     * the id is unknown or carries no placement settings.
+     */
+    public BlockPlacementRotationMode placementRotationModeForBlock(int blockId) {
+        BlockType bt = serverTruth.get(blockId);
+        return bt != null && bt.placementSettings != null
+                ? bt.placementSettings.rotationMode : BlockPlacementRotationMode.Default;
+    }
+
+    /**
+     * The {@link VariantRotation} of block id {@code blockId} — how the block can
+     * be oriented (None / Pipe / UpDown / NESW / …). A non-nullable fixed field of
+     * {@code BlockType}, so it parses reliably (unlike {@code placementSettings}).
+     * This is what actually drives a log/pillar's per-axis orientation.
+     * {@code None} if the id is unknown.
+     */
+    public VariantRotation variantRotationForBlock(int blockId) {
+        BlockType bt = serverTruth.get(blockId);
+        return bt != null && bt.variantRotation != null ? bt.variantRotation : VariantRotation.None;
     }
 
     @Override

@@ -50,6 +50,7 @@ final class InteractionObserver implements PacketHandler {
             }
         } else if (packet instanceof ClientMovement movement) {
             control.onMovementStates(movement.movementStates);
+            control.onPlayerLook(movement.lookOrientation);
         } else if (packet instanceof SyncInteractionChains chains && chains.updates != null) {
             boolean changed = false;
             for (SyncInteractionChain chain : chains.updates) {

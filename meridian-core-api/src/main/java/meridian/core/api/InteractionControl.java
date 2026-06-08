@@ -84,6 +84,21 @@ public interface InteractionControl {
     CompletableFuture<Void> placeOnBlock(BlockPos target, Face face);
 
     /**
+     * Forges a block placement against {@code target}'s {@code face} (the
+     * geometry — which neighbour the block clicks and so which cell it lands in),
+     * but oriented as if it had been placed against {@code orient}.
+     *
+     * <p>The server stores a placed block's rotation verbatim, so orientation is
+     * independent of the side the block attaches to. This lets you attach to
+     * whatever solid neighbour is available (a block can only be placed against
+     * an existing one) yet pin a rotatable block's facing to a fixed direction.
+     * {@link #placeOnBlock(BlockPos, Face)} is this with {@code orient == face}.
+     *
+     * @return a future completing when the forged chain has played out
+     */
+    CompletableFuture<Void> placeOnBlock(BlockPos target, Face face, Face orient);
+
+    /**
      * Forges a watering-can interaction on {@code pos}. The held item must be
      * the can.
      *

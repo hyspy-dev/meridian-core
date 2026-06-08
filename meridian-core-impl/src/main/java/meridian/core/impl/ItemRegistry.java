@@ -95,6 +95,21 @@ public final class ItemRegistry {
         return item == null || item.interactionVars == null ? Map.of() : item.interactionVars;
     }
 
+    /**
+     * The block id this item places ({@link ItemBase#blockId}), or empty if the
+     * item is unknown or places nothing. The reliable item&rarr;block link — used
+     * to resolve a placed block's rotation mode when the interaction node carries
+     * a generic {@code blockId = -1} ("place the held item's block").
+     */
+    public OptionalInt blockIdOf(String itemId) {
+        if (itemId == null || itemId.isEmpty()) {
+            return OptionalInt.empty();
+        }
+        ItemBase item = items.get(itemId);
+        return item == null || item.blockId <= 0
+                ? OptionalInt.empty() : OptionalInt.of(item.blockId);
+    }
+
     /** Whether any item asset has been received yet. */
     public boolean ready() {
         return !items.isEmpty();

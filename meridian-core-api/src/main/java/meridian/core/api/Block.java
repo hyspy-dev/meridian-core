@@ -75,6 +75,18 @@ public interface Block {
     CompletableFuture<Void> place(Face face);
 
     /**
+     * Forges a block placement against this block's {@code against} face (where
+     * the held block lands — the adjacent cell), but oriented as if it had been
+     * placed against {@code orient}. Because the server stores a placed block's
+     * rotation verbatim, the facing is independent of the attach side: attach to
+     * whatever neighbour exists, yet pin a rotatable block's orientation.
+     * {@link #place(Face)} is this with {@code orient == against}.
+     *
+     * @return a future completing when the forged chain has played out
+     */
+    CompletableFuture<Void> place(Face against, Face orient);
+
+    /**
      * Forges a watering-can interaction on this block.
      *
      * @return a future completing when the forged charge has played out

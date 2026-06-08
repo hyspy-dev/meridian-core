@@ -79,6 +79,11 @@ final class BlockImpl implements Block {
     }
 
     @Override
+    public CompletableFuture<Void> place(Face against, Face orient) {
+        return interactions.placeOnBlock(new BlockPos(x, y, z), against, orient);
+    }
+
+    @Override
     public CompletableFuture<Void> water() {
         return interactions.waterBlock(new BlockPos(x, y, z));
     }
