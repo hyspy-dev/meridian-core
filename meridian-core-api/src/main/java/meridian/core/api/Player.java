@@ -44,6 +44,14 @@ public interface Player {
     int activeHotbarSlot();
 
     /**
+     * Drops the item in the active hotbar slot by forging a C2S
+     * {@code DropItemStack} for that slot. {@code quantity} items are thrown;
+     * {@code quantity = 0} is the pre-51 phantom-drop vector (the server kept the
+     * slot but spawned a real-item entity with count 0).
+     */
+    void dropHeld(int quantity);
+
+    /**
      * The first hotbar slot holding an item whose id contains {@code substring},
      * or {@code -1} if none — e.g. {@code hotbarSlotOf("Seed")}.
      */

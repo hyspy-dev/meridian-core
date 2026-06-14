@@ -7,6 +7,7 @@ import meridian.api.session.ProxySession;
 import meridian.protocol.Direction;
 import meridian.protocol.ModelTransform;
 import meridian.protocol.Position;
+import meridian.protocol.packets.inventory.DropItemStack;
 import meridian.protocol.packets.player.ClientMovement;
 import meridian.protocol.packets.player.ClientTeleport;
 import org.slf4j.Logger;
@@ -164,6 +165,21 @@ final class MovementControlImpl {
         mv.wishMovement = null;
         mv.mountedTo = 0;
         return mv;
+    }
+
+    /**
+     * Forges a C2S {@code DropItemStack} via the bound server session. Reuses
+     * this control's session because it is the captured Default-channel C2S one.
+     */
+    void dropItem(int section, int slot, int quantity) {
+        ProxySession s = session;
+        if (s == null) {
+            log.warn("meridian-core: drop requested but no client session yet — ignored");
+            return;
+        }
+        s.sendToServer(new DropItemStack(section, slot, quantity));
+        log.info("meridian-core: forged DropItemStack section={} slot={} qty={}",
+                section, slot, quantity);
     }
 
     void holdPosition(double x, double y, double z) {

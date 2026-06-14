@@ -31,6 +31,8 @@ final class PlayerImpl implements Player {
      *  silently latch onto a block six tiles deeper than intended.
      *  Callers wanting a different reach use the overload. */
     private static final double DEFAULT_REACH = 7.0;
+    /** Hotbar inventory section id (server {@code InventoryComponent.HOTBAR_SECTION_ID}). */
+    private static final int HOTBAR_SECTION_ID = -1;
 
     private final EntityTrackerImpl entities;
     private final InventoryTracker inventory;
@@ -134,6 +136,11 @@ final class PlayerImpl implements Player {
     @Override
     public int activeHotbarSlot() {
         return inventory.activeHotbarSlot();
+    }
+
+    @Override
+    public void dropHeld(int quantity) {
+        movement.dropItem(HOTBAR_SECTION_ID, inventory.activeHotbarSlot(), quantity);
     }
 
     @Override
