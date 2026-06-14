@@ -11,6 +11,7 @@ import meridian.protocol.ComponentUpdate;
 import meridian.protocol.Direction;
 import meridian.protocol.ModelTransform;
 import meridian.protocol.ModelUpdate;
+import meridian.protocol.NameplateUpdate;
 import meridian.protocol.PlayerSkinUpdate;
 import meridian.protocol.Position;
 import meridian.protocol.TransformUpdate;
@@ -40,6 +41,17 @@ final class EntityTrackerImpl implements EntityTracker {
      */
     private final Map<Integer, String> types = new ConcurrentHashMap<>();
     /**
+     * Per-entity {@code Model.assetId} — the registered model asset that names
+     * the species, unlike the shared blocky-mesh {@link #types} path. Sticky.
+     */
+    private final Map<Integer, String> modelAssetIds = new ConcurrentHashMap<>();
+    /**
+     * Per-entity nameplate text from observed {@code NameplateUpdate} — the
+     * player's username for players, a custom name for named entities. Sticky
+     * like {@link #types}; cleared on removal.
+     */
+    private final Map<Integer, String> nameplates = new ConcurrentHashMap<>();
+    /**
      * Network ids that have carried a {@code PlayerSkin} component — i.e. real
      * players. Sticky once added (cleared only on removal), mirroring how the
      * {@link #types} map treats the model path.
@@ -66,6 +78,8 @@ final class EntityTrackerImpl implements EntityTracker {
             for (int id : packet.removed) {
                 positions.remove(id);
                 types.remove(id);
+                modelAssetIds.remove(id);
+                nameplates.remove(id);
                 players.remove(id);
             }
         }
@@ -79,10 +93,17 @@ final class EntityTrackerImpl implements EntityTracker {
                             positions.put(update.networkId, pos);
                         }
                     } else if (component instanceof ModelUpdate modelUpdate
-                            && modelUpdate.model != null
-                            && modelUpdate.model.path != null
-                            && !modelUpdate.model.path.isEmpty()) {
-                        types.put(update.networkId, modelUpdate.model.path);
+                            && modelUpdate.model != null) {
+                        if (modelUpdate.model.path != null && !modelUpdate.model.path.isEmpty()) {
+                            types.put(update.networkId, modelUpdate.model.path);
+                        }
+                        if (modelUpdate.model.assetId != null
+                                && !modelUpdate.model.assetId.isEmpty()) {
+                            modelAssetIds.put(update.networkId, modelUpdate.model.assetId);
+                        }
+                    } else if (component instanceof NameplateUpdate nameplate
+                            && nameplate.text != null && !nameplate.text.isEmpty()) {
+                        nameplates.put(update.networkId, nameplate.text);
                     } else if (component instanceof PlayerSkinUpdate) {
                         // Only players carry a skin component — definitive
                         // player marker, independent of the model path.
@@ -130,6 +151,16 @@ final class EntityTrackerImpl implements EntityTracker {
     @Override
     public Optional<String> entityTypeOf(int entityId) {
         return Optional.ofNullable(types.get(entityId));
+    }
+
+    @Override
+    public Optional<String> entityModelAssetId(int entityId) {
+        return Optional.ofNullable(modelAssetIds.get(entityId));
+    }
+
+    @Override
+    public Optional<String> nameplateOf(int entityId) {
+        return Optional.ofNullable(nameplates.get(entityId));
     }
 
     @Override

@@ -37,6 +37,27 @@ public interface EntityTracker {
     Optional<String> entityTypeOf(int entityId);
 
     /**
+     * Model asset id from observed {@code Model.assetId} — the registered model
+     * asset that identifies the species/variant (e.g. {@code Creatures/Cow}).
+     * More specific than {@link #entityTypeOf}, whose path is the shared blocky
+     * mesh ({@code Models/Model.blockymodel}) and so is the same across species.
+     *
+     * <p>Empty until a {@code ModelUpdate} with a non-empty asset id is seen.
+     */
+    Optional<String> entityModelAssetId(int entityId);
+
+    /**
+     * Nameplate text shown above the entity — the player's username for players,
+     * or a custom display name for named entities. Populated from observed
+     * {@code NameplateUpdate} components.
+     *
+     * <p>Empty until the server has sent a nameplate for the entity; most mobs
+     * and props never get one, so callers should fall back to
+     * {@link #entityTypeOf} for an identifying label.
+     */
+    Optional<String> nameplateOf(int entityId);
+
+    /**
      * Whether entity {@code entityId} is a player — true once the server has
      * sent a {@code PlayerSkin} component for it. Players are the only entities
      * that carry a skin, so this is a definitive signal independent of the
