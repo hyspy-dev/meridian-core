@@ -123,6 +123,30 @@ public final class WorldStateImpl implements WorldState {
         return bt != null && bt.variantRotation != null ? bt.variantRotation : VariantRotation.None;
     }
 
+    /**
+     * The current state name of block id {@code blockId} — the {@link BlockType#states}
+     * key whose value (a sibling block index) equals {@code blockId}, or
+     * {@code "default"} (the server's {@code StateData.NULL_STATE_ID}) when the type
+     * declares no states. Mirrors the server's {@code BlockType.getStateForBlock}.
+     *
+     * <p>State is encoded as a distinct block id within a family — a lamp's
+     * {@code on}/{@code off}, a crop's growth stage — so the same {@code blockType}
+     * resolves a different name per id. A pure function of its inputs; shared by the
+     * interaction {@code BlockCondition} matchers and the {@code BlockView#state()}
+     * projection so both read the state identically. Layer-1 use.
+     */
+    public static String stateNameForBlock(BlockType blockType, int blockId) {
+        if (blockType != null && blockType.states != null) {
+            for (Map.Entry<String, Integer> e : blockType.states.entrySet()) {
+                Integer idx = e.getValue();
+                if (idx != null && idx == blockId) {
+                    return e.getKey();
+                }
+            }
+        }
+        return "default";
+    }
+
     @Override
     public Collection<BlockView> allBlockTypes() {
         List<BlockView> out = new ArrayList<>(serverTruth.size());

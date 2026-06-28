@@ -6,6 +6,7 @@ import meridian.protocol.BlockFace;
 import meridian.protocol.BlockPosition;
 import meridian.protocol.BlockRotation;
 import meridian.protocol.BlockType;
+import meridian.protocol.GameMode;
 import meridian.protocol.InteractionType;
 import meridian.protocol.MovementStates;
 
@@ -30,6 +31,13 @@ import meridian.protocol.MovementStates;
  * @param movementStates  the player's last observed {@code MovementStates} —
  *                        what {@code ConditionInteraction} tests — or
  *                        {@code null} if none has been seen yet
+ * @param gameMode        the player's last observed {@code GameMode} (from
+ *                        {@code SetGameMode}) — what {@code ConditionInteraction}'s
+ *                        {@code requiredGameMode} tests — or {@code null} if none
+ *                        has been seen yet (the check is then skipped, conservatively)
+ * @param targetBlockId   the target's raw block id ({@code -1} if unresolved) —
+ *                        resolves its current state name for
+ *                        {@code BlockConditionInteraction} matchers
  * @param interactionVars the held item's interaction variables — what
  *                        {@code ReplaceInteraction} resolves its replacement
  *                        root against (the server's {@code getInteractionVars})
@@ -37,38 +45,41 @@ import meridian.protocol.MovementStates;
 record InteractionContext(InteractionType interactionType,
                           BlockPosition targetBlock,
                           BlockType targetBlockType,
+                          int targetBlockId,
                           BlockPosition placeBlock,
                           BlockFace blockFace,
                           BlockRotation blockRotation,
                           int placedBlockId,
                           MovementStates movementStates,
+                          GameMode gameMode,
                           Map<String, Integer> interactionVars,
                           List<BlockPosition> hitBlocks) {
 
     /** Context for a plain block interaction (harvest / use) — no placement. */
     static InteractionContext ofBlock(InteractionType type, BlockPosition block,
-                                      BlockType blockType, BlockFace face,
-                                      MovementStates movement, Map<String, Integer> vars) {
-        return new InteractionContext(type, block, blockType, null, face, null, -1,
-                movement, vars, null);
+                                      BlockType blockType, int blockId, BlockFace face,
+                                      MovementStates movement, GameMode gameMode,
+                                      Map<String, Integer> vars) {
+        return new InteractionContext(type, block, blockType, blockId, null, face, null, -1,
+                movement, gameMode, vars, null);
     }
 
     /** Copy carrying the placement {@code blockRotation} to send (orientation). */
     InteractionContext withBlockRotation(BlockRotation rotation) {
-        return new InteractionContext(interactionType, targetBlock, targetBlockType, placeBlock,
-                blockFace, rotation, placedBlockId, movementStates, interactionVars, hitBlocks);
+        return new InteractionContext(interactionType, targetBlock, targetBlockType, targetBlockId,
+                placeBlock, blockFace, rotation, placedBlockId, movementStates, gameMode, interactionVars, hitBlocks);
     }
 
     /** Copy with a different acting block — used to point each dig fork at its block. */
     InteractionContext withTarget(BlockPosition block) {
-        return new InteractionContext(interactionType, block, targetBlockType, placeBlock,
-                blockFace, blockRotation, placedBlockId, movementStates, interactionVars, hitBlocks);
+        return new InteractionContext(interactionType, block, targetBlockType, targetBlockId,
+                placeBlock, blockFace, blockRotation, placedBlockId, movementStates, gameMode, interactionVars, hitBlocks);
     }
 
     /** Copy carrying the area-dig target blocks ({@code SelectInteraction} forks one per block). */
     InteractionContext withHitBlocks(List<BlockPosition> blocks) {
-        return new InteractionContext(interactionType, targetBlock, targetBlockType, placeBlock,
-                blockFace, blockRotation, placedBlockId, movementStates, interactionVars, blocks);
+        return new InteractionContext(interactionType, targetBlock, targetBlockType, targetBlockId,
+                placeBlock, blockFace, blockRotation, placedBlockId, movementStates, gameMode, interactionVars, blocks);
     }
 
     /**
@@ -78,15 +89,16 @@ record InteractionContext(InteractionType interactionType,
      * plant's "lands at {@code y + 1}".
      */
     static InteractionContext ofPlacement(InteractionType type, BlockPosition target,
-                                          BlockType targetType, BlockFace face,
+                                          BlockType targetType, int blockId, BlockFace face,
                                           BlockRotation rotation,
-                                          MovementStates movement, Map<String, Integer> vars) {
+                                          MovementStates movement, GameMode gameMode,
+                                          Map<String, Integer> vars) {
         BlockPosition placed = target == null ? null
                 : new BlockPosition(target.x + normalX(face),
                                     target.y + normalY(face),
                                     target.z + normalZ(face));
-        return new InteractionContext(type, target, targetType, placed, face, rotation, -1,
-                movement, vars, null);
+        return new InteractionContext(type, target, targetType, blockId, placed, face, rotation, -1,
+                movement, gameMode, vars, null);
     }
 
     // Face normals, matching the server (Vector3iUtil / BlockFace.getDirection):

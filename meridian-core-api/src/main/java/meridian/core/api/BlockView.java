@@ -12,6 +12,16 @@ public interface BlockView {
 
     String name();
 
+    /**
+     * This block's current state name — e.g. {@code "on"}/{@code "off"} for a
+     * toggleable lamp, a crop's growth stage, or {@code "default"} when the type
+     * declares no states. Hytale encodes state as a distinct block id within a
+     * family, so two blocks sharing a {@link #name()} can report different
+     * {@code state()}; the id reverse-resolves the name. Read-only — there is no
+     * {@code withState}; a forged interaction is how state is changed.
+     */
+    String state();
+
     boolean isSolid();
 
     boolean isVisible();

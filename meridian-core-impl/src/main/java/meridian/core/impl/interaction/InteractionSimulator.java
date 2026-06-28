@@ -7,6 +7,10 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import meridian.core.impl.WorldStateImpl;
+import meridian.protocol.BlockConditionInteraction;
+import meridian.protocol.BlockIdMatcher;
+import meridian.protocol.BlockMatcher;
 import meridian.protocol.BlockPosition;
 import meridian.protocol.BlockRotation;
 import meridian.protocol.BlockType;
@@ -14,6 +18,7 @@ import meridian.protocol.BreakBlockInteraction;
 import meridian.protocol.ChainingInteraction;
 import meridian.protocol.ChargingInteraction;
 import meridian.protocol.ConditionInteraction;
+import meridian.protocol.GameMode;
 import meridian.protocol.Interaction;
 import meridian.protocol.InteractionState;
 import meridian.protocol.InteractionSyncData;
@@ -45,6 +50,9 @@ import org.slf4j.LoggerFactory;
  * <p><b>Ported node logic.</b>
  * <ul>
  *   <li>{@code UseEntityInteraction} — fails (no entity target).</li>
+ *   <li>{@code SimpleBlockInteraction} (base of the block family) — fails when the
+ *       target block is air / missing / out-of-chunk ({@code targetBlockType} is
+ *       {@code null}); the whole family inherits this base check.</li>
  *   <li>{@code UseBlockInteraction} — fails unless the target block type has an
  *       interaction for the chain's type; on success the walk enters that
  *       block-interaction root and returns here when it completes.</li>
@@ -375,8 +383,19 @@ final class InteractionSimulator {
         if (node instanceof UseEntityInteraction) {
             return InteractionState.Failed;
         }
+        if (node instanceof SimpleBlockInteraction && ctx.targetBlockType() == null) {
+            // SimpleBlockInteraction.simulateTick0 base check: the target block is
+            // air / missing / out-of-chunk (core resolves no BlockType). The whole
+            // block family (UseBlock, BreakBlock, BlockCondition, ChangeBlock, …)
+            // fails this before its own logic runs.
+            return InteractionState.Failed;
+        }
         if (node instanceof UseBlockInteraction) {
             return hasBlockInteraction(ctx.targetBlockType(), ctx.interactionType())
+                    ? InteractionState.Finished : InteractionState.Failed;
+        }
+        if (node instanceof BlockConditionInteraction blockCondition) {
+            return blockConditionMatches(blockCondition, ctx)
                     ? InteractionState.Finished : InteractionState.Failed;
         }
         if (node instanceof ConditionInteraction condition) {
@@ -490,10 +509,22 @@ final class InteractionSimulator {
             // Forged chains never target an entity (data.entityId = -1).
             return InteractionState.Failed;
         }
+        if (node instanceof SimpleBlockInteraction && ctx.targetBlockType() == null) {
+            // SimpleBlockInteraction.simulateTick0 base check: the target block is
+            // air / missing / out-of-chunk (core resolves no BlockType). The whole
+            // block family (UseBlock, BreakBlock, BlockCondition, ChangeBlock, …)
+            // fails this before its own logic runs.
+            return InteractionState.Failed;
+        }
         if (node instanceof UseBlockInteraction) {
             // doInteraction: fails unless the target block has an interaction
             // mapped for this interaction type.
             return hasBlockInteraction(ctx.targetBlockType(), ctx.interactionType())
+                    ? InteractionState.Finished : InteractionState.Failed;
+        }
+        if (node instanceof BlockConditionInteraction blockCondition) {
+            // doInteraction: the target must match one of the matchers.
+            return blockConditionMatches(blockCondition, ctx)
                     ? InteractionState.Finished : InteractionState.Failed;
         }
         if (node instanceof ConditionInteraction condition) {
@@ -570,12 +601,76 @@ final class InteractionSimulator {
     }
 
     /**
-     * Ported {@code ConditionInteraction.tick0}: each set flag must equal the
-     * matching {@code MovementStates} field. {@code requiredGameMode} is not
-     * tracked proxy-side and is treated as satisfied. With no movement snapshot
-     * the condition is assumed to hold (the server's {@code success = true} default).
+     * Ported {@code BlockConditionInteraction.doInteraction}: the target matches if
+     * <em>any</em> matcher matches. The block id ({@code BlockType.item}), state
+     * ({@code BlockType.states} reverse-lookup) and tags ({@code BlockType.tagIndexes})
+     * are all reproducible from the tracked block type. The matcher <b>face</b> is
+     * still assumed to pass — a dynamic face needs the block's per-position rotation,
+     * which the proxy does not track yet. The result only rejects on a criterion it
+     * can evaluate, never forging an unjustified {@code Failed}. The Creative
+     * place-mode override is treated as the default (no override).
+     */
+    private static boolean blockConditionMatches(BlockConditionInteraction node, InteractionContext ctx) {
+        BlockMatcher[] matchers = node.matchers;
+        if (matchers == null || matchers.length == 0) {
+            return true; // no matchers — nothing to reject on
+        }
+        BlockType blockType = ctx.targetBlockType();
+        String itemId = blockType != null ? blockType.item : null;
+        for (BlockMatcher matcher : matchers) {
+            if (matcher == null) {
+                continue;
+            }
+            BlockIdMatcher block = matcher.block;
+            if (block != null) {
+                // Block id — BlockIdMatcher.id vs the target's item id.
+                if (block.id != null && !block.id.isEmpty()
+                        && (itemId == null || !block.id.equals(itemId))) {
+                    continue;
+                }
+                // Block state — the matcher's state vs the target's current state name.
+                if (block.state != null && !block.state.isEmpty()
+                        && !block.state.equals(
+                                WorldStateImpl.stateNameForBlock(blockType, ctx.targetBlockId()))) {
+                    continue;
+                }
+                // Block tag — the matcher's tag index must be among the target's tags.
+                if (block.tagIndex != Integer.MIN_VALUE && !hasTag(blockType, block.tagIndex)) {
+                    continue;
+                }
+            }
+            // matcher.face / staticFace still assumed to pass (needs per-position rotation).
+            return true;
+        }
+        return false; // every matcher failed a criterion the proxy could evaluate
+    }
+
+    /** Whether {@code tagIndex} is among the block type's expanded tag indexes. */
+    private static boolean hasTag(BlockType blockType, int tagIndex) {
+        if (blockType == null || blockType.tagIndexes == null) {
+            return false;
+        }
+        for (int t : blockType.tagIndexes) {
+            if (t == tagIndex) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Ported {@code ConditionInteraction.tick0}: {@code requiredGameMode} must equal
+     * the player's observed game mode, and each set movement flag must equal the
+     * matching {@code MovementStates} field. Either input being unobserved
+     * ({@code null}) skips its own check — conservative, matching the server's
+     * {@code success = true} default — but the two are independent, so a game-mode
+     * mismatch fails even with no movement snapshot.
      */
     private static boolean conditionHolds(ConditionInteraction c, InteractionContext ctx) {
+        GameMode mode = ctx.gameMode();
+        if (c.requiredGameMode != null && mode != null && c.requiredGameMode != mode) {
+            return false;
+        }
         MovementStates m = ctx.movementStates();
         if (m == null) {
             return true;

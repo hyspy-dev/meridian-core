@@ -11,6 +11,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.RejectedExecutionException;
 import meridian.api.module.Scheduler;
 import meridian.api.packet.PacketHandler;
 import meridian.api.session.ProxySession;
@@ -34,6 +35,7 @@ import meridian.protocol.InteractionChainData;
 import meridian.protocol.InteractionState;
 import meridian.protocol.InteractionSyncData;
 import meridian.protocol.InteractionType;
+import meridian.protocol.GameMode;
 import meridian.protocol.MovementStates;
 import meridian.protocol.PlaceBlockInteraction;
 import meridian.protocol.RootInteraction;
@@ -104,6 +106,8 @@ public final class InteractionControlImpl implements InteractionControl {
     private volatile BlockPosition targetBlock;
     /** The player's last observed movement state — what {@code ConditionInteraction} tests. */
     private volatile MovementStates movementStates;
+    /** The player's last observed game mode — what {@code ConditionInteraction.requiredGameMode} tests. */
+    private volatile GameMode gameMode;
     /** Player's last observed look yaw (radians) — drives FacingPlayer placement. */
     private volatile float lookYaw;
     private volatile boolean haveLook;
@@ -196,6 +200,13 @@ public final class InteractionControlImpl implements InteractionControl {
     void onMovementStates(MovementStates states) {
         if (states != null) {
             this.movementStates = states;
+        }
+    }
+
+    /** Tracks the player's game mode — {@code ConditionInteraction.requiredGameMode}'s input. */
+    void onGameMode(GameMode mode) {
+        if (mode != null) {
+            this.gameMode = mode;
         }
     }
 
@@ -566,21 +577,23 @@ public final class InteractionControlImpl implements InteractionControl {
     private InteractionContext contextFor(InteractionType type, BlockPosition target,
                                           DataKind dataKind, String itemId, BlockFace face) {
         BlockType blockType = null;
+        int blockId = -1;
         if (target != null) {
-            int id = chunks.blockIdAt(target.x, target.y, target.z);
-            if (id > 0) {
-                blockType = worldState.blockTypeById(id);
+            blockId = chunks.blockIdAt(target.x, target.y, target.z);
+            if (blockId > 0) {
+                blockType = worldState.blockTypeById(blockId);
             }
         }
         MovementStates movement = movementStates;
+        GameMode mode = gameMode;
         Map<String, Integer> vars = items.varsFor(itemId);
         // Placement rotation is filled in by buildFromVm (it knows the placed
         // block id) via withBlockRotation; null here means "default for now".
         return dataKind == DataKind.PLACEMENT
-                ? InteractionContext.ofPlacement(type, target, blockType, face,
-                        null, movement, vars)
-                : InteractionContext.ofBlock(type, target, blockType, face,
-                        movement, vars);
+                ? InteractionContext.ofPlacement(type, target, blockType, blockId, face,
+                        null, movement, mode, vars)
+                : InteractionContext.ofBlock(type, target, blockType, blockId, face,
+                        movement, mode, vars);
     }
 
     /** Flattens a registry root into its operation list, or {@code null} if absent. */
@@ -908,12 +921,24 @@ public final class InteractionControlImpl implements InteractionControl {
         // Exactly the chain's tick-duration — one tick minimum, since even an
         // instant chain occupies the tick its packet lands on.
         long delayMs = Math.max(ticks, 1) * 1000L / 60L;
-        scheduler.schedule(() -> {
-            // The chain has played out: complete the caller's future (which may
-            // enqueue follow-up forges via .thenRun), then start the next one.
+        try {
+            scheduler.schedule(() -> {
+                // The chain has played out: complete the caller's future (which may
+                // enqueue follow-up forges via .thenRun), then start the next one.
+                next.done().complete(null);
+                runNextForge();
+            }, Duration.ofMillis(delayMs));
+        } catch (RejectedExecutionException terminated) {
+            // The module was torn down (e.g. after a disconnect) while a stale UI
+            // still holds this control — the scheduler is shut down. Complete the
+            // future and stop draining; never propagate to the caller (a Swing
+            // button handler) as an unhandled exception.
+            log.warn("meridian-core: forge scheduler is shut down (module torn down?) — "
+                    + "dropping {} queued forge(s)", forgeQueue.size() + 1);
+            forging = false;
+            forgeQueue.clear();
             next.done().complete(null);
-            runNextForge();
-        }, Duration.ofMillis(delayMs));
+        }
     }
 
     /** Body of {@link #switchHotbarSlot}; returns the chain's tick-duration. */

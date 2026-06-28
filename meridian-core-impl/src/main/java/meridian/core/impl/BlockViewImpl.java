@@ -31,6 +31,11 @@ final class BlockViewImpl implements BlockView {
     }
 
     @Override
+    public String state() {
+        return WorldStateImpl.stateNameForBlock(blockType, id);
+    }
+
+    @Override
     public boolean isVisible() {
         return blockType.drawType != DrawType.Empty;
     }

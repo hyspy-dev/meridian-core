@@ -11,6 +11,7 @@ import meridian.protocol.packets.interaction.SyncInteractionChain;
 import meridian.protocol.packets.interaction.SyncInteractionChains;
 import meridian.protocol.packets.player.ClientMovement;
 import meridian.protocol.packets.player.MouseInteraction;
+import meridian.protocol.packets.player.SetGameMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -21,7 +22,8 @@ import org.slf4j.LoggerFactory;
  * <p><b>Observe.</b> {@code MouseInteraction} carries the looked-at block;
  * {@code SyncInteractionChains} carries the player's own chains — the per-type
  * root ids and replay templates; {@code ClientMovement} carries the movement
- * state {@code ConditionInteraction} branches on.
+ * state {@code ConditionInteraction} branches on; {@code SetGameMode} carries the
+ * player's game mode ({@code ConditionInteraction.requiredGameMode}'s input).
  *
  * <p><b>Translate.</b> Every interaction {@code chainId} the player sends is
  * rewritten into the proxy-owned server-side space, and server-to-client
@@ -104,6 +106,11 @@ final class InteractionObserver implements PacketHandler {
 
     @Override
     public Action handleS2C(ChannelHandlerContext ctx, Packet packet, ProxySession session) {
+        if (packet instanceof SetGameMode setGameMode) {
+            // The player's game mode — ConditionInteraction.requiredGameMode's input.
+            control.onGameMode(setGameMode.gameMode);
+            return Action.FORWARD;
+        }
         if (packet instanceof SyncInteractionChains chains && chains.updates != null) {
             List<SyncInteractionChain> kept = new ArrayList<>(chains.updates.length);
             boolean changed = false;
