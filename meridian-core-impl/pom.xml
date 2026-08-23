@@ -33,7 +33,7 @@
         <dependency>
             <groupId>meridian</groupId>
             <artifactId>meridian-protocol</artifactId>
-            <version>${meridian.api.version}</version>
+            <version>${meridian.protocol.version}</version>
             <scope>provided</scope>
         </dependency>
         <dependency>
