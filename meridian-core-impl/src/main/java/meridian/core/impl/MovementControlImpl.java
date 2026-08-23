@@ -6,7 +6,6 @@ import meridian.api.module.Scheduler;
 import meridian.api.session.ProxySession;
 import meridian.protocol.Direction;
 import meridian.protocol.ModelTransform;
-import meridian.protocol.ModelTransformFields;
 import meridian.protocol.Position;
 import meridian.protocol.packets.inventory.DropItemStack;
 import meridian.protocol.packets.player.ClientMovement;
@@ -153,20 +152,9 @@ final class MovementControlImpl {
                 new Position(x, y, z),
                 lastBody != null ? lastBody.clone() : null,
                 lastLook != null ? lastLook.clone() : null);
-        // An orientation we never observed is left out of the transform, so its fields
-        // must be flagged ignored — the client applies whatever the mask does not mask out.
-        short ignored = ModelTransformFields.None;
-        if (lastBody == null) {
-            ignored |= ModelTransformFields.BodyOrientationYaw
-                    | ModelTransformFields.BodyOrientationPitch
-                    | ModelTransformFields.BodyOrientationRoll;
-        }
-        if (lastLook == null) {
-            ignored |= ModelTransformFields.LookOrientationYaw
-                    | ModelTransformFields.LookOrientationPitch
-                    | ModelTransformFields.LookOrientationRoll;
-        }
-        s.sendToClient(new ClientTeleport(id, ignored, ModelTransformFields.None, transform, true));
+        // 0.5.9: ClientTeleport carries no transform-field mask (the ignored/relative masks were
+        // added in 0.6); an orientation we never observed is just left unset in the ModelTransform.
+        s.sendToClient(new ClientTeleport(id, transform, true));
     }
 
     /** A forged C2S {@code ClientMovement} carrying just the absolute (+ cached facing). */
