@@ -123,6 +123,7 @@ final class MapMarkersImpl implements MapMarkers {
                     continue;
                 }
                 MarkerState state = store.upsert(world, incoming);
+                learnWhoWeAre(state);
                 rewritten |= confirmCreate(state, removals);
                 if (state.category == MarkerCategory.PLAYER && state.player != null
                         && onClient.remove(state.ghostId())) {
@@ -203,6 +204,44 @@ final class MapMarkersImpl implements MapMarkers {
             return true;
         }
         return false;
+    }
+
+    /**
+     * Works out who the player is from a marker only they could have been sent.
+     *
+     * <p>A personal marker goes to its owner and to nobody else, so the player named on one as
+     * having placed it is the player reading it. That matters because the client offers to
+     * delete a marker that belongs to somebody - a spawn or a point of interest it will not - so
+     * our own markers have to say who placed them or they cannot be removed from the map they
+     * are on.
+     *
+     * <p>Markers made before we knew are stamped and redrawn, rather than left undeletable for
+     * the rest of the session.
+     */
+    private void learnWhoWeAre(MarkerState state) {
+        if (state.category != MarkerCategory.USER_PRIVATE || state.owner == null
+                || state.owner.equals(selfId)) {
+            return;
+        }
+        selfId = state.owner;
+        selfName = state.ownerName;
+        List<String> orphans = new ArrayList<>();
+        for (MarkerState ours : store.markers(worldId)) {
+            if (ours.category == MarkerCategory.LOCAL && ours.owner == null) {
+                ours.owner = selfId;
+                ours.ownerName = selfName;
+                orphans.add(ours.id);
+            }
+        }
+        if (orphans.isEmpty()) {
+            return;
+        }
+        store.markDirty();
+        // The client keeps a marker as it first arrived, so a changed one has to be taken off
+        // its map before it will take the new version.
+        orphans.forEach(onClient::remove);
+        send(null, orphans);
+        apply();
     }
 
     /** The server wiped the client's map. Everything we put there went with it. */
@@ -568,8 +607,9 @@ final class MapMarkersImpl implements MapMarkers {
                 makeLocal(pending.name, pending.x, MARKER_HEIGHT, pending.z,
                         pending.icon, pending.colourRgb));
         if (pending.fromClient) {
-            chat.send("[Markers] The server would not take '" + made.displayName()
-                    + "' - saved on your map instead.");
+            // Not why it was refused - the server says that itself, the moment it decides. What
+            // it does not say, and what the player is looking at, is that the marker was kept.
+            chat.send("[Markers] Kept '" + made.displayName() + "' on your own map.");
         }
         log.info("meridian-core: no answer in {}s for marker '{}' at ({}, {}) - kept local",
                 ANSWER_TIMEOUT.toSeconds(), made.displayName(), (int) pending.x, (int) pending.z);
