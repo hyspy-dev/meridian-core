@@ -25,7 +25,18 @@
       "SetChunk",
       "ServerSetBlock",
       "ServerSetBlocks",
-      "UnloadChunk"
+      "UnloadChunk",
+      "UpdateWorldMap",
+      "ClearWorldMap",
+      "CreateUserMarker",
+      "RemoveMapMarker",
+      "TeleportToWorldMapMarker",
+      "ServerMessage",
+      "JoinWorld",
+      "CustomHud",
+      "AssetInitialize",
+      "AssetPart",
+      "AssetFinalize"
     ]
   }
 }

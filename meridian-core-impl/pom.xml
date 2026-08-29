@@ -8,7 +8,7 @@
     <parent>
         <groupId>meridian</groupId>
         <artifactId>meridian-core-parent</artifactId>
-        <version>0.1.0-SNAPSHOT</version>
+        <version>1.1.0-SNAPSHOT</version>
     </parent>
 
     <!-- The loadable module. Shades meridian-core-api into itself so the proxy
@@ -20,7 +20,8 @@
         <dependency>
             <groupId>meridian</groupId>
             <artifactId>meridian-core-api</artifactId>
-            <version>${project.version}</version>
+            <!-- The contract coordinate, not our version - the two moved apart on purpose. -->
+            <version>0.1.0-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>meridian</groupId>
@@ -34,6 +35,14 @@
             <groupId>meridian</groupId>
             <artifactId>meridian-protocol</artifactId>
             <version>${meridian.protocol.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <!-- Supplied by the proxy at runtime, like meridian-api: shading a second copy
+                 into the module jar would put two Gsons on the class path. -->
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.10.1</version>
             <scope>provided</scope>
         </dependency>
         <dependency>

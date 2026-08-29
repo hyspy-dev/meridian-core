@@ -8,11 +8,18 @@
     <parent>
         <groupId>meridian</groupId>
         <artifactId>meridian-core-parent</artifactId>
-        <version>0.1.0-SNAPSHOT</version>
+        <version>1.1.0-SNAPSHOT</version>
     </parent>
 
     <!-- Neutral types and service interfaces consumed by Layer-2 modules.
          Contains no types from meridian-protocol — Hytale updates never reach
          a Layer-2 module through here. -->
     <artifactId>meridian-core-api</artifactId>
+    <!-- Pinned on purpose, and not the version of core: this coordinate is the compile-time
+         contract every module names in its own pom. Letting it follow core would mean that
+         releasing core edited a pom in every module repo - and again at the next release.
+         It moves only when the contract itself breaks, which is exactly when each module does
+         need looking at. meridian-api works the same way. Adding to the API is not a break:
+         a module built against an older copy still links against a newer one. -->
+    <version>0.1.0-SNAPSHOT</version>
 </project>
