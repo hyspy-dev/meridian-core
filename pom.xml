@@ -7,7 +7,10 @@
 
     <groupId>meridian</groupId>
     <artifactId>meridian-core-parent</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <!-- The version meridian-core ships under - what a module's dependsOn range is checked
+         against, and what a release tag stamps here. meridian-core-api deliberately does NOT
+         follow it: see the note on its own version. -->
+    <version>1.1.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <!-- meridian-core: a Layer-1 module — headless Hytale game state living
