@@ -12,6 +12,7 @@ import meridian.protocol.Asset;
 import meridian.protocol.packets.setup.AssetFinalize;
 import meridian.protocol.packets.setup.AssetInitialize;
 import meridian.protocol.packets.setup.AssetPart;
+import meridian.protocol.packets.setup.RemoveAssets;
 import meridian.protocol.packets.setup.RequestCommonAssetsRebuild;
 
 /**
@@ -34,6 +35,10 @@ final class ClientAssetsImpl implements ClientAssets {
     private final SessionHolder session;
     /** content hash → the name it was pushed under, for this session. */
     private final Map<String, String> pushed = new ConcurrentHashMap<>();
+    /** and back again, so a name can be freed for new content. */
+    private final Map<String, String> byName = new ConcurrentHashMap<>();
+    /** what every connection should carry, handed over while the client is still loading. */
+    private final Map<String, byte[]> atConnect = new ConcurrentHashMap<>();
 
     ClientAssetsImpl(SessionHolder session) {
         this.session = session;
@@ -67,6 +72,7 @@ final class ClientAssetsImpl implements ClientAssets {
         if (pushed.putIfAbsent(hash, name) != null) {
             return Optional.of(pushed.get(hash));
         }
+        byName.put(name, hash);
         live.sendToClient(new AssetInitialize(new Asset(hash, name), bytes.length));
         for (int offset = 0; offset < bytes.length; offset += PART_SIZE) {
             int end = Math.min(offset + PART_SIZE, bytes.length);
@@ -76,6 +82,67 @@ final class ClientAssetsImpl implements ClientAssets {
         }
         live.sendToClient(new AssetFinalize());
         return Optional.of(name);
+    }
+
+    @Override
+    public Optional<String> replace(String name, byte[] bytes) {
+        if (name == null || name.isBlank() || bytes == null || bytes.length == 0) {
+            return Optional.empty();
+        }
+        String had = byName.remove(name);
+        if (had != null) {
+            // Off the client first. Until the name is free, the picture behind it cannot change:
+            // the client resolved it once and kept what it found.
+            pushed.remove(had);
+            session.get().ifPresent(live ->
+                    live.sendToClient(new RemoveAssets(new Asset[]{new Asset(had, name)})));
+        }
+        return push(name, bytes);
+    }
+
+    @Override
+    public void remove(String name) {
+        if (name == null || name.isBlank()) {
+            return;
+        }
+        String had = byName.remove(name);
+        if (had != null) {
+            // Free the hash too, so the same content can be pushed afresh if it comes back.
+            pushed.remove(had);
+            session.get().ifPresent(live ->
+                    live.sendToClient(new RemoveAssets(new Asset[]{new Asset(had, name)})));
+        }
+    }
+
+    @Override
+    public void provideAtConnect(String name, byte[] bytes) {
+        if (name != null && !name.isBlank() && bytes != null && bytes.length > 0) {
+            atConnect.put(name, bytes);
+        }
+    }
+
+    /**
+     * Hands over everything registered for connect time, on the session the loading traffic is
+     * arriving on. Called once per connection, while the client is still taking assets in.
+     */
+    void sendAtConnect(ProxySession live) {
+        atConnect.forEach((name, bytes) -> {
+            String hash = sha256Hex(bytes);
+            pushed.putIfAbsent(hash, name);
+            byName.put(name, hash);
+            live.sendToClient(new AssetInitialize(new Asset(hash, name), bytes.length));
+            for (int offset = 0; offset < bytes.length; offset += PART_SIZE) {
+                int end = Math.min(offset + PART_SIZE, bytes.length);
+                byte[] part = new byte[end - offset];
+                System.arraycopy(bytes, offset, part, 0, part.length);
+                live.sendToClient(new AssetPart(part));
+            }
+            live.sendToClient(new AssetFinalize());
+        });
+    }
+
+    boolean hasConnectAssets() {
+        return !atConnect.isEmpty();
     }
 
     @Override
@@ -103,6 +170,7 @@ final class ClientAssetsImpl implements ClientAssets {
     /** A new session starts with an empty client blob store. */
     void reset() {
         pushed.clear();
+        byName.clear();
     }
 
     private static String sha256Hex(byte[] bytes) {

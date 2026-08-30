@@ -36,7 +36,9 @@
       "CustomHud",
       "AssetInitialize",
       "AssetPart",
-      "AssetFinalize"
+      "AssetFinalize",
+      "RemoveAssets",
+      "WorldLoadFinished"
     ]
   }
 }

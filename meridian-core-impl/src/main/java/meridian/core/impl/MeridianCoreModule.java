@@ -56,6 +56,10 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.services().provide(Hud.class, new HudImpl(sessionHolder));
         ctx.registerHandler(Direction.S2C, HandlerPosition.NORMAL,
                 (direction, session) -> new AssetDedupGuard(clientAssets));
+        // Files that must simply be there: handed over during the load, with everything else the
+        // server sends, rather than pushed later at the cost of an index rebuild.
+        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
+                (direction, session) -> new ConnectAssetHandler(clientAssets));
 
         WorldMapImpl worldMap = new WorldMapImpl();
         // The view is built further down (it needs the World facade); the observer reaches it
