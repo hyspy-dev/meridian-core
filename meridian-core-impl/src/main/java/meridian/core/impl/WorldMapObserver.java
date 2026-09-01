@@ -7,11 +7,12 @@ import meridian.api.session.ProxySession;
 import meridian.protocol.packets.worldmap.UpdateWorldMap;
 
 /**
- * S2C MONITOR observer on the WorldMap channel: every tile the server draws is remembered.
+ * S2C observer on the WorldMap channel: every tile the server draws is remembered.
  *
- * <p>MONITOR and always {@code FORWARD} — core collects, it does not decide what the player
- * sees. A module that wants to change the client's view (keep explored tiles, thin them out,
- * change resolution) does that itself, downstream of this.
+ * <p>EARLY, and always {@code FORWARD}. What core remembers is what the <em>server</em> said,
+ * which is not the same as what the player ends up seeing: the view downstream of this may hold
+ * a tile back, and a tile held back must still be remembered - otherwise there would be nothing
+ * left to show when it is allowed through later.
  */
 final class WorldMapObserver implements PacketHandler {
 

@@ -28,18 +28,32 @@ final class WorldMapImpl implements WorldMap {
     private final Map<UUID, Map<Long, MapTileImpl>> worlds = new ConcurrentHashMap<>();
     private final CopyOnWriteArrayList<LongConsumer> listeners = new CopyOnWriteArrayList<>();
 
+    /** Where tiles go before the join packet says which world this is. */
+    private static final UUID UNKNOWN_WORLD = new UUID(0, 0);
+
     /** The world tiles are attributed to; switched by the world observer. */
-    private volatile UUID currentWorld = new UUID(0, 0);
-    /** True when something arrived since the last save — a quiet session writes nothing. */
-    private volatile boolean dirty;
+    private volatile UUID currentWorld = UNKNOWN_WORLD;
 
     // ------------------------------------------------------------------
     // Ingest (core-internal)
     // ------------------------------------------------------------------
 
-    /** Points ingest and queries at another world. */
+    /**
+     * Points ingest and queries at another world.
+     *
+     * <p>Tiles can arrive before the join packet names the world - they ride different channels -
+     * and those land under a placeholder. Naming the world takes them with it, so the map the
+     * player sees at the moment they arrive is the one that was already being drawn.
+     */
     void setCurrentWorld(UUID world) {
-        if (world != null) this.currentWorld = world;
+        if (world == null || world.equals(currentWorld)) {
+            return;
+        }
+        Map<Long, MapTileImpl> early = worlds.remove(UNKNOWN_WORLD);
+        this.currentWorld = world;
+        if (early != null && !early.isEmpty()) {
+            tilesOf(world).putAll(early);
+        }
     }
 
     @Override
@@ -59,7 +73,6 @@ final class WorldMapImpl implements WorldMap {
             if (tile == null) continue;
             long key = WorldMap.key(chunk.chunkX, chunk.chunkZ);
             tiles.put(key, tile);
-            dirty = true;
             for (LongConsumer listener : listeners) {
                 try {
                     listener.accept(key);
@@ -72,32 +85,6 @@ final class WorldMapImpl implements WorldMap {
 
     private Map<Long, MapTileImpl> tilesOf(UUID world) {
         return worlds.computeIfAbsent(world, w -> new ConcurrentHashMap<>());
-    }
-
-    // ------------------------------------------------------------------
-    // Persistence (core-internal)
-    // ------------------------------------------------------------------
-
-    /** Adopts tiles read from disk. Anything already in memory is newer and wins. */
-    void restore(Map<UUID, Map<Long, MapTileImpl>> saved) {
-        saved.forEach((world, tiles) -> tilesOf(world).putAll(tiles));
-    }
-
-    /**
-     * Writes the map through {@code store} when anything changed since the last save. The
-     * snapshot is taken per world so a tile arriving mid-save cannot corrupt the file.
-     */
-    void persist(WorldMapStore store) {
-        if (!dirty) return;
-        Map<UUID, Map<Long, MapTileImpl>> snapshot = new HashMap<>();
-        worlds.forEach((world, tiles) -> snapshot.put(world, new HashMap<>(tiles)));
-        dirty = false;
-        try {
-            store.save(snapshot);
-        } catch (java.io.IOException e) {
-            dirty = true;   // keep it pending; the next attempt may succeed
-            throw new java.io.UncheckedIOException(e);
-        }
     }
 
     // ------------------------------------------------------------------

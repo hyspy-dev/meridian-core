@@ -29,10 +29,15 @@ final class WorldMapViewHandler implements PacketHandler {
             return Action.FORWARD;
         }
         MapChunk[] filtered = view.filterServerUpdate(m.chunks);
+        if (filtered == m.chunks) {
+            return Action.FORWARD;      // untouched: the server's own bytes go on unchanged
+        }
         if (filtered == null && m.addedMarkers == null && m.removedMarkers == null) {
             return Action.DROP;
         }
         m.chunks = filtered;
-        return Action.FORWARD;
+        // MODIFIED, not FORWARD: the router re-serialises only what a handler says it changed,
+        // so a mutated packet forwarded as FORWARD reaches the client as it was.
+        return Action.MODIFIED;
     }
 }
