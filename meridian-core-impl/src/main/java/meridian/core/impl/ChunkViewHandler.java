@@ -7,8 +7,6 @@ import meridian.api.session.ProxySession;
 import meridian.protocol.packets.player.JoinWorld;
 import meridian.protocol.packets.setup.ViewRadius;
 import meridian.protocol.packets.world.UnloadChunk;
-import meridian.protocol.packets.world.UnloadChunks;
-import meridian.protocol.packets.world.UnloadSection;
 
 /**
  * Carries out {@link ChunkViewImpl}: holds back the server's unloads and widens the client's view.
@@ -32,10 +30,8 @@ final class ChunkViewHandler implements PacketHandler {
 
     @Override
     public Action handleS2C(ChannelHandlerContext ctx, Packet packet, ProxySession session) {
-        if (view.keepLoaded()
-                && (packet instanceof UnloadChunk
-                    || packet instanceof UnloadChunks
-                    || packet instanceof UnloadSection)) {
+        // One kind of unload to hold back: this build has no batched or per-section form.
+        if (view.keepLoaded() && packet instanceof UnloadChunk) {
             return Action.DROP;
         }
 
