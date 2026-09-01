@@ -28,6 +28,11 @@ final class MapTileImpl implements MapTile {
     }
 
     /** Rebuilds a tile from the RGB bytes written by {@link WorldMapStore}. */
+    /** A tile from colours somebody else worked out - the repainted form of another tile. */
+    static MapTileImpl fromPixels(int chunkX, int chunkZ, int size, int[] pixels) {
+        return new MapTileImpl(chunkX, chunkZ, size, pixels);
+    }
+
     static MapTileImpl fromRgb(int chunkX, int chunkZ, int size, byte[] rgb) {
         int[] pixels = new int[size * size];
         for (int i = 0; i < pixels.length; i++) {

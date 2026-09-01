@@ -2,10 +2,6 @@ package meridian.core.impl;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -100,12 +96,18 @@ final class MarkerStoreImpl {
 
     // ------------------------------------------------------------------
 
-    void load(Path file) {
-        if (!Files.exists(file)) {
+    /**
+     * Folds a kept archive back into what is known.
+     *
+     * <p>The file itself belongs to the markers module now; this only reads what it hands over,
+     * which is why it takes the text rather than a path.
+     */
+    void restore(String json) {
+        if (json == null || json.isBlank()) {
             return;
         }
         try {
-            Saved saved = gson.fromJson(Files.readString(file), Saved.class);
+            Saved saved = gson.fromJson(json, Saved.class);
             if (saved == null || saved.worlds == null) {
                 return;
             }
@@ -134,21 +136,15 @@ final class MarkerStoreImpl {
             }
             log.info("meridian-core: {} markers restored across {} worlds",
                     count, saved.worlds.size());
-        } catch (IOException | RuntimeException e) {
-            // A file we cannot read is not worth failing a session over: markers rebuild
+        } catch (RuntimeException e) {
+            // An archive we cannot read is not worth failing a session over: markers rebuild
             // themselves from the server within a minute of play.
-            log.warn("meridian-core: could not read {} - starting with no remembered markers",
-                    file, e);
+            log.warn("meridian-core: could not read the kept markers - starting with none", e);
         }
     }
 
-    void saveIfDirty(Path file) {
-        if (dirty.compareAndSet(true, false)) {
-            save(file);
-        }
-    }
-
-    private void save(Path file) {
+    /** Everything remembered, as JSON, for whoever is keeping the file. */
+    String export() {
         Saved saved = new Saved();
         saved.version = FORMAT;
         saved.worlds = new LinkedHashMap<>();
@@ -158,17 +154,22 @@ final class MarkerStoreImpl {
             world.hidden = new LinkedHashSet<>(hiddenIn(entry.getKey()));
             saved.worlds.put(entry.getKey(), world);
         }
-        try {
-            Files.createDirectories(file.getParent());
-            Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
-            Files.writeString(tmp, gson.toJson(saved));
-            // Move into place in one step: a crash mid-write leaves the previous file intact
-            // rather than half a new one.
-            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
-        } catch (IOException e) {
-            log.warn("meridian-core: could not write {}", file, e);
-            dirty.set(true);   // try again on the next pass
-        }
+        dirty.set(false);
+        return gson.toJson(saved);
+    }
+
+    /** The worlds anything is remembered for. */
+    Set<String> worldIds() {
+        return Set.copyOf(worlds.keySet());
+    }
+
+    /** Whether anything has changed since the archive was last read out. */
+    boolean hasChanges() {
+        return dirty.get();
+    }
+
+    boolean isEmpty() {
+        return worlds.values().stream().allMatch(Map::isEmpty);
     }
 
     /** On-disk shape. Only what gson can round-trip. */

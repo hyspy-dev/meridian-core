@@ -6,7 +6,11 @@ import meridian.api.packet.Direction;
 import meridian.api.packet.HandlerPosition;
 import meridian.core.api.CameraControl;
 import meridian.core.api.Chat;
+import meridian.core.api.ChunkView;
+import meridian.core.api.Containers;
+import meridian.core.api.PlayerState;
 import meridian.core.api.MapMarkers;
+import meridian.core.api.MarkerArchive;
 import meridian.core.api.DebugRender;
 import meridian.core.api.EntityTracker;
 import meridian.core.api.InteractionControl;
@@ -15,6 +19,7 @@ import meridian.core.api.World;
 import meridian.core.api.ClientAssets;
 import meridian.core.api.Hud;
 import meridian.core.api.Waypoints;
+import meridian.core.api.WorldChunks;
 import meridian.core.api.WorldMap;
 import meridian.core.api.WorldMapView;
 import meridian.core.api.WorldState;
@@ -66,18 +71,14 @@ public class MeridianCoreModule implements ProxyModule {
         // through this holder so a world change can reset the client's map either way round.
         WorldMapViewImpl[] viewRef = new WorldMapViewImpl[1];
         MapMarkersImpl[] markerRef = new MapMarkersImpl[1];
-        // The data dir is already per-server, so one file here can never mix two servers'
-        // maps; worlds are separated inside it.
-        WorldMapStore worldMapStore = new WorldMapStore(ctx.getDataDir().resolve("worldmap.dat"));
-        worldMap.restore(worldMapStore.load());
-        // Saved periodically as well as at shutdown: a crashed session should cost minutes of
-        // exploration, not all of it. Both run off the network thread — the map is snapshotted.
-        ctx.scheduler().scheduleAtFixedRate(
-                () -> ctx.offloadExecutor().execute(() -> saveMap(ctx, worldMap, worldMapStore)),
-                java.time.Duration.ofMinutes(2), java.time.Duration.ofMinutes(2));
-        ctx.onShutdown(() -> saveMap(ctx, worldMap, worldMapStore));
+        // No map file. What core keeps is the session's working map - the thing that answers
+        // "what colour is it there" and lets the view redraw ground the client has forgotten -
+        // and a working map that is also an archive is just an archive that grows forever.
+        // Anything that wants the map to outlive the session keeps its own copy; the world
+        // downloader does exactly that.
+        retireOldMapFile(ctx);
         ctx.services().provide(WorldMap.class, worldMap);
-        ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
+        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
                 (direction, session) -> new WorldMapObserver(worldMap));
         ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
                 (direction, session) -> new WorldMapWorldObserver(
@@ -119,6 +120,36 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
                 (direction, session) -> new ChunkObserver(chunkTracker));
 
+        // ChunkView: what the client is allowed to forget. Sits at NORMAL because it drops, and
+        // downstream of the feed above, which has already seen the unload.
+        ChunkViewImpl chunkView = new ChunkViewImpl();
+        ctx.services().provide(ChunkView.class, chunkView);
+        ctx.registerHandler(Direction.S2C, HandlerPosition.NORMAL,
+                (direction, session) -> new ChunkViewHandler(chunkView));
+
+        // Containers: what the player sees inside a chest. The server tells nobody what is in
+        // one until it is opened, so this is the only way it can be known - and the block it
+        // belongs to is matched from the player's own reach, which the server never repeats.
+        ContainersImpl containers = new ContainersImpl();
+        ctx.services().provide(Containers.class, containers);
+        ctx.registerHandler(Direction.BOTH, HandlerPosition.MONITOR,
+                (direction, session) -> new ContainerHandler(containers));
+
+        // PlayerState: the player as the server keeps them - where, how, and carrying what.
+        // Who they are comes from the token they log in with, which is what the server goes by.
+        PlayerStateImpl playerState = new PlayerStateImpl(entityTracker);
+        ctx.services().provide(PlayerState.class, playerState);
+        ctx.registerHandler(Direction.BOTH, HandlerPosition.MONITOR,
+                (direction, session) -> new PlayerStateHandler(playerState));
+
+        // WorldChunks: the raw feed, for modules that want the world itself rather than an answer
+        // about it. EARLY, so a module dropping one of these packets on its way to the client
+        // cannot cost a subscriber the event.
+        WorldChunksImpl worldChunks = new WorldChunksImpl(worldState);
+        ctx.services().provide(WorldChunks.class, worldChunks);
+        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
+                (direction, session) -> new WorldChunksHandler(worldChunks));
+
         // ItemRegistry: item asset catalog — interaction roots + interactionVars.
         ItemRegistry itemRegistry = new ItemRegistry();
         ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
@@ -150,9 +181,7 @@ public class MeridianCoreModule implements ProxyModule {
         // --- MapMarkers: every marker on the map, and what the client sees of it
         // One owner for the marker traffic. Two modules forging markers separately would each
         // undo the other's work, since neither can see what the other put on the client.
-        java.nio.file.Path markerFile = ctx.getDataDir().resolve("markers.json");
         MarkerStoreImpl markerStore = new MarkerStoreImpl(ctx.getLogger());
-        markerStore.load(markerFile);
         MapMarkersImpl mapMarkers = new MapMarkersImpl(ctx.getLogger(), markerStore,
                 ctx.scheduler(), chat, mapSession, sessionHolder);
         ctx.services().provide(MapMarkers.class, mapMarkers);
@@ -163,10 +192,11 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.registerHandler(Direction.C2S, HandlerPosition.NORMAL,
                 (direction, session) -> new MarkerRequestHandler(mapMarkers));
         markerRef[0] = mapMarkers;
-        ctx.onShutdown(() -> saveMarkers(ctx, markerStore, markerFile));
-        ctx.scheduler().scheduleAtFixedRate(
-                () -> ctx.offloadExecutor().execute(() -> saveMarkers(ctx, markerStore, markerFile)),
-                java.time.Duration.ofSeconds(30), java.time.Duration.ofSeconds(30));
+        // Core remembers markers; it no longer writes them down. The markers module keeps the
+        // file, hands back what it kept at startup and takes core's memory as the session goes -
+        // so markers survive a restart when it is installed, and last the session when it is not.
+        ctx.services().provide(MarkerArchive.class, new MarkerArchiveImpl(markerStore));
+        retireOldMarkerFile(ctx);
 
         // --- Waypoints: saved places, as a plain list -------------------------
         // A waypoint is a local marker; this is the view of them that a module wanting to drop a
@@ -200,20 +230,37 @@ public class MeridianCoreModule implements ProxyModule {
 
     /** Writes the map, never letting a storage problem take the session down with it. */
     /** Writes the markers, never letting a storage problem take the session down with it. */
-    private static void saveMarkers(ModuleContext ctx, MarkerStoreImpl store,
-                                    java.nio.file.Path file) {
-        try {
-            store.saveIfDirty(file);
-        } catch (RuntimeException e) {
-            ctx.getLogger().warn("meridian-core: could not save the markers: {}", e.toString());
+    /**
+     * Says where the markers core used to write have gone, and leaves the file alone.
+     *
+     * <p>The markers module reads it once and keeps its own from then on, so the old file is
+     * neither lost nor needed here.
+     */
+    private static void retireOldMarkerFile(ModuleContext ctx) {
+        java.nio.file.Path old = ctx.getDataDir().resolve("markers.json");
+        if (java.nio.file.Files.isRegularFile(old)) {
+            ctx.getLogger().info("meridian-core: {} is left over from when core kept the markers; "
+                    + "meridian-markers keeps them now and reads this one once", old);
         }
     }
 
-    private static void saveMap(ModuleContext ctx, WorldMapImpl map, WorldMapStore store) {
+    /**
+     * Says something about the map file older versions of core used to keep, and leaves it alone.
+     *
+     * <p>It was an archive nothing ever pruned, and on a well-explored server it grew to hundreds
+     * of megabytes. Core does not write one any more - but it is the player's exploration, so it
+     * is reported rather than deleted.
+     */
+    private static void retireOldMapFile(ModuleContext ctx) {
+        java.nio.file.Path old = ctx.getDataDir().resolve("worldmap.dat");
         try {
-            map.persist(store);
-        } catch (RuntimeException e) {
-            ctx.getLogger().warn("meridian-core: could not save the world map: {}", e.toString());
+            if (java.nio.file.Files.isRegularFile(old)) {
+                ctx.getLogger().info("meridian-core: {} ({} MB) is left over from when core kept "
+                        + "the map on disk; nothing reads it now and it is safe to delete",
+                        old, java.nio.file.Files.size(old) / 1048576);
+            }
+        } catch (java.io.IOException e) {
+            // Knowing about an old file is a courtesy, not a reason to fail a session.
         }
     }
 

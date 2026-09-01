@@ -49,8 +49,11 @@ final class WorldMapViewImpl implements WorldMapView {
     private final Supplier<Optional<ProxySession>> session;
 
     private volatile boolean enabled;
+    /** Installed by a module that repaints tiles - the coverage tint; usually absent. */
+    private volatile TileFilter filter;
     private volatile int radius = DEFAULT_RADIUS;
-    private volatile int tileSize = WorldMap.TILE_BLOCKS;
+    /** A cap on the replayed tile's side; 0 replays each tile at the size it came in. */
+    private volatile int tileSize;
     private volatile int budget = DEFAULT_BUDGET;
 
     /** Tiles the client is believed to hold — the server's and ours together. */
@@ -79,24 +82,34 @@ final class WorldMapViewImpl implements WorldMapView {
             return null;
         }
         List<MapChunk> keep = new ArrayList<>(chunks.length);
+        boolean changed = false;
         for (MapChunk chunk : chunks) {
             if (chunk == null) {
+                changed = true;
                 continue;
             }
             long key = WorldMap.key(chunk.chunkX, chunk.chunkZ);
             if (chunk.image != null) {
                 clientHas.add(key);
-                keep.add(chunk);
+                MapChunk painted = repaint(chunk);
+                changed |= painted != chunk;
+                keep.add(painted);
                 continue;
             }
             // An unload. Inside the window, with a tile to show, we do not pass it on: the
             // client keeps what it has and the ground behind the player stays drawn.
             boolean remembered = map.tile(WorldMap.chunkX(key), WorldMap.chunkZ(key)).isPresent();
             if (enabled && inWindow(key) && remembered) {
+                changed = true;
                 continue;
             }
             clientHas.remove(key);
             keep.add(chunk);
+        }
+        // Handed back unchanged, the array itself says "nothing was done" - and the router then
+        // forwards the server's own bytes instead of re-serialising a packet nobody touched.
+        if (!changed) {
+            return chunks;
         }
         return keep.isEmpty() ? null : keep.toArray(new MapChunk[0]);
     }
@@ -229,7 +242,13 @@ final class WorldMapViewImpl implements WorldMapView {
                 if (!(tile instanceof MapTileImpl decoded)) {
                     continue;
                 }
-                MapImage image = MapImageEncoder.encode(decoded, tileSize);
+                decoded = repaint(decoded);
+                // At the size it arrived in unless a module asked for less. The server's own
+                // size is not a constant - this build draws 96 pixels a side - so a fixed number
+                // here would shrink every replayed tile and leave the map a patchwork.
+                int cap = tileSize;
+                int side = cap <= 0 ? decoded.size() : Math.min(cap, decoded.size());
+                MapImage image = MapImageEncoder.encode(decoded, side);
                 if (image == null) {
                     continue;
                 }
@@ -240,6 +259,58 @@ final class WorldMapViewImpl implements WorldMapView {
         if (!chunks.isEmpty()) {
             live.sendToClient(new UpdateWorldMap(chunks.toArray(new MapChunk[0]), null, null));
         }
+    }
+
+    @Override
+    public void setTileFilter(TileFilter filter) {
+        this.filter = filter;
+    }
+
+    @Override
+    public void refreshTile(int chunkX, int chunkZ) {
+        long key = WorldMap.key(chunkX, chunkZ);
+        ProxySession live;
+        synchronized (this) {
+            // Sent even when the client already has this tile: the point is that it now looks
+            // different - the tint has come off ground that has just been downloaded.
+            live = session.get().orElse(null);
+            if (live == null || map.tile(chunkX, chunkZ).isEmpty()) {
+                return;
+            }
+            send(live, null, List.of(key));
+        }
+    }
+
+    /** The server's own tile, repainted if a module wants it repainted. */
+    private MapChunk repaint(MapChunk chunk) {
+        MapTile remembered = map.tile(chunk.chunkX, chunk.chunkZ).orElse(null);
+        if (!(remembered instanceof MapTileImpl decoded)) {
+            return chunk;               // nothing remembered to repaint from
+        }
+        MapTileImpl painted = repaint(decoded);
+        if (painted == decoded) {
+            return chunk;               // untouched: send the server's bytes, not a re-encode
+        }
+        MapImage image = MapImageEncoder.encode(painted, painted.size());
+        return image == null ? chunk : new MapChunk(chunk.chunkX, chunk.chunkZ, image);
+    }
+
+    /** A tile as the filter would have it, or the tile itself when there is nothing to change. */
+    private MapTileImpl repaint(MapTileImpl tile) {
+        TileFilter installed = filter;
+        if (installed == null) {
+            return tile;
+        }
+        int[] pixels;
+        try {
+            pixels = installed.filter(tile.chunkX(), tile.chunkZ(), tile);
+        } catch (RuntimeException e) {
+            return tile;                // a filter that throws does not get to break the map
+        }
+        int side = tile.size();
+        return pixels == null || pixels.length != side * side
+                ? tile
+                : MapTileImpl.fromPixels(tile.chunkX(), tile.chunkZ(), side, pixels);
     }
 
     /** Forgets the client's state — a new world starts from an empty map. */
@@ -275,7 +346,7 @@ final class WorldMapViewImpl implements WorldMapView {
 
     @Override
     public void setTileSize(int pixels) {
-        this.tileSize = Math.max(1, Math.min(WorldMap.TILE_BLOCKS, pixels));
+        this.tileSize = Math.max(0, pixels);
     }
 
     @Override

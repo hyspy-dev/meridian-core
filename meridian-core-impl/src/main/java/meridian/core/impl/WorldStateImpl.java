@@ -147,6 +147,14 @@ public final class WorldStateImpl implements WorldState {
         return "default";
     }
 
+    /**
+     * How many block types the server has sent so far - a cheap way for a caller that caches
+     * {@link #allBlockTypes} to notice that there are now more of them.
+     */
+    int blockTypeCount() {
+        return serverTruth.size();
+    }
+
     @Override
     public Collection<BlockView> allBlockTypes() {
         List<BlockView> out = new ArrayList<>(serverTruth.size());

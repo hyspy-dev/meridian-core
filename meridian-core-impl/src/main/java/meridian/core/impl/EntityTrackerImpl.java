@@ -62,6 +62,7 @@ final class EntityTrackerImpl implements EntityTracker {
     /** Look orientation of the local player, radians. */
     private volatile float lookYaw;
     private volatile float lookPitch;
+    private volatile float lookRoll;
     private volatile boolean haveLook;
 
     // ------------------------------------------------------------------
@@ -123,8 +124,19 @@ final class EntityTrackerImpl implements EntityTracker {
         if (look != null) {
             lookYaw = look.yaw;
             lookPitch = look.pitch;
+            lookRoll = look.roll;
             haveLook = true;
         }
+    }
+
+    /**
+     * Which way the local player is facing, as the angles themselves: pitch, yaw, roll.
+     *
+     * <p>{@link #localLookDirection()} answers the same question as a vector, for aiming. This is
+     * for anything that has to write the angles down the way the game does.
+     */
+    Vec3 localLookAngles() {
+        return haveLook ? new Vec3(lookPitch, lookYaw, lookRoll) : null;
     }
 
     private static Vec3 positionOf(ModelTransform transform) {

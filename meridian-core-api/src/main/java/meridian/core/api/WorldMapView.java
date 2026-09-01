@@ -24,6 +24,45 @@ package meridian.core.api;
 public interface WorldMapView {
 
     /** Whether explored tiles are replayed to the client and kept from being unloaded. */
+    /**
+     * Repaints a tile on its way to the client.
+     *
+     * <p>For a module that knows something about the ground the server does not - the world
+     * downloader tints a chunk it has not actually downloaded, so the in-game map shows what has
+     * been collected as well as what is out there.
+     */
+    @FunctionalInterface
+    interface TileFilter {
+        /**
+         * The colours to send for this tile, or {@code null} to send it exactly as the server
+         * drew it - which is the answer for nearly every tile, and costs nothing.
+         *
+         * @param tile the tile as it arrived; read it with {@link MapTile#colourAt}
+         * @return {@code size * size} colours, {@code 0xRRGGBB}, row by row
+         */
+        int[] filter(int chunkX, int chunkZ, MapTile tile);
+    }
+
+    /**
+     * Installs the filter every outgoing tile passes through; {@code null} removes it.
+     *
+     * <p>Applies to the server's own tiles and to any this view replays. Unloads are never
+     * filtered: taking a tile away has no picture to repaint.
+     *
+     * <p>One filter at a time; installing a second replaces the first. Called on the network
+     * threads, once per tile, so it must be quick and must not block.
+     */
+    void setTileFilter(TileFilter filter);
+
+    /**
+     * Sends a tile again, as it looks now.
+     *
+     * <p>The server sends a tile once and considers it delivered, so a tile whose look has since
+     * changed - the ground under it has been downloaded, say, and its tint should come off -
+     * would otherwise stay as it was until the player logs out. This is how a module says "again".
+     */
+    void refreshTile(int chunkX, int chunkZ);
+
     void setEnabled(boolean enabled);
 
     boolean isEnabled();
@@ -34,11 +73,17 @@ public interface WorldMapView {
     int radiusChunks();
 
     /**
-     * Pixels per side of a replayed tile (the server's own are 32). Smaller tiles cost the
-     * client proportionally less, letting the budget span more world.
+     * Caps how many pixels a side a replayed tile may have; {@code 0} - the default - replays
+     * each tile at the size it arrived in.
+     *
+     * <p>A smaller tile costs the client proportionally less, letting the same budget span more
+     * world. Do not guess the server's size: it is not fixed, and a build that draws 96 pixels a
+     * side would have every replayed tile shrunk to a third of the rest of the map. A tile is
+     * never enlarged - the cap only ever takes pixels away.
      */
     void setTileSize(int pixels);
 
+    /** The cap, or {@code 0} when tiles are replayed at whatever size they arrived in. */
     int tileSize();
 
     /** Hard cap on how many tiles the client is allowed to hold at once. */
