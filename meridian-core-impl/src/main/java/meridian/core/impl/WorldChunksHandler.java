@@ -9,15 +9,12 @@ import meridian.api.session.ProxySession;
 import meridian.protocol.packets.assets.UpdateEnvironments;
 import meridian.protocol.packets.assets.UpdateFluids;
 import meridian.protocol.packets.player.JoinWorld;
-import meridian.protocol.packets.world.ClearChunks;
 import meridian.protocol.packets.world.SetChunk;
 import meridian.protocol.packets.world.SetChunkEnvironments;
 import meridian.protocol.packets.world.SetChunkHeightmap;
 import meridian.protocol.packets.world.SetChunkTintmap;
-import meridian.protocol.packets.world.SetColumn;
 import meridian.protocol.packets.world.SetFluids;
 import meridian.protocol.packets.world.UnloadChunk;
-import meridian.protocol.packets.world.UnloadChunks;
 
 /**
  * Feeds {@link WorldChunksImpl} the traffic that describes the world. Observe-only.
@@ -41,14 +38,6 @@ final class WorldChunksHandler implements PacketHandler {
             chunks.onSection(c.x, c.y, c.z, c.data, c.localLight, c.globalLight);
         } else if (packet instanceof SetFluids f) {
             chunks.onFluids(f.x, f.y, f.z, f.data);
-        } else if (packet instanceof SetColumn c) {
-            // A column arriving for the first time brings its three maps together in one packet.
-            // The single-map packets below are only sent afterwards, when one of them changes -
-            // so a downloader that watched only those would save a world with no tints and no
-            // biomes, which is a world of black grass.
-            chunks.onHeightmap(c.x, c.z, c.heightmap);
-            chunks.onTintmap(c.x, c.z, c.tintmap);
-            chunks.onEnvironments(c.x, c.z, c.environments);
         } else if (packet instanceof SetChunkHeightmap h) {
             chunks.onHeightmap(h.x, h.z, h.heightmap);
         } else if (packet instanceof SetChunkTintmap t) {
@@ -57,20 +46,11 @@ final class WorldChunksHandler implements PacketHandler {
             chunks.onEnvironments(e.x, e.z, e.environments);
         } else if (packet instanceof UnloadChunk u) {
             chunks.onUnload(u.chunkX, u.chunkZ);
-        } else if (packet instanceof UnloadChunks u) {
-            // Columns come as a flat run of (x, z) pairs; the sections array unloads parts of a
-            // column, which leaves the column itself standing and is not a column event.
-            if (u.columns != null) {
-                for (int i = 0; i + 1 < u.columns.length; i += 2) {
-                    chunks.onUnload(u.columns[i], u.columns[i + 1]);
-                }
-            }
-        } else if (packet instanceof ClearChunks) {
-            // The seam between two worlds, and it rides the chunk channel on purpose: the server
-            // sends it ahead of the new world's chunks, so it is ordered against them.
-            chunks.onChunksCleared();
         } else if (packet instanceof JoinWorld j) {
-            chunks.onJoinWorld(j.worldUuid, j.clearWorld);
+            // The join is the seam itself here. Later builds announce it on the chunk channel with
+            // a packet of its own, which is ordered against the chunks and so can be waited for;
+            // this one has nothing of the kind, so the world turns over the moment it is named.
+            chunks.onJoinWorld(j.worldUuid, false);
         } else if (packet instanceof UpdateFluids u) {
             chunks.onFluidCatalog(named(u));
         } else if (packet instanceof UpdateEnvironments u) {

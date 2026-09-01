@@ -177,8 +177,9 @@ final class PlayerStateHandler implements PacketHandler {
     }
 
     private static Containers.Item item(ItemWithAllMetadata stack) {
+        // Quality arrived with a later build; here every stack is the plain one.
         return new Containers.Item(stack.itemId, stack.quantity, stack.durability,
-                stack.maxDurability, stack.quality, stack.metadata);
+                stack.maxDurability, 0, stack.metadata);
     }
 
     /** Which panel a section id belongs to; the order is the one the inventory packet uses. */
