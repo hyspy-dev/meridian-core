@@ -43,6 +43,8 @@ final class PlayerStateHandler implements PacketHandler {
     private static final String UTILITY = "Utility";
     private static final String TOOLS = "Tools";
     private static final String BACKPACK = "Backpack";
+    private static final String ABILITY_SLOTS = "AbilitySlots";
+    private static final String RUNE_BAG = "RuneBag";
 
     private final PlayerStateImpl state;
     private int localId = Integer.MIN_VALUE;
@@ -60,7 +62,7 @@ final class PlayerStateHandler implements PacketHandler {
         } else if (packet instanceof UpdatePlayerInventory inventory) {
             panels(inventory);
         } else if (packet instanceof SetActiveSlot slot) {
-            state.onActiveSlot(panel(slot.inventorySectionId), slot.activeSlot);
+            activeSlot(slot);
         } else if (packet instanceof EntityUpdates updates) {
             ours(updates);
         }
@@ -70,7 +72,7 @@ final class PlayerStateHandler implements PacketHandler {
     @Override
     public Action handleC2S(ChannelHandlerContext ctx, Packet packet, ProxySession session) {
         if (packet instanceof SetActiveSlot slot) {
-            state.onActiveSlot(panel(slot.inventorySectionId), slot.activeSlot);
+            activeSlot(slot);
         } else if (packet instanceof Connect connect && connect.identityToken != null) {
             // The client proves who it is on the way in, and the proof says so.
             identity(connect.identityToken);
@@ -159,6 +161,15 @@ final class PlayerStateHandler implements PacketHandler {
         section(UTILITY, inventory.utility);
         section(TOOLS, inventory.tools);
         section(BACKPACK, inventory.backpack);
+        section(ABILITY_SLOTS, inventory.abilitySlots);
+        section(RUNE_BAG, inventory.runeBag);
+    }
+
+    private void activeSlot(SetActiveSlot slot) {
+        String panel = panel(slot.inventorySectionId);
+        if (panel != null) {
+            state.onActiveSlot(panel, slot.activeSlot);
+        }
     }
 
     private void section(String panel, InventorySection section) {
@@ -182,15 +193,22 @@ final class PlayerStateHandler implements PacketHandler {
                 stack.maxDurability, 0, stack.metadata);
     }
 
-    /** Which panel a section id belongs to; the order is the one the inventory packet uses. */
+    /**
+     * Which panel a section id belongs to. The ids are the server's own
+     * ({@code InventoryComponent.*_SECTION_ID}), the ones {@code SetActiveSlot} carries in both
+     * directions; an id this build does not know maps to nothing.
+     */
     private static String panel(int sectionId) {
         return switch (sectionId) {
-            case 0 -> STORAGE;
-            case 1 -> ARMOR;
-            case 2 -> HOTBAR;
-            case 3 -> UTILITY;
-            case 4 -> TOOLS;
-            default -> BACKPACK;
+            case -1 -> HOTBAR;
+            case -2 -> STORAGE;
+            case -3 -> ARMOR;
+            case -5 -> UTILITY;
+            case -8 -> TOOLS;
+            case -9 -> BACKPACK;
+            case -11 -> ABILITY_SLOTS;
+            case -12 -> RUNE_BAG;
+            default -> null;
         };
     }
 
