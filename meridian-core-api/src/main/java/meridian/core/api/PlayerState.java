@@ -56,7 +56,8 @@ public interface PlayerState {
 
     /**
      * The inventory panels by name: {@code Storage}, {@code Armor}, {@code Hotbar},
-     * {@code Utility}, {@code Tools}, {@code Backpack} - whichever the server has sent.
+     * {@code Utility}, {@code Tools}, {@code Backpack}, {@code AbilitySlots}, {@code RuneBag} -
+     * whichever the server has sent.
      */
     Map<String, Section> inventories();
 }

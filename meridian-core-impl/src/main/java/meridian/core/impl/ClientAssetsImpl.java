@@ -37,6 +37,9 @@ final class ClientAssetsImpl implements ClientAssets {
     private final Map<String, String> pushed = new ConcurrentHashMap<>();
     /** and back again, so a name can be freed for new content. */
     private final Map<String, String> byName = new ConcurrentHashMap<>();
+    /** Names sent at this connection's load. Not touched by {@link #reset()}: a world change
+     *  does not take them off the client. */
+    private final java.util.Set<String> connectDelivered = ConcurrentHashMap.newKeySet();
     /** what every connection should carry, handed over while the client is still loading. */
     private final Map<String, byte[]> atConnect = new ConcurrentHashMap<>();
 
@@ -121,14 +124,52 @@ final class ClientAssetsImpl implements ClientAssets {
         }
     }
 
+    @Override
+    public boolean deliveredAtConnect(String name) {
+        return name != null && connectDelivered.contains(name);
+    }
+
+    @Override
+    public void withdrawAtConnect(String name) {
+        if (name != null) {
+            atConnect.remove(name);
+        }
+    }
+
+    /** What the connect-time registration announces: one entry per file, hash and name. */
+    Asset[] connectAssets() {
+        return atConnect.entrySet().stream()
+                .map(e -> new Asset(sha256Hex(e.getValue()), e.getKey()))
+                .toArray(Asset[]::new);
+    }
+
+    /** Whether {@code hash} is one of the connect-time files. */
+    boolean isConnectHash(String hash) {
+        if (hash == null) return false;
+        for (byte[] bytes : atConnect.values()) {
+            if (hash.equalsIgnoreCase(sha256Hex(bytes))) return true;
+        }
+        return false;
+    }
+
     /**
-     * Hands over everything registered for connect time, on the session the loading traffic is
-     * arriving on. Called once per connection, while the client is still taking assets in.
+     * Hands the connect-time files the client asked for over, on the session its request is
+     * arriving on, and records every registered file as delivered: the ones it did not ask
+     * for are in its cache already, under the names the announcement gave them. Called once
+     * per connection, ahead of the server's own batch, so the rebuild the server asks for
+     * after that batch indexes these too.
      */
     void sendAtConnect(ProxySession live) {
-        atConnect.forEach((name, bytes) -> {
+        connectDelivered.clear();
+        int sent = 0;
+        for (Map.Entry<String, byte[]> e : atConnect.entrySet()) {
+            String name = e.getKey();
+            byte[] bytes = e.getValue();
             String hash = sha256Hex(bytes);
-            pushed.putIfAbsent(hash, name);
+            connectDelivered.add(name);
+            if (pushed.putIfAbsent(hash, name) != null) {
+                continue;   // already on the client this connection — a second send would disconnect it
+            }
             byName.put(name, hash);
             live.sendToClient(new AssetInitialize(new Asset(hash, name), bytes.length));
             for (int offset = 0; offset < bytes.length; offset += PART_SIZE) {
@@ -138,7 +179,13 @@ final class ClientAssetsImpl implements ClientAssets {
                 live.sendToClient(new AssetPart(part));
             }
             live.sendToClient(new AssetFinalize());
-        });
+            sent++;
+        }
+        if (sent > 0) {
+            // The server asks for a rebuild after its own batch, which follows this one; asking
+            // here too costs a second index pass during the load and guarantees the files are in.
+            live.sendToClient(new RequestCommonAssetsRebuild());
+        }
     }
 
     boolean hasConnectAssets() {

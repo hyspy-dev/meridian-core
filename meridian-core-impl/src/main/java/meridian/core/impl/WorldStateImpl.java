@@ -52,6 +52,9 @@ public final class WorldStateImpl implements WorldState {
     private final Scheduler scheduler;
     private final Map<Integer, BlockType> serverTruth = new ConcurrentHashMap<>();
     private final Map<Integer, UnaryOperator<BlockView>> overrides = new ConcurrentHashMap<>();
+    /** Rules over every type, in registration order; read under its own lock. */
+    private final Map<String, UnaryOperator<BlockView>> rules =
+            java.util.Collections.synchronizedMap(new java.util.LinkedHashMap<>());
     private final Set<Integer> dirty = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean flushScheduled = new AtomicBoolean(false);
     private volatile ProxySession session;
@@ -188,6 +191,46 @@ public final class WorldStateImpl implements WorldState {
     }
 
     @Override
+    public void overrideAllBlockTypes(String key, UnaryOperator<BlockView> rule) {
+        rules.put(key, rule);
+        markAllDirty();
+    }
+
+    @Override
+    public void clearOverrideAll(String key) {
+        if (rules.remove(key) != null) {
+            markAllDirty();
+        }
+    }
+
+    /**
+     * The client's view of one server-truth type: every rule, then the id's own override.
+     * Returns {@code truth} itself when nothing applies, so a caller can tell. Never touches
+     * {@code truth}: the view clones before it changes anything.
+     */
+    BlockType clientView(int id, BlockType truth) {
+        BlockView view = new BlockViewImpl(id, truth);
+        List<UnaryOperator<BlockView>> active;
+        synchronized (rules) {
+            active = new ArrayList<>(rules.values());
+        }
+        for (UnaryOperator<BlockView> rule : active) {
+            view = rule.apply(view);
+        }
+        UnaryOperator<BlockView> override = overrides.get(id);
+        if (override != null) {
+            view = override.apply(view);
+        }
+        return ((BlockViewImpl) view).toBlockType();
+    }
+
+    private void markAllDirty() {
+        for (Integer id : serverTruth.keySet()) {
+            markDirty(id);
+        }
+    }
+
+    @Override
     public void ghostBlock(BlockPos pos, BlockView view, Duration ttl) {
         throw new UnsupportedOperationException(
                 "ghostBlock — not implemented in meridian-core v0.1.0");
@@ -221,14 +264,8 @@ public final class WorldStateImpl implements WorldState {
         for (int id : ids) {
             BlockType truth = serverTruth.get(id);
             if (truth == null) continue;
-            UnaryOperator<BlockView> override = overrides.get(id);
-            if (override != null) {
-                BlockView result = override.apply(new BlockViewImpl(id, truth.clone()));
-                changed.put(id, ((BlockViewImpl) result).toBlockType());
-            } else {
-                // Override cleared — restore server truth.
-                changed.put(id, truth.clone());
-            }
+            // Rules + the id's override; with neither this is server truth again.
+            changed.put(id, clientView(id, truth));
         }
         if (changed.isEmpty()) return;
 
