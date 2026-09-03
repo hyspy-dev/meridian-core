@@ -28,6 +28,18 @@ public interface WorldState {
     /** Removes a previously applied override. */
     void clearOverride(int id);
 
+    /**
+     * Applies a client-view transform to <em>every</em> block type, the ones the server has
+     * declared and the ones it declares later - including while a world loads, which is the
+     * one moment the client binds a type to its textures. A per-id {@link #overrideBlockType}
+     * runs after the rules. Rules run in registration order; returning the input unchanged
+     * leaves a type alone. {@code key} names the rule so its owner can replace or remove it.
+     */
+    void overrideAllBlockTypes(String key, UnaryOperator<BlockView> rule);
+
+    /** Removes the rule registered under {@code key}; a no-op for an unknown key. */
+    void clearOverrideAll(String key);
+
     /** Shows a client-only block at {@code pos} for {@code ttl} (builder rulers). */
     void ghostBlock(BlockPos pos, BlockView view, Duration ttl);
 }

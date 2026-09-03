@@ -77,12 +77,28 @@ public interface ClientAssets {
      * A file handed over mid-session has to be announced, and announcing means the client
      * rebuilds its whole index - which the player feels. A file handed over during the loading
      * that precedes a world is taken in with everything else the server sends, indexed once
-     * along with it, and costs nothing. It is how a server mod ships its own pictures.
+     * along with it, and costs nothing. It is how a server mod ships its own pictures - and
+     * the only way to give a <em>block type</em> a picture: the client binds types to their
+     * textures once, as the server declares them, from what its index holds at that moment.
      *
      * <p>Register at startup; every connection from then on carries it. Meant for what never
      * changes - an icon, a font, a document - not for anything that follows the player about.
      */
     void provideAtConnect(String name, byte[] bytes);
+
+    /**
+     * Stops handing {@code name} over at connect time. Connections already made keep what they
+     * were given; the next one loads without it. A no-op for a name never provided.
+     */
+    void withdrawAtConnect(String name);
+
+    /**
+     * Whether {@code name} was handed to this connection's client while it loaded — that is,
+     * whether it was registered with {@link #provideAtConnect} in time. Unlike {@link #isPushed}
+     * this survives a world change: the client keeps a file its block types use, and so does
+     * this record, until the connection ends.
+     */
+    boolean deliveredAtConnect(String name);
 
     /**
      * Asks the client to rebuild its asset index. Assets pushed mid-session are not visible to

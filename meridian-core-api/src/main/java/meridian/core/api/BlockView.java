@@ -1,5 +1,8 @@
 package meridian.core.api;
 
+import java.util.List;
+import java.util.function.UnaryOperator;
+
 /**
  * Neutral projection of a Hytale block type.
  *
@@ -28,6 +31,36 @@ public interface BlockView {
 
     /** Whether this block type emits light. */
     boolean isLit();
+
+    /**
+     * The texture files this block's cube faces draw, distinct, in the form the game names
+     * them ({@code BlockTextures/Soil_Dirt.png}) — the same form {@link ClientAssets#push}
+     * hands back. Every face of every weighted variant is included. Empty for a block drawn
+     * as a model or not at all.
+     */
+    List<String> textures();
+
+    /**
+     * Re-points every cube face at {@code remap.apply(path)}. A {@code null} result keeps
+     * that face as it is, so a partial map only touches what it names. Faces of every
+     * weighted variant go through the function; the block's draw mode is untouched.
+     */
+    BlockView withTextures(UnaryOperator<String> remap);
+
+    /**
+     * What the client makes of a texture's alpha channel. {@link #SOLID} ignores it.
+     * {@link #CUTOUT} alpha-tests it, the way leaves are drawn: a pixel is there or it is
+     * not. {@link #TRANSPARENT} blends it and drops the faces between two blocks of the same
+     * type, the way glass and the see-through mushroom blocks are drawn.
+     * {@link #SEMITRANSPARENT} blends it too; the game uses it for benches and bone piles.
+     */
+    enum Opacity { SOLID, SEMITRANSPARENT, CUTOUT, TRANSPARENT }
+
+    /**
+     * Sets how the client treats the alpha of this block's textures. Nothing changes for a
+     * texture without alpha; pair it with {@link #withTextures} to draw one that has some.
+     */
+    BlockView withOpacity(Opacity opacity);
 
     BlockView withSolid(boolean solid);
 
