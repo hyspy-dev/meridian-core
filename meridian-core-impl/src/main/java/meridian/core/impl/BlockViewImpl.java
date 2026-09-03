@@ -1,6 +1,12 @@
 package meridian.core.impl;
 
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.function.UnaryOperator;
 import meridian.core.api.BlockView;
+import meridian.protocol.BlockTextures;
 import meridian.protocol.BlockType;
 import meridian.protocol.ColorLight;
 import meridian.protocol.DrawType;
@@ -48,6 +54,68 @@ final class BlockViewImpl implements BlockView {
     @Override
     public boolean isLit() {
         return blockType.light != null;
+    }
+
+    @Override
+    public List<String> textures() {
+        if (blockType.cubeTextures == null) {
+            return List.of();
+        }
+        Set<String> out = new LinkedHashSet<>();
+        for (BlockTextures faces : blockType.cubeTextures) {
+            if (faces == null) {
+                continue;
+            }
+            for (String t : new String[]{faces.top, faces.bottom, faces.front, faces.back,
+                    faces.left, faces.right}) {
+                if (t != null && !t.isEmpty()) {
+                    out.add(t);
+                }
+            }
+        }
+        return new ArrayList<>(out);
+    }
+
+    @Override
+    public BlockView withTextures(UnaryOperator<String> remap) {
+        BlockType copy = blockType.clone();
+        if (copy.cubeTextures != null) {
+            for (BlockTextures faces : copy.cubeTextures) {
+                if (faces == null) {
+                    continue;
+                }
+                faces.top = remapped(remap, faces.top);
+                faces.bottom = remapped(remap, faces.bottom);
+                faces.front = remapped(remap, faces.front);
+                faces.back = remapped(remap, faces.back);
+                faces.left = remapped(remap, faces.left);
+                faces.right = remapped(remap, faces.right);
+            }
+        }
+        return new BlockViewImpl(id, copy);
+    }
+
+    private static String remapped(UnaryOperator<String> remap, String path) {
+        if (path == null || path.isEmpty()) {
+            return path;
+        }
+        String to = remap.apply(path);
+        return to != null ? to : path;
+    }
+
+    @Override
+    public BlockView withOpacity(BlockView.Opacity opacity) {
+        BlockType copy = blockType.clone();
+        copy.opacity = switch (opacity) {
+            case SOLID -> meridian.protocol.Opacity.Solid;
+            case SEMITRANSPARENT -> meridian.protocol.Opacity.Semitransparent;
+            case CUTOUT -> meridian.protocol.Opacity.Cutout;
+            case TRANSPARENT -> meridian.protocol.Opacity.Transparent;
+        };
+        // Vanilla pairs the blended modes with the blending flag and the others without it.
+        copy.requiresAlphaBlending = opacity == BlockView.Opacity.TRANSPARENT
+                || opacity == BlockView.Opacity.SEMITRANSPARENT;
+        return new BlockViewImpl(id, copy);
     }
 
     @Override

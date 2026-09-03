@@ -43,8 +43,13 @@ public class MeridianCoreModule implements ProxyModule {
         // --- WorldState (block-type catalog) ---------------------------------
         WorldStateImpl worldState = new WorldStateImpl(ctx.scheduler());
         ctx.services().provide(WorldState.class, worldState);
-        ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
+        // Truth is read first (EARLY), then the client's view is written into the very packet
+        // the server sent (NORMAL): what a type looks like has to be settled while the world
+        // loads, because that is when the client binds it to its textures.
+        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
                 (direction, session) -> new BlockTypeObserver(worldState));
+        ctx.registerHandler(Direction.S2C, HandlerPosition.NORMAL,
+                (direction, session) -> new BlockTypeRewriter(worldState));
 
         // --- WorldMap (the server's own map, collected per world) ------------
         // Two observers: tiles arrive on the WorldMap channel, world changes on Default.
@@ -61,9 +66,12 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.services().provide(Hud.class, new HudImpl(sessionHolder));
         ctx.registerHandler(Direction.S2C, HandlerPosition.NORMAL,
                 (direction, session) -> new AssetDedupGuard(clientAssets));
-        // Files that must simply be there: handed over during the load, with everything else the
-        // server sends, rather than pushed later at the cost of an index rebuild.
+        // Files that must simply be there: announced to the client with the server's own
+        // (S2C WorldSettings), then served by the proxy when the client asks for them (C2S
+        // RequestAssets), so the server's rebuild indexes them before the block types bind.
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
+                (direction, session) -> new ConnectAssetHandler(clientAssets));
+        ctx.registerHandler(Direction.C2S, HandlerPosition.EARLY,
                 (direction, session) -> new ConnectAssetHandler(clientAssets));
 
         WorldMapImpl worldMap = new WorldMapImpl();
