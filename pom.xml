@@ -29,7 +29,7 @@
         <meridian.api.version>1.0.0-SNAPSHOT</meridian.api.version>
         <!-- Protocol version = its wire CRC; game version resolves to this. Keep == the value in
              meridian-proxy-parent and ProtocolSettings.PROTOCOL_CRC. -->
-        <meridian.protocol.version>245610536</meridian.protocol.version>
+        <meridian.protocol.version>3871693122</meridian.protocol.version>
     </properties>
 
     <build>

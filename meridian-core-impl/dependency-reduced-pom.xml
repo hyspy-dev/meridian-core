@@ -52,7 +52,7 @@
     <dependency>
       <groupId>meridian</groupId>
       <artifactId>meridian-protocol</artifactId>
-      <version>245610536</version>
+      <version>3871693122</version>
       <scope>provided</scope>
     </dependency>
     <dependency>
