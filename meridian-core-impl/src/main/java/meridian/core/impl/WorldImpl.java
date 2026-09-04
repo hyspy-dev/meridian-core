@@ -44,6 +44,11 @@ public final class WorldImpl implements World {
     }
 
     @Override
+    public String fluidAt(int x, int y, int z) {
+        return chunks.fluidNameAt(x, y, z);
+    }
+
+    @Override
     public Optional<Player> player() {
         return interactions.available() ? Optional.of(player) : Optional.empty();
     }

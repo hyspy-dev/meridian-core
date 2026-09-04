@@ -10,6 +10,7 @@ import meridian.core.api.ChunkView;
 import meridian.core.api.Containers;
 import meridian.core.api.PlayerState;
 import meridian.core.api.MapMarkers;
+import meridian.core.api.PastePreview;
 import meridian.core.api.MarkerArchive;
 import meridian.core.api.DebugRender;
 import meridian.core.api.EntityTracker;
@@ -221,6 +222,9 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.services().provide(WorldMapView.class, worldMapView);
         ctx.registerHandler(Direction.S2C, HandlerPosition.NORMAL,
                 (direction, session) -> new WorldMapViewHandler(worldMapView));
+        // Both ways: what the map is allowed to do comes down, what the player asks of it goes up.
+        ctx.registerHandler(Direction.C2S, HandlerPosition.NORMAL,
+                (direction, session) -> new WorldMapViewHandler(worldMapView));
         ctx.scheduler().scheduleAtFixedRate(() -> {
             worldMapView.tick();
             waypoints.project();   // walking changes which waypoints are the nearest
@@ -230,6 +234,11 @@ public class MeridianCoreModule implements ProxyModule {
         // Lets ESP's nearest-* lists drive interaction-test's X/Y/Z fields
         // (and any future consumer) without either module knowing the other.
         ctx.services().provide(SelectionBus.class, new SelectionBusImpl());
+
+        // --- PastePreview: the game's ghost-block overlay, forged for one client ----
+        // Both-line packets on the Default channel, so this is offered on every line.
+        ctx.services().provide(PastePreview.class, new PastePreviewImpl(sessionHolder));
+
 
         ctx.getLogger().info("meridian-core ready (WorldState, EntityTracker, CameraControl, "
                 + "InteractionRegistry, InventoryTracker, ChunkTracker, ItemRegistry, "

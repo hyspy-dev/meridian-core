@@ -6,6 +6,7 @@ import meridian.protocol.packets.world.ServerSetBlock;
 import meridian.protocol.packets.world.ServerSetBlocks;
 import meridian.protocol.packets.world.SetBlockCmd;
 import meridian.protocol.packets.world.SetChunk;
+import meridian.protocol.packets.world.SetFluids;
 import meridian.protocol.packets.world.UnloadChunk;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,6 +36,16 @@ public final class ChunkTracker {
 
     /** Section coords &rarr; {@code int[32768]} block ids in {@code indexBlock} order. */
     private final Map<SectionKey, int[]> sections = new ConcurrentHashMap<>();
+    /**
+     * The same, for fluids - water and lava live here, not in the block layer.
+     *
+     * <p>The block array reads air where a fluid is; a player standing "on the surface" of a
+     * pond would otherwise be dropped onto its floor. Fluids are a separate voxel layer with a
+     * separate palette, so they are tracked separately and answered by {@link #fluidNameAt}.
+     */
+    private final Map<SectionKey, int[]> fluidSections = new ConcurrentHashMap<>();
+    /** Fluid id &rarr; name (Water, Lava, ...), from the fluid catalog. */
+    private final Map<Integer, String> fluidNames = new ConcurrentHashMap<>();
 
     /** Block index within a 32³ section — {@code (y&31)<<10 | (z&31)<<5 | (x&31)}. */
     private static int indexBlock(int x, int y, int z) {
@@ -78,8 +89,24 @@ public final class ChunkTracker {
         }
     }
 
+    void onSetFluids(SetFluids packet) {
+        try {
+            fluidSections.put(new SectionKey(packet.x, packet.y, packet.z),
+                    ChunkDecoder.decodeFluidIds(packet.data));
+        } catch (RuntimeException e) {
+            log.warn("meridian-core: failed to decode fluid section ({},{},{}): {}",
+                    packet.x, packet.y, packet.z, e.toString());
+        }
+    }
+
+    /** Fluid id &rarr; name, as this connection numbered them. Merged; the catalog only grows. */
+    void onFluidCatalog(Map<Integer, String> named) {
+        fluidNames.putAll(named);
+    }
+
     void onUnloadChunk(UnloadChunk packet) {
         sections.keySet().removeIf(k -> k.x() == packet.chunkX && k.z() == packet.chunkZ);
+        fluidSections.keySet().removeIf(k -> k.x() == packet.chunkX && k.z() == packet.chunkZ);
     }
 
     // ------------------------------------------------------------------
@@ -93,6 +120,25 @@ public final class ChunkTracker {
     public int blockIdAt(int x, int y, int z) {
         int[] section = sections.get(new SectionKey(x >> 5, y >> 5, z >> 5));
         return section == null ? -1 : section[indexBlock(x, y, z)];
+    }
+
+    /**
+     * The name of the fluid at a world position, or {@code null} when there is none.
+     *
+     * <p>A non-null answer means water or lava is there - enough to lift a landing clear of it,
+     * and the name tells the two apart where that matters (a chain will not hop into lava). An id
+     * with no name yet still counts as fluid, reported as {@code "Fluid"}.
+     */
+    public String fluidNameAt(int x, int y, int z) {
+        int[] section = fluidSections.get(new SectionKey(x >> 5, y >> 5, z >> 5));
+        if (section == null) {
+            return null;
+        }
+        int id = section[indexBlock(x, y, z)];
+        if (id <= 0) {
+            return null;
+        }
+        return fluidNames.getOrDefault(id, "Fluid");
     }
 
     /** Number of sections currently mirrored. */

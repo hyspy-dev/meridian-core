@@ -49,6 +49,12 @@ final class WorldMapViewImpl implements WorldMapView {
     private final Supplier<Optional<ProxySession>> session;
 
     private volatile boolean enabled;
+
+    /** Whether the client is told it has a map at all, whatever the server says. */
+    private volatile boolean forcedOn;
+
+    /** Who answers the map's teleport requests, and by existing makes its control appear. */
+    private volatile TeleportRequest teleportHandler;
     /** Installed by a module that repaints tiles - the coverage tint; usually absent. */
     private volatile TileFilter filter;
     private volatile int radius = DEFAULT_RADIUS;
@@ -258,6 +264,43 @@ final class WorldMapViewImpl implements WorldMapView {
         }
         if (!chunks.isEmpty()) {
             live.sendToClient(new UpdateWorldMap(chunks.toArray(new MapChunk[0]), null, null));
+        }
+    }
+
+    @Override
+    public void setForcedOn(boolean on) {
+        this.forcedOn = on;
+    }
+
+    @Override
+    public boolean isForcedOn() {
+        return forcedOn;
+    }
+
+    @Override
+    public void onTeleportRequest(TeleportRequest handler) {
+        this.teleportHandler = handler;
+    }
+
+    /** Whether the map's teleport control is to be shown - that is, whether anybody wants it. */
+    boolean teleportOffered() {
+        return teleportHandler != null;
+    }
+
+    /**
+     * Hands a teleport the player asked for to whoever took the job.
+     *
+     * @return whether it was dealt with here, and so must not go on to the server
+     */
+    boolean teleportAsked(int blockX, int blockZ) {
+        TeleportRequest handler = teleportHandler;
+        if (handler == null) {
+            return false;
+        }
+        try {
+            return handler.handle(blockX, blockZ);
+        } catch (RuntimeException e) {
+            return false;               // a handler that throws does not get to eat the request
         }
     }
 
