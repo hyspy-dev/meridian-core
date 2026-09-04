@@ -93,4 +93,38 @@ public interface WorldMapView {
 
     /** How many tiles the client currently holds, as far as the proxy has seen. */
     int clientTileCount();
+
+    /**
+     * Shows the client its world map even where the server has switched the map off.
+     *
+     * <p>Only what the client is told: the map it then draws is the ground it has, plus whatever
+     * this view replays into it. Independent of the teleport control below - a server may allow
+     * the map and forbid teleporting from it, or the other way about.
+     */
+    void setForcedOn(boolean on);
+
+    boolean isForcedOn();
+
+    /** Somebody who will carry out a teleport the player asked for from the map. */
+    @FunctionalInterface
+    interface TeleportRequest {
+        /**
+         * @param blockX where on the map the player pointed, in world blocks
+         * @param blockZ likewise - the map is seen from above, so there is no height in it
+         * @return whether it was taken care of. The request is then not passed on; a server that
+         *         gates teleporting on a permission answers one with a disconnect.
+         */
+        boolean handle(int blockX, int blockZ);
+    }
+
+    /**
+     * Takes on the map's "teleport to coordinates" requests, and shows the control that makes
+     * them.
+     *
+     * <p>The two go together on purpose. The client draws that control only when the server says
+     * it may, and sends the request to the server, which refuses it unless the player has the
+     * permission - so showing the control without answering the requests hands the player a
+     * button that disconnects them. Subscribing shows it; passing {@code null} takes both away.
+     */
+    void onTeleportRequest(TeleportRequest handler);
 }

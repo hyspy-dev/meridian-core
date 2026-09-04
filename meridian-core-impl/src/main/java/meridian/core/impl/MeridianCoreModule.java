@@ -221,6 +221,9 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.services().provide(WorldMapView.class, worldMapView);
         ctx.registerHandler(Direction.S2C, HandlerPosition.NORMAL,
                 (direction, session) -> new WorldMapViewHandler(worldMapView));
+        // Both ways: what the map is allowed to do comes down, what the player asks of it goes up.
+        ctx.registerHandler(Direction.C2S, HandlerPosition.NORMAL,
+                (direction, session) -> new WorldMapViewHandler(worldMapView));
         ctx.scheduler().scheduleAtFixedRate(() -> {
             worldMapView.tick();
             waypoints.project();   // walking changes which waypoints are the nearest
