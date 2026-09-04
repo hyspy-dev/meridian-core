@@ -30,6 +30,15 @@ final class ChunkDecoder {
      * indexed by {@code ChunkUtil.indexBlock} order; an all-air section (or a
      * {@code null} / empty payload) yields an all-zero array.
      */
+    /**
+     * Decodes the fluid ids of a {@code SetFluids.data} section. Its first palette is the fluid-id
+     * palette, in the same shape as a block palette, so the same reader serves - it stops after
+     * that first palette, before the fluid section's level-nibble tail. {@code 0} is "no fluid".
+     */
+    static int[] decodeFluidIds(byte[] data) {
+        return decodeBlockIds(data);
+    }
+
     static int[] decodeBlockIds(byte[] data) {
         int[] blocks = new int[SECTION_BLOCKS];
         if (data == null || data.length < 1) {
