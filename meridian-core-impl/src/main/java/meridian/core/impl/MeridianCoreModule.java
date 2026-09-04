@@ -4,12 +4,16 @@ import meridian.api.module.ModuleContext;
 import meridian.api.module.ProxyModule;
 import meridian.api.packet.Direction;
 import meridian.api.packet.HandlerPosition;
+import meridian.api.settings.SettingsSpec;
+import meridian.core.api.BuilderSelection;
 import meridian.core.api.CameraControl;
 import meridian.core.api.Chat;
 import meridian.core.api.ChunkView;
 import meridian.core.api.Containers;
 import meridian.core.api.PlayerState;
 import meridian.core.api.MapMarkers;
+import meridian.core.api.NoClip;
+import meridian.core.api.PastePreview;
 import meridian.core.api.MarkerArchive;
 import meridian.core.api.DebugRender;
 import meridian.core.api.EntityTracker;
@@ -233,6 +237,36 @@ public class MeridianCoreModule implements ProxyModule {
         // Lets ESP's nearest-* lists drive interaction-test's X/Y/Z fields
         // (and any future consumer) without either module knowing the other.
         ctx.services().provide(SelectionBus.class, new SelectionBusImpl());
+
+        // --- PastePreview: the game's ghost-block overlay, forged for one client ----
+        // Both-line packets on the Default channel, so this is offered on every line.
+        ctx.services().provide(PastePreview.class, new PastePreviewImpl(sessionHolder));
+
+        // --- 0.6+ only: features whose packets an older protocol does not carry ------
+        // Everything in this block references packets absent from the 0.5.9 line. On that line
+        // these files are dropped and this block is removed, so the services are simply never
+        // provided and a consumer that asks with get() gets nothing - which is the gate.
+        NoClipImpl noClip = new NoClipImpl(sessionHolder);
+        ctx.services().provide(NoClip.class, noClip);
+        ctx.registerHandler(Direction.S2C, HandlerPosition.NORMAL,
+                (direction, session) -> new NoClipHandler(noClip));
+
+        BuilderSelectionImpl builderSelection = new BuilderSelectionImpl();
+        ctx.services().provide(BuilderSelection.class, builderSelection);
+        ctx.registerHandler(Direction.S2C, HandlerPosition.NORMAL,
+                (direction, session) -> new BuilderSelectionHandler(builderSelection));
+        ctx.registerHandler(Direction.C2S, HandlerPosition.NORMAL,
+                (direction, session) -> new BuilderSelectionHandler(builderSelection));
+
+        // No-clip's toggle lives here, in core, because that is where the whole feature lives on
+        // this line. A single switch, and a line that says what it is - client-side only, held on
+        // against a server that is authoritative for the real thing.
+        ctx.registerSettings(SettingsSpec.builder()
+                .bool("noclip", "No-clip (client-side; server still collides)", false,
+                        noClip::setEnabled)
+                .liveText("No-clip", () -> noClip.isEnabled() ? "on (client-side)" : "off")
+                .build());
+        // --- end 0.6+ only ----------------------------------------------------------
 
         ctx.getLogger().info("meridian-core ready (WorldState, EntityTracker, CameraControl, "
                 + "InteractionRegistry, InventoryTracker, ChunkTracker, ItemRegistry, "

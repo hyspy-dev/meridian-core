@@ -30,6 +30,16 @@ public interface World {
      */
     Block blockAt(int x, int y, int z);
 
+    /**
+     * The name of the fluid at a world position - {@code "Water"}, {@code "Lava"}, ... - or
+     * {@code null} when there is no fluid there (or the section is not loaded).
+     *
+     * <p>Fluids are a layer of their own: {@link #blockAt} reads air where water or lava is, so a
+     * scan for the surface would land on the floor of a pond. Ask here as well to lift clear of
+     * one, or to keep out of lava.
+     */
+    String fluidAt(int x, int y, int z);
+
     /** The local player, or empty until a client session is live. */
     Optional<Player> player();
 }
