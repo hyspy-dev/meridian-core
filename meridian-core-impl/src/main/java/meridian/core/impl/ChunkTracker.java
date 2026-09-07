@@ -105,8 +105,13 @@ public final class ChunkTracker {
     }
 
     void onUnloadChunk(UnloadChunk packet) {
-        sections.keySet().removeIf(k -> k.x() == packet.chunkX && k.z() == packet.chunkZ);
-        fluidSections.keySet().removeIf(k -> k.x() == packet.chunkX && k.z() == packet.chunkZ);
+        unloadColumn(packet.chunkX, packet.chunkZ);
+    }
+
+    /** Everything standing over one column of the world, at every height. */
+    private void unloadColumn(int chunkX, int chunkZ) {
+        sections.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
+        fluidSections.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
     }
 
     // ------------------------------------------------------------------

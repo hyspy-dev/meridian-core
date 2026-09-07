@@ -30,7 +30,8 @@ final class ChunkViewHandler implements PacketHandler {
 
     @Override
     public Action handleS2C(ChannelHandlerContext ctx, Packet packet, ProxySession session) {
-        // One kind of unload to hold back: this build has no batched or per-section form.
+        // One kind of unload to hold back: this line's protocol carries no batched form. The 0.6+
+        // lines carry the batched one as well and hold both back - the same file there says so.
         if (view.keepLoaded() && packet instanceof UnloadChunk) {
             return Action.DROP;
         }

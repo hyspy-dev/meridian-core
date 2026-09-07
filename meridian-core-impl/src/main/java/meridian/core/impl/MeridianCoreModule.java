@@ -125,8 +125,15 @@ public class MeridianCoreModule implements ProxyModule {
                 (direction, session) -> new InventoryObserver(inventoryTracker));
 
         // ChunkTracker: live block-id mirror of the world (SetChunk + edits).
+        //
+        // EARLY, and it has to be. What this mirrors is what the server said, so it must see the
+        // packet before anything can drop it or rewrite it - and both happen: ChunkView below
+        // drops the server's unloads to keep chunks drawn, and modules that recolour the world
+        // rewrite sections in flight. Sitting downstream of either one costs the mirror the
+        // truth: at MONITOR it never saw an unload while chunks were held, so nothing was ever
+        // let go of and a session grew by 128 KB a section until the heap was gone.
         ChunkTracker chunkTracker = new ChunkTracker();
-        ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
+        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
                 (direction, session) -> new ChunkObserver(chunkTracker));
 
         // ChunkView: what the client is allowed to forget. Sits at NORMAL because it drops, and
