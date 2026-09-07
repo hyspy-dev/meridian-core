@@ -67,6 +67,12 @@ public final class ItemRegistry {
     // Lookup
     // ------------------------------------------------------------------
 
+    /** The whole definition the server sent for this item, if it sent one. */
+    public java.util.Optional<ItemBase> item(String itemId) {
+        return itemId == null ? java.util.Optional.empty()
+                : java.util.Optional.ofNullable(items.get(itemId));
+    }
+
     /**
      * The root interaction id for {@code itemId}'s interaction of {@code type}.
      * A {@code null} / empty item id resolves against the unarmed bindings.

@@ -15,6 +15,7 @@ import meridian.protocol.packets.world.SetChunkHeightmap;
 import meridian.protocol.packets.world.SetChunkTintmap;
 import meridian.protocol.packets.world.SetFluids;
 import meridian.protocol.packets.world.UnloadChunk;
+import meridian.protocol.packets.world.UnloadChunks;
 
 /**
  * Feeds {@link WorldChunksImpl} the traffic that describes the world. Observe-only.
@@ -46,6 +47,16 @@ final class WorldChunksHandler implements PacketHandler {
             chunks.onEnvironments(e.x, e.z, e.environments);
         } else if (packet instanceof UnloadChunk u) {
             chunks.onUnload(u.chunkX, u.chunkZ);
+        } else if (packet instanceof UnloadChunks u) {
+            // The batched form, which is what this build sends. Only whole columns are announced:
+            // a subscriber writing a column to disk as it goes wants the moment the column is
+            // done with, not the moment one slice of it was dropped.
+            int[] columns = u.columns;
+            if (columns != null) {
+                for (int i = 0; i + 1 < columns.length; i += 2) {
+                    chunks.onUnload(columns[i], columns[i + 1]);
+                }
+            }
         } else if (packet instanceof JoinWorld j) {
             // The join is the seam itself here. Later builds announce it on the chunk channel with
             // a packet of its own, which is ordered against the chunks and so can be waited for;
