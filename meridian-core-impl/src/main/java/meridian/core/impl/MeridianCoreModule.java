@@ -128,8 +128,15 @@ public class MeridianCoreModule implements ProxyModule {
                 (direction, session) -> new InventoryObserver(inventoryTracker));
 
         // ChunkTracker: live block-id mirror of the world (SetChunk + edits).
+        //
+        // EARLY, and it has to be. What this mirrors is what the server said, so it must see the
+        // packet before anything can drop it or rewrite it - and both happen: ChunkView below
+        // drops the server's unloads to keep chunks drawn, and modules that recolour the world
+        // rewrite sections in flight. Sitting downstream of either one costs the mirror the
+        // truth: at MONITOR it never saw an unload while chunks were held, so nothing was ever
+        // let go of and a session grew by 128 KB a section until the heap was gone.
         ChunkTracker chunkTracker = new ChunkTracker();
-        ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
+        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
                 (direction, session) -> new ChunkObserver(chunkTracker));
 
         // ChunkView: what the client is allowed to forget. Sits at NORMAL because it drops, and
@@ -251,11 +258,15 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.registerHandler(Direction.S2C, HandlerPosition.NORMAL,
                 (direction, session) -> new NoClipHandler(noClip));
 
-        BuilderSelectionImpl builderSelection = new BuilderSelectionImpl();
+        BuilderSelectionImpl builderSelection = new BuilderSelectionImpl(sessionHolder, itemRegistry);
         ctx.services().provide(BuilderSelection.class, builderSelection);
         ctx.registerHandler(Direction.S2C, HandlerPosition.NORMAL,
                 (direction, session) -> new BuilderSelectionHandler(builderSelection));
-        ctx.registerHandler(Direction.C2S, HandlerPosition.NORMAL,
+        // C2S must run EARLY - before the interaction-chain NAT (interactionControl's observer, at
+        // NORMAL). A tool interaction we drop has to be gone before the NAT allocates a server-side
+        // id for it; otherwise the id is burned but never reaches the server, leaving a hole in the
+        // sequence the server validates - which is exactly what stopped tool-switching mid-selection.
+        ctx.registerHandler(Direction.C2S, HandlerPosition.EARLY,
                 (direction, session) -> new BuilderSelectionHandler(builderSelection));
 
         // No-clip's toggle lives here, in core, because that is where the whole feature lives on

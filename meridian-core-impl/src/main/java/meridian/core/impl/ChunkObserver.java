@@ -12,6 +12,7 @@ import meridian.protocol.packets.assets.UpdateFluids;
 import meridian.protocol.packets.world.SetChunk;
 import meridian.protocol.packets.world.SetFluids;
 import meridian.protocol.packets.world.UnloadChunk;
+import meridian.protocol.packets.world.UnloadChunks;
 
 /**
  * MONITOR-position S2C handler feeding {@link ChunkTracker} the world packets
@@ -40,6 +41,8 @@ final class ChunkObserver implements PacketHandler {
             tracker.onFluidCatalog(named(catalog));
         } else if (packet instanceof UnloadChunk unload) {
             tracker.onUnloadChunk(unload);
+        } else if (packet instanceof UnloadChunks unload) {
+            tracker.onUnloadChunks(unload);
         }
         return Action.FORWARD;
     }

@@ -8,6 +8,7 @@ import meridian.protocol.packets.world.SetBlockCmd;
 import meridian.protocol.packets.world.SetChunk;
 import meridian.protocol.packets.world.SetFluids;
 import meridian.protocol.packets.world.UnloadChunk;
+import meridian.protocol.packets.world.UnloadChunks;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -105,8 +106,41 @@ public final class ChunkTracker {
     }
 
     void onUnloadChunk(UnloadChunk packet) {
-        sections.keySet().removeIf(k -> k.x() == packet.chunkX && k.z() == packet.chunkZ);
-        fluidSections.keySet().removeIf(k -> k.x() == packet.chunkX && k.z() == packet.chunkZ);
+        unloadColumn(packet.chunkX, packet.chunkZ);
+    }
+
+    /**
+     * The batched unload - the one this build actually sends.
+     *
+     * <p>A move of any size unloads more than one thing, so the server gathers them: flat triples
+     * of section coordinates in {@code sections}, flat pairs of column coordinates in
+     * {@code columns}, one array or the other per packet. The single {@link UnloadChunk} above
+     * still arrives for odd cases and is still answered, but a session that only listens for it
+     * hears almost nothing - which is what left this mirror holding every section the server ever
+     * sent, at 128 KB apiece, until the heap was gone.
+     */
+    void onUnloadChunks(UnloadChunks packet) {
+        int[] sectionCoords = packet.sections;
+        if (sectionCoords != null) {
+            for (int i = 0; i + 2 < sectionCoords.length; i += 3) {
+                SectionKey key = new SectionKey(sectionCoords[i], sectionCoords[i + 1],
+                        sectionCoords[i + 2]);
+                sections.remove(key);
+                fluidSections.remove(key);
+            }
+        }
+        int[] columnCoords = packet.columns;
+        if (columnCoords != null) {
+            for (int i = 0; i + 1 < columnCoords.length; i += 2) {
+                unloadColumn(columnCoords[i], columnCoords[i + 1]);
+            }
+        }
+    }
+
+    /** Everything standing over one column of the world, at every height. */
+    private void unloadColumn(int chunkX, int chunkZ) {
+        sections.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
+        fluidSections.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
     }
 
     // ------------------------------------------------------------------
