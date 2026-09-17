@@ -19,6 +19,7 @@ import meridian.core.api.DebugRender;
 import meridian.core.api.EntityTracker;
 import meridian.core.api.InteractionControl;
 import meridian.core.api.SelectionBus;
+import meridian.core.api.ServerAssets;
 import meridian.core.api.World;
 import meridian.core.api.ClientAssets;
 import meridian.core.api.Hud;
@@ -70,6 +71,14 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.services().provide(Hud.class, new HudImpl(sessionHolder));
         ctx.registerHandler(Direction.S2C, HandlerPosition.NORMAL,
                 (direction, session) -> new AssetDedupGuard(clientAssets));
+
+        // ServerAssets: what the server pushes at the client that is not the world - UI documents,
+        // the pictures beside them, and the commands it builds a page out of. Nothing is kept
+        // unless somebody subscribes; EARLY, so the guard above cannot cost the feed an event.
+        ServerAssetsImpl serverAssets = new ServerAssetsImpl();
+        ctx.services().provide(ServerAssets.class, serverAssets);
+        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
+                (direction, session) -> new ServerAssetsHandler(serverAssets));
         // Files that must simply be there: announced to the client with the server's own
         // (S2C WorldSettings), then served by the proxy when the client asks for them (C2S
         // RequestAssets), so the server's rebuild indexes them before the block types bind.
