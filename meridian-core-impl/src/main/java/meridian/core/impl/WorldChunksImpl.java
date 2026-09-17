@@ -202,16 +202,20 @@ final class WorldChunksImpl implements WorldChunks {
         fanOut(l -> l.fluids(x, y, z, data));
     }
 
-    void onHeightmap(int x, int z, byte[] data) {
-        fanOut(l -> l.heightmap(x, z, data));
+    void onHeightmap(int x, int z, int[] heights) {
+        fanOut(l -> l.heightmap(x, z, heights));
+    }
+
+    void onHeight(int blockX, int blockZ, int height) {
+        fanOut(l -> l.height(blockX, blockZ, height));
     }
 
     void onTintmap(int x, int z, byte[] data) {
         fanOut(l -> l.tintmap(x, z, data));
     }
 
-    void onEnvironments(int x, int z, byte[] data) {
-        fanOut(l -> l.environments(x, z, data));
+    void onEnvironments(int x, int y, int z, byte[] data) {
+        fanOut(l -> l.environments(x, y, z, data));
     }
 
     void onUnload(int x, int z) {

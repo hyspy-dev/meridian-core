@@ -73,16 +73,40 @@ public interface WorldChunks {
         default void fluids(int x, int y, int z, byte[] data) {
         }
 
-        /** A column's heightmap, at column coordinates. */
-        default void heightmap(int x, int z, byte[] data) {
+        /**
+         * A column's heightmap, at column coordinates: the top of the world at each of its
+         * 32&times;32 columns, one int apiece.
+         *
+         * <p>Ints, not packed bytes. This line's server keeps the heightmap in a column component
+         * of its own and sends it as it holds it; the older lines packed the same numbers ten bits
+         * at a time into a palette, and this method carried those bytes. Nothing is unpacked on
+         * the way here - what the server said is what arrives.
+         */
+        default void heightmap(int x, int z, int[] heights) {
+        }
+
+        /**
+         * One column's top has moved, at <em>block</em> coordinates.
+         *
+         * <p>The server sends a whole heightmap when a lot of it changes at once and single tops
+         * when little does; both arrive here the same way, one column at a time, because a
+         * listener that keeps a heightmap wants to patch it either way.
+         */
+        default void height(int blockX, int blockZ, int height) {
         }
 
         /** A column's grass and foliage tints. */
         default void tintmap(int x, int z, byte[] data) {
         }
 
-        /** A column's biomes. */
-        default void environments(int x, int z, byte[] data) {
+        /**
+         * The environments of one 32&sup3; section, at <em>section</em> coordinates.
+         *
+         * <p>A section, not a column: this line's server keeps environments per section and says
+         * so per section, where the older lines banded a whole column by height in one message.
+         * The payload is that section's own encoding - uniform, or one entry a column.
+         */
+        default void environments(int x, int y, int z, byte[] data) {
         }
 
         /**

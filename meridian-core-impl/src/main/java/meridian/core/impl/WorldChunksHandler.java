@@ -9,8 +9,12 @@ import meridian.api.session.ProxySession;
 import meridian.protocol.packets.assets.UpdateEnvironments;
 import meridian.protocol.packets.assets.UpdateFluids;
 import meridian.protocol.packets.player.JoinWorld;
+import meridian.protocol.packets.world.ServerSetHeight;
+import meridian.protocol.packets.world.ServerSetHeights;
 import meridian.protocol.packets.world.SetChunk;
 import meridian.protocol.packets.world.SetChunkEnvironments;
+import meridian.protocol.packets.world.SetColumn;
+import meridian.protocol.packets.world.SetHeightCmd;
 import meridian.protocol.packets.world.SetChunkHeightmap;
 import meridian.protocol.packets.world.SetChunkTintmap;
 import meridian.protocol.packets.world.SetFluids;
@@ -39,12 +43,32 @@ final class WorldChunksHandler implements PacketHandler {
             chunks.onSection(c.x, c.y, c.z, c.data, c.localLight, c.globalLight);
         } else if (packet instanceof SetFluids f) {
             chunks.onFluids(f.x, f.y, f.z, f.data);
+        } else if (packet instanceof SetColumn c) {
+            // How a column arrives in the first place on this line: its heightmap and its tints
+            // in one packet, cached per column by the server and sent when a client starts
+            // tracking it. The separate heightmap and tintmap packets below are what comes after,
+            // when something changes - so a listener that only knew those two would have neither
+            // the ground's shape nor its colour for any column it merely flew into.
+            chunks.onHeightmap(c.x, c.z, c.heightmap);
+            chunks.onTintmap(c.x, c.z, c.tintmap);
+        } else if (packet instanceof ServerSetHeight h) {
+            chunks.onHeight(h.x, h.z, h.height);
+        } else if (packet instanceof ServerSetHeights hs) {
+            // A few tops at once: the column is named by chunk, each change by its index within
+            // it. Unpacked here rather than passed on, so a listener sees one shape of news.
+            if (hs.heights != null) {
+                for (SetHeightCmd cmd : hs.heights) {
+                    int index = cmd.index & 0x3FF;
+                    chunks.onHeight((hs.x << 5) + (index & 31), (hs.z << 5) + ((index >> 5) & 31),
+                            cmd.height);
+                }
+            }
         } else if (packet instanceof SetChunkHeightmap h) {
             chunks.onHeightmap(h.x, h.z, h.heightmap);
         } else if (packet instanceof SetChunkTintmap t) {
             chunks.onTintmap(t.x, t.z, t.tintmap);
         } else if (packet instanceof SetChunkEnvironments e) {
-            chunks.onEnvironments(e.x, e.z, e.environments);
+            chunks.onEnvironments(e.x, e.y, e.z, e.environments);
         } else if (packet instanceof UnloadChunk u) {
             chunks.onUnload(u.chunkX, u.chunkZ);
         } else if (packet instanceof UnloadChunks u) {
