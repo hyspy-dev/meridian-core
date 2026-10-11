@@ -9,6 +9,7 @@ import meridian.api.session.ProxySession;
 import meridian.protocol.packets.assets.UpdateEnvironments;
 import meridian.protocol.packets.assets.UpdateFluids;
 import meridian.protocol.packets.player.JoinWorld;
+import meridian.protocol.packets.world.ClearChunks;
 import meridian.protocol.packets.world.ServerSetHeight;
 import meridian.protocol.packets.world.ServerSetHeights;
 import meridian.protocol.packets.world.SetChunk;
@@ -81,11 +82,14 @@ final class WorldChunksHandler implements PacketHandler {
                     chunks.onUnload(columns[i], columns[i + 1]);
                 }
             }
+        } else if (packet instanceof ClearChunks) {
+            // The seam between two worlds, and it rides the chunk channel on purpose: the server
+            // sends it after the old world's last chunks and ahead of the new world's, so it is
+            // ordered against them. The join races it on Default and often wins - filed by the
+            // join, the old world's tail would be written into the new world's save.
+            chunks.onChunksCleared();
         } else if (packet instanceof JoinWorld j) {
-            // The join is the seam itself here. Later builds announce it on the chunk channel with
-            // a packet of its own, which is ordered against the chunks and so can be waited for;
-            // this one has nothing of the kind, so the world turns over the moment it is named.
-            chunks.onJoinWorld(j.worldUuid, false);
+            chunks.onJoinWorld(j.worldUuid, j.clearWorld);
         } else if (packet instanceof UpdateFluids u) {
             chunks.onFluidCatalog(named(u));
         } else if (packet instanceof UpdateEnvironments u) {
