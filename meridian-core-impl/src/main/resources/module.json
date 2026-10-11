@@ -45,6 +45,7 @@
       "TeleportToWorldMapMarker",
       "ServerMessage",
       "JoinWorld",
+      "ClientReady",
       "CustomHud",
       "AssetInitialize",
       "AssetPart",

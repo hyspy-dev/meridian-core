@@ -31,26 +31,37 @@ final class WorldMapImpl implements WorldMap {
     /** Where tiles go before the join packet says which world this is. */
     private static final UUID UNKNOWN_WORLD = new UUID(0, 0);
 
-    /** The world tiles are attributed to; switched by the world observer. */
+    /** The world the player is in - what every query answers for. Switched on the join. */
     private volatile UUID currentWorld = UNKNOWN_WORLD;
+    /**
+     * The world the WorldMap stream is drawing - where tiles are filed. It lags the player's world
+     * by the tail of the old one still in flight; {@link MapStreamWorld} decides when it moves.
+     */
+    private volatile UUID mapWorld = UNKNOWN_WORLD;
 
     // ------------------------------------------------------------------
     // Ingest (core-internal)
     // ------------------------------------------------------------------
 
-    /**
-     * Points ingest and queries at another world.
-     *
-     * <p>Tiles can arrive before the join packet names the world - they ride different channels -
-     * and those land under a placeholder. Naming the world takes them with it, so the map the
-     * player sees at the moment they arrive is the one that was already being drawn.
-     */
+    /** Points queries at the world the player has just joined. */
     void setCurrentWorld(UUID world) {
-        if (world == null || world.equals(currentWorld)) {
+        if (world != null) {
+            this.currentWorld = world;
+        }
+    }
+
+    /**
+     * Points ingest at the world the WorldMap stream is now drawing.
+     *
+     * <p>Anything that arrived before any world was named sits under a placeholder, and goes
+     * with the first world named - it can only have been that world's.
+     */
+    void setMapWorld(UUID world) {
+        if (world == null || world.equals(mapWorld)) {
             return;
         }
         Map<Long, MapTileImpl> early = worlds.remove(UNKNOWN_WORLD);
-        this.currentWorld = world;
+        this.mapWorld = world;
         if (early != null && !early.isEmpty()) {
             tilesOf(world).putAll(early);
         }
@@ -61,10 +72,10 @@ final class WorldMapImpl implements WorldMap {
         return currentWorld;
     }
 
-    /** Decodes and stores the tiles of one {@code UpdateWorldMap}. */
+    /** Decodes and stores the tiles of one {@code UpdateWorldMap}, under the world being drawn. */
     void ingest(MapChunk[] chunks) {
         if (chunks == null) return;
-        Map<Long, MapTileImpl> tiles = tilesOf(currentWorld);
+        Map<Long, MapTileImpl> tiles = tilesOf(mapWorld);
         for (MapChunk chunk : chunks) {
             if (chunk == null || chunk.image == null) {
                 continue;   // an unload — the client's view shrinks, our memory does not

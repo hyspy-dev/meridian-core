@@ -1,5 +1,9 @@
 package meridian.core.impl;
 
+import java.util.UUID;
+import java.util.function.Consumer;
+import meridian.api.event.BackendDisconnectedEvent;
+import meridian.api.event.EventPriority;
 import meridian.api.module.ModuleContext;
 import meridian.api.module.ProxyModule;
 import meridian.api.packet.Direction;
@@ -99,12 +103,26 @@ public class MeridianCoreModule implements ProxyModule {
         // downloader does exactly that.
         retireOldMapFile(ctx);
         ctx.services().provide(WorldMap.class, worldMap);
+        // The join names the world on Default; the map stream still carries the old world's tail
+        // after it, so tiles and markers move only when that stream says so (MapStreamWorld).
+        MapStreamWorld streamWorld = new MapStreamWorld();
+        Consumer<UUID> drawWorld = w -> {
+            worldMap.setMapWorld(w);
+            MapMarkersImpl liveMarkers = markerRef[0];
+            if (liveMarkers != null) {
+                liveMarkers.setWorld(w);
+            }
+        };
+        ctx.events().subscribe(BackendDisconnectedEvent.class, EventPriority.MONITOR,
+                e -> streamWorld.reset());
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
-                (direction, session) -> new WorldMapObserver(worldMap));
-        ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
+                (direction, session) -> new WorldMapObserver(
+                        worldMap, streamWorld, drawWorld, () -> viewRef[0]));
+        // Both ways: the join comes down, the client's ready for it goes up.
+        ctx.registerHandler(Direction.BOTH, HandlerPosition.MONITOR,
                 (direction, session) -> new WorldMapWorldObserver(
-                        worldMap, sessionHolder, clientAssets, () -> viewRef[0],
-                        () -> markerRef[0]));
+                        worldMap, streamWorld, drawWorld, sessionHolder, clientAssets,
+                        () -> viewRef[0]));
 
         // --- EntityTracker + CameraControl + DebugRender ---------------------
         EntityTrackerImpl entityTracker = new EntityTrackerImpl();
