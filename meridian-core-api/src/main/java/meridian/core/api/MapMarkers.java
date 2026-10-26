@@ -18,7 +18,9 @@ import java.util.function.Predicate;
  * <p>Markers are remembered longer than the server shows them. A player who logs out, ground
  * that scrolled out of view: those markers stay in {@link #all()} with {@link Marker#online()}
  * false. What can be shown again differs by kind — a local marker we can always redraw, a
- * server-owned one only while the server is still sending it.
+ * server-owned one only while the server is still sending it. A marker the server deletes - a
+ * player's marker, a death mark, a bed - is not lost either: it becomes a local marker in the same
+ * place, which the player can keep or delete like any other.
  *
  * <p>Making a marker is not straightforward, and the awkwardness is hidden here: the server
  * never answers a create or a remove, it just silently declines the ones it does not like — too
