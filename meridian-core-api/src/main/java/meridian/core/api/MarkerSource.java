@@ -18,6 +18,15 @@ public interface MarkerSource {
     /** Every marker kept for a world, including ones from sessions long past. */
     List<Marker> markers(UUID world);
 
+    /**
+     * The markers a map should draw for a world: what is kept, less what the player has taken
+     * off their map and what they have switched off. {@link #markers} stays everything, for
+     * whoever keeps a record rather than draws one.
+     */
+    default List<Marker> shown(UUID world) {
+        return markers(world);
+    }
+
     /** The worlds anything is kept for. */
     List<UUID> worlds();
 
