@@ -40,6 +40,11 @@ final class MarkerState {
      * server keeps sending it; every arrival is dropped again, so it stays gone.
      */
     boolean removedLocally;
+    /**
+     * For a marker of ours that stands in for one the server deleted: the id the server knew it
+     * by. If the server sends that marker again, the stand-in has nothing left to say.
+     */
+    String origin;
 
     /** The last wire marker the server sent, so a hidden one can be put back exactly. */
     transient MapMarker live;
