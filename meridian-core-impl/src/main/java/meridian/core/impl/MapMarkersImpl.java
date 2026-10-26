@@ -37,7 +37,9 @@ import org.slf4j.Logger;
  * <p><b>What is known outlives what is shown.</b> The server sends markers for what is nearby and
  * who is online, and takes them away again when either changes. Those are not deletions, so a
  * marker that goes away is kept and marked offline. That is what lets the map remember a base
- * from an hour ago, or where a player was when they logged off.
+ * from an hour ago, or where a player was when they logged off. The kinds the server sends at
+ * any distance are different: when one of those goes, it was deleted, and what we remember of it
+ * becomes a marker of our own.
  *
  * <p><b>The client is told a story we control.</b> Every marker update the server sends is
  * rewritten on the way through: hidden markers are struck out, and our own — the local ones and
@@ -60,6 +62,8 @@ final class MapMarkersImpl implements MapMarkers {
     private static final double MARKER_HEIGHT = 100;
     /** How the server names the mark it leaves where a player died - one it will delete. */
     private static final String DEATH_PREFIX = "death-marker-";
+    /** The picture of a respawn point - a bed - which, unlike a point of interest, has no id prefix. */
+    private static final String RESPAWN_ICON = "Home.png";
 
     private final Logger log;
     private final MarkerStoreImpl store;
@@ -128,6 +132,7 @@ final class MapMarkersImpl implements MapMarkers {
                     continue;
                 }
                 MarkerState state = store.upsert(world, incoming);
+                rewritten |= dropStandIns(state, removals);
                 learnWhoWeAre(state);
                 rewritten |= confirmCreate(state, removals);
                 if (state.category == MarkerCategory.PLAYER && state.player != null
@@ -160,6 +165,13 @@ final class MapMarkersImpl implements MapMarkers {
                 if (weAsked && state.category != MarkerCategory.PLAYER) {
                     // We asked and the server did it, so this one really is gone.
                     store.remove(world, id);
+                    continue;
+                }
+                if (goneMeansDeleted(state)) {
+                    // Nothing hides this kind for distance, so the server dropping it means it
+                    // is gone there - a bed broken, a marker someone else deleted, a death mark
+                    // let go of. What is left is our memory of it, and that is ours to keep.
+                    rewritten |= keepAsOurs(state, adds);
                     continue;
                 }
                 // Otherwise it only stopped being shown: the ground scrolled away, someone else
@@ -749,6 +761,91 @@ final class MapMarkersImpl implements MapMarkers {
         } catch (RuntimeException e) {
             return true;
         }
+    }
+
+    /**
+     * Whether the server dropping this marker means it was deleted there. Players' markers,
+     * death marks and respawn points are sent whatever the distance, so unlike the spawn, points
+     * of interest and block markers they never just scroll out of view. A player going is not a
+     * deletion either - that is what last-seen markers are for.
+     */
+    private static boolean goneMeansDeleted(MarkerState state) {
+        return state.category == MarkerCategory.USER_SHARED
+                || state.category == MarkerCategory.USER_PRIVATE
+                || (state.id != null && state.id.startsWith(DEATH_PREFIX))
+                || (state.category == MarkerCategory.SERVER && RESPAWN_ICON.equals(state.icon));
+    }
+
+    /**
+     * Turns a marker the server deleted into one of ours, in the same place and under the same
+     * name, so it can be kept, drawn and deleted like anything else of ours. The update carrying
+     * the server's removal carries ours in, so the client never shows a gap.
+     *
+     * @return whether the stand-in was added to {@code adds}
+     */
+    private boolean keepAsOurs(MarkerState gone, List<MapMarker> adds) {
+        boolean wasHidden = store.hiddenIn(worldId).contains(gone.id);
+        store.remove(worldId, gone.id);
+        if (gone.removedLocally) {
+            return false;   // the player had already deleted it; there is nothing to keep
+        }
+        MarkerState ours = new MarkerState();
+        ours.id = MarkerCodec.newLocalId();
+        ours.worldId = worldId;
+        ours.name = gone.name;
+        ours.icon = gone.icon;
+        ours.x = gone.x;
+        ours.y = gone.y;
+        ours.z = gone.z;
+        ours.colourRgb = gone.colourRgb;
+        ours.category = MarkerCategory.LOCAL;
+        // Ours now, so it says we placed it - the client only offers to delete what somebody did.
+        ours.owner = selfId;
+        ours.ownerName = selfName;
+        ours.origin = gone.id;
+        ours.lastSeenMillis = System.currentTimeMillis();
+        ours.online = true;
+        store.put(ours);
+        if (wasHidden) {
+            store.hiddenIn(worldId).add(ours.id);
+            store.markDirty();
+        }
+        if (visible(ours) && onClient.add(ours.id)) {
+            adds.add(MarkerCodec.writeLocal(ours));
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Takes away our stand-ins for a marker the server is sending again - the same id back, or a
+     * marker of the same kind in the same place: a bed placed where the broken one stood, or a
+     * respawn point renumbered when another bed went.
+     *
+     * @return whether a stand-in the client was showing went into {@code removals}
+     */
+    private boolean dropStandIns(MarkerState arrived, List<String> removals) {
+        if (!goneMeansDeleted(arrived)) {
+            return false;
+        }
+        boolean dropped = false;
+        for (MarkerState ours : store.markers(worldId)) {
+            if (ours.origin == null) {
+                continue;
+            }
+            boolean same = ours.origin.equals(arrived.id)
+                    || (ours.icon.equals(arrived.icon)
+                            && Math.abs(ours.x - arrived.x) < SAME_SPOT
+                            && Math.abs(ours.z - arrived.z) < SAME_SPOT);
+            if (same) {
+                store.remove(worldId, ours.id);
+                if (onClient.remove(ours.id)) {
+                    removals.add(ours.id);
+                    dropped = true;
+                }
+            }
+        }
+        return dropped;
     }
 
     /**
