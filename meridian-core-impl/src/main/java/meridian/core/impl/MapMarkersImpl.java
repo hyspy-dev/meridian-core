@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledFuture;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import meridian.api.module.Scheduler;
 import meridian.api.packet.PacketHandler.Action;
@@ -57,6 +58,8 @@ final class MapMarkersImpl implements MapMarkers {
     private static final double SAME_SPOT = 0.5;
     /** The server pins user markers at this height, whatever was asked for. */
     private static final double MARKER_HEIGHT = 100;
+    /** How the server names the mark it leaves where a player died - one it will delete. */
+    private static final String DEATH_PREFIX = "death-marker-";
 
     private final Logger log;
     private final MarkerStoreImpl store;
@@ -85,6 +88,8 @@ final class MapMarkersImpl implements MapMarkers {
 
     /** Kept off the map by policy rather than by the player - see {@link #suppress}. */
     private final Set<String> suppressed = ConcurrentHashMap.newKeySet();
+    /** Kept off the map by a rule a module set - see {@link #setFilter}. Null lets all through. */
+    private volatile Predicate<Marker> filter;
     private final List<Runnable> listeners = new CopyOnWriteArrayList<>();
 
     private final ConcurrentLinkedQueue<PendingCreate> creates = new ConcurrentLinkedQueue<>();
@@ -324,6 +329,13 @@ final class MapMarkersImpl implements MapMarkers {
             changed();
             return Action.DROP;
         }
+        MarkerState state = store.get(worldId, id);
+        if (state != null && !serverDeletes(state)) {
+            hideForGood(id);
+            chat.send("[Markers] The server cannot delete that marker - hidden on your map instead.");
+            changed();
+            return Action.DROP;
+        }
         awaitRemoval(id);
         return Action.FORWARD;
     }
@@ -418,7 +430,7 @@ final class MapMarkersImpl implements MapMarkers {
         MarkerState state = store.get(worldId, id);
         return store.hiddenIn(worldId).contains(id)
                 || suppressed.contains(id)
-                || (state != null && state.removedLocally);
+                || (state != null && (state.removedLocally || !passes(state)));
     }
 
     @Override
@@ -433,6 +445,12 @@ final class MapMarkersImpl implements MapMarkers {
             state.removedLocally = false;
         }
         store.markDirty();
+        apply();
+    }
+
+    @Override
+    public void setFilter(Predicate<Marker> shown) {
+        filter = shown;
         apply();
     }
 
@@ -490,6 +508,13 @@ final class MapMarkersImpl implements MapMarkers {
         if (MarkerCodec.isOurs(id)) {
             store.remove(worldId, id);
             unshow(id);
+            changed();
+            return true;
+        }
+        if (!serverDeletes(state)) {
+            // Asking would only earn an orange "couldn't find the map marker" and five seconds
+            // of waiting, after which it would be hidden anyway.
+            hideForGood(id);
             changed();
             return true;
         }
@@ -709,7 +734,32 @@ final class MapMarkersImpl implements MapMarkers {
     private boolean visible(MarkerState state) {
         return !state.removedLocally
                 && !store.hiddenIn(worldId).contains(state.id)
-                && !suppressed.contains(state.id);
+                && !suppressed.contains(state.id)
+                && passes(state);
+    }
+
+    /** Whether the module's rule lets a marker through. A rule that throws lets everything by. */
+    private boolean passes(MarkerState state) {
+        Predicate<Marker> rule = filter;
+        if (rule == null) {
+            return true;
+        }
+        try {
+            return rule.test(state.snapshot());
+        } catch (RuntimeException e) {
+            return true;
+        }
+    }
+
+    /**
+     * Whether the server deletes this marker when asked. It deletes what players placed and the
+     * marks left where they died, and nothing else: a bed, the spawn, a point of interest are
+     * all answered with "couldn't find the map marker you're trying to edit".
+     */
+    private static boolean serverDeletes(MarkerState state) {
+        return state.category == MarkerCategory.USER_SHARED
+                || state.category == MarkerCategory.USER_PRIVATE
+                || (state.id != null && state.id.startsWith(DEATH_PREFIX));
     }
 
     /**

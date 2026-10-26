@@ -1,7 +1,9 @@
 package meridian.core.impl;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import meridian.core.api.Marker;
 import meridian.core.api.MarkerArchive;
@@ -65,5 +67,20 @@ final class MarkerArchiveImpl implements MarkerArchive {
             out.add(state.snapshot());
         }
         return out;
+    }
+
+    @Override
+    public Set<String> hidden(UUID world) {
+        if (world == null) {
+            return Set.of();
+        }
+        String id = world.toString();
+        Set<String> out = new HashSet<>(store.hiddenIn(id));
+        for (MarkerState state : store.markers(id)) {
+            if (state.removedLocally) {
+                out.add(state.id);
+            }
+        }
+        return Set.copyOf(out);
     }
 }

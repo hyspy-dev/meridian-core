@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Predicate;
 
 /**
  * Every marker on the world map: the ones the server sends, and the ones we make ourselves.
@@ -75,7 +76,10 @@ public interface MapMarkers {
     /** Shows several hidden markers at once. */
     void show(Collection<String> ids);
 
-    /** Whether this marker is currently being kept off the client's map. */
+    /**
+     * Whether this marker is currently being kept off the client's map, for any reason: hidden,
+     * deleted where the server would not delete it, or left out by the {@link #setFilter filter}.
+     */
     boolean isHidden(String id);
 
     /** The markers being kept off the map in this world. */
@@ -83,6 +87,19 @@ public interface MapMarkers {
 
     /** Shows everything again, forgetting every hide in this world. */
     void showAll();
+
+    /**
+     * Keeps markers off the client's map by a rule rather than one at a time - a whole kind, an
+     * icon or a colour switched off.
+     *
+     * <p>Kept apart from {@link #hide}: the rule is never remembered, so taking it away brings
+     * back exactly what it left out and nothing the player hid by hand. Whoever sets it sets it
+     * again on every start, and again whenever what it looks at changes - the map is redrawn
+     * each time it is set.
+     *
+     * @param shown true for a marker that may be shown; {@code null} lets everything through
+     */
+    void setFilter(Predicate<Marker> shown);
 
     // ------------------------------------------------------------------
     // Making and unmaking
@@ -111,8 +128,10 @@ public interface MapMarkers {
                                      boolean shared);
 
     /**
-     * Removes a marker: ours outright, the server's by asking. If the server will not, the
-     * marker is hidden instead, so it is gone from the player's point of view either way.
+     * Removes a marker: ours outright, the server's by asking. Only a marker a player placed and
+     * the mark left where one died are worth asking about - a bed, the spawn, a point of interest
+     * the server never deletes - so anything else is hidden straight away, and so is one the
+     * server refuses. Either way it is gone from the player's point of view.
      *
      * @return whether such a marker was known at all
      */
