@@ -51,9 +51,8 @@ public interface MarkerArchive {
     List<Marker> markers(UUID world);
 
     /**
-     * The markers the player has taken off their map in a world: hidden, or deleted where the
-     * server would not delete them. A rule set with {@link MapMarkers#setFilter} is not part of
-     * it - that is never remembered.
+     * The markers the player has hidden in a world. A rule set with {@link MapMarkers#setFilter}
+     * is not part of it - that is never remembered.
      */
     Set<String> hidden(UUID world);
 }

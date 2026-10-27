@@ -4,7 +4,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -47,10 +46,11 @@ import org.slf4j.Logger;
  * believes is tracked exactly, because the only way to take a marker off its map is to name an
  * id it currently has.
  *
- * <p><b>Silence means no.</b> Creating and deleting are requests, and the server answers only
- * the ones it grants: a marker too far away, too many already, a name too long simply never
- * appear. So every request is given a few seconds, and when nothing comes back the marker is
- * made, or hidden, locally instead - the player gets what they asked for either way.
+ * <p><b>Silence means no.</b> Creating is a request, and the server answers only the ones it
+ * grants: a marker too far away, too many already, a name too long simply never appear. So every
+ * request is given a few seconds, and when nothing comes back the marker is made locally instead -
+ * the player gets what they asked for either way. Deleting is not a request: a marker is deleted
+ * here at once, and the server is asked to delete its own copy only where it can.
  */
 final class MapMarkersImpl implements MapMarkers {
 
@@ -97,7 +97,6 @@ final class MapMarkersImpl implements MapMarkers {
     private final List<Runnable> listeners = new CopyOnWriteArrayList<>();
 
     private final ConcurrentLinkedQueue<PendingCreate> creates = new ConcurrentLinkedQueue<>();
-    private final Map<String, PendingRemove> removes = new ConcurrentHashMap<>();
 
     MapMarkersImpl(Logger log, MarkerStoreImpl store, Scheduler scheduler, Chat chat,
                    SessionHolder mapSession, SessionHolder defaultSession) {
@@ -156,16 +155,10 @@ final class MapMarkersImpl implements MapMarkers {
                 if (id == null) {
                     continue;
                 }
-                boolean weAsked = confirmRemove(id);
                 onClient.remove(id);
                 MarkerState state = store.get(world, id);
                 if (state == null) {
-                    continue;
-                }
-                if (weAsked && state.category != MarkerCategory.PLAYER) {
-                    // We asked and the server did it, so this one really is gone.
-                    store.remove(world, id);
-                    continue;
+                    continue;   // deleted here before the server got round to it, or never known
                 }
                 if (goneMeansDeleted(state)) {
                     // Nothing hides this kind for distance, so the server dropping it means it
@@ -335,21 +328,20 @@ final class MapMarkersImpl implements MapMarkers {
             changed();
             return Action.DROP;
         }
-        if (localOnly) {
-            hideForGood(id);
-            chat.send("[Markers] Marker hidden on this map only.");
-            changed();
-            return Action.DROP;
-        }
         MarkerState state = store.get(worldId, id);
-        if (state != null && !serverDeletes(state)) {
-            hideForGood(id);
-            chat.send("[Markers] The server cannot delete that marker - hidden on your map instead.");
+        boolean serverToo = !localOnly && (state == null || serverDeletes(state));
+        if (state != null) {
+            forget(state);
             changed();
-            return Action.DROP;
         }
-        awaitRemoval(id);
-        return Action.FORWARD;
+        if (serverToo) {
+            // Gone here already. The server deletes its own copy, or says in orange why not.
+            return Action.FORWARD;
+        }
+        chat.send(localOnly
+                ? "[Markers] Marker removed from this map only."
+                : "[Markers] The server cannot delete that marker - removed from your map only.");
+        return Action.DROP;
     }
 
     /** Teleporting works only to markers the server knows about. */
@@ -504,42 +496,14 @@ final class MapMarkersImpl implements MapMarkers {
         if (state == null) {
             return false;
         }
-        if (state.category == MarkerCategory.PLAYER) {
-            // Nobody can delete a player. While they are online the marker is a fact, so the
-            // most that can be done is stop looking at it; once they are gone, forgetting where
-            // they were is a real deletion.
-            if (state.online) {
-                hide(id);
-            } else {
-                store.remove(worldId, id);
-                unshow(state.ghostId());
-                changed();
-            }
-            return true;
+        forget(state);
+        if (!MarkerCodec.isOurs(id) && !localOnly && serverDeletes(state)) {
+            // A marker the server can delete is deleted there too. Nothing waits for its answer:
+            // the marker is gone here already, and a refusal only means the server's copy stays.
+            // Straight down the pipe, past our own intercept.
+            defaultSession.get().ifPresent(live -> live.sendToServer(new RemoveMapMarker(id)));
         }
-        if (MarkerCodec.isOurs(id)) {
-            store.remove(worldId, id);
-            unshow(id);
-            changed();
-            return true;
-        }
-        if (!serverDeletes(state)) {
-            // Asking would only earn an orange "couldn't find the map marker" and five seconds
-            // of waiting, after which it would be hidden anyway.
-            hideForGood(id);
-            changed();
-            return true;
-        }
-        ProxySession live = localOnly ? null : defaultSession.get().orElse(null);
-        if (live == null) {
-            // Either we are not asking the server, or there is nobody to ask. Off the map it goes.
-            hideForGood(id);
-            changed();
-            return true;
-        }
-        awaitRemoval(id);
-        // Straight down the pipe, past our own intercept, which would arm a second wait.
-        live.sendToServer(new RemoveMapMarker(id));
+        changed();
         return true;
     }
 
@@ -695,43 +659,19 @@ final class MapMarkersImpl implements MapMarkers {
         return false;
     }
 
-    private void awaitRemoval(String id) {
-        PendingRemove pending = new PendingRemove(id);
-        removes.put(id, pending);
-        pending.timer = scheduler.schedule(() -> giveUpOnRemoval(pending), ANSWER_TIMEOUT);
-    }
-
-    private void giveUpOnRemoval(PendingRemove pending) {
-        if (!removes.remove(pending.id, pending)) {
-            return;
-        }
-        hideForGood(pending.id);
-        chat.send("[Markers] The server would not delete that marker - hidden on your map instead.");
-        log.info("meridian-core: no answer in {}s for the removal of '{}' - hidden instead",
-                ANSWER_TIMEOUT.toSeconds(), pending.id);
-        changed();
-    }
-
-    private boolean confirmRemove(String id) {
-        PendingRemove pending = removes.remove(id);
-        if (pending == null) {
-            return false;
-        }
-        cancel(pending.timer);
-        return true;
-    }
-
     /**
-     * Marks a marker as one the player is done with. The server keeps sending it, and every
-     * arrival is struck out again, so it stays gone until {@link #showAll}.
+     * Deletes a marker here: out of memory and off the client's map, with nothing hidden in its
+     * place. If the server still has it and sends it again, it arrives as a new marker.
      */
-    private void hideForGood(String id) {
-        MarkerState state = store.get(worldId, id);
-        if (state != null) {
-            state.removedLocally = true;
-            store.markDirty();
+    private void forget(MarkerState state) {
+        store.remove(worldId, state.id);
+        List<String> gone = new ArrayList<>();
+        gone.add(state.id);
+        if (state.category == MarkerCategory.PLAYER && state.player != null) {
+            gone.add(state.ghostId());
         }
-        unshow(id);
+        gone.forEach(onClient::remove);
+        send(null, gone);
     }
 
     private void forgetGhost(String ghostId) {
@@ -958,16 +898,6 @@ final class MapMarkersImpl implements MapMarkers {
             this.answer = answer;
             this.fromClient = fromClient;
             this.provisionalId = provisionalId;
-        }
-    }
-
-    /** A deletion asked for and not yet answered. */
-    private static final class PendingRemove {
-        final String id;
-        volatile ScheduledFuture<?> timer;
-
-        PendingRemove(String id) {
-            this.id = id;
         }
     }
 }
