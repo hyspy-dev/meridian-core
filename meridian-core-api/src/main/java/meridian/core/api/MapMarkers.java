@@ -79,8 +79,8 @@ public interface MapMarkers {
     void show(Collection<String> ids);
 
     /**
-     * Whether this marker is currently being kept off the client's map, for any reason: hidden,
-     * deleted where the server would not delete it, or left out by the {@link #setFilter filter}.
+     * Whether this marker is currently being kept off the client's map, for any reason: hidden by
+     * the player, or left out by the {@link #setFilter filter}.
      */
     boolean isHidden(String id);
 
@@ -130,10 +130,10 @@ public interface MapMarkers {
                                      boolean shared);
 
     /**
-     * Removes a marker: ours outright, the server's by asking. Only a marker a player placed and
-     * the mark left where one died are worth asking about - a bed, the spawn, a point of interest
-     * the server never deletes - so anything else is hidden straight away, and so is one the
-     * server refuses. Either way it is gone from the player's point of view.
+     * Deletes a marker: forgets it and takes it off the map at once, with nothing hidden in its
+     * place. A marker the server can delete - one a player placed, a death mark - is deleted
+     * there too; a bed, the spawn, a point of interest only here. If the server still has one and
+     * sends it again, it arrives as a new marker.
      *
      * @return whether such a marker was known at all
      */

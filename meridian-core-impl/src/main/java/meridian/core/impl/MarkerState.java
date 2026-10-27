@@ -36,8 +36,9 @@ final class MarkerState {
     /** Whether the server is currently showing this marker. */
     boolean online;
     /**
-     * Set when the server would not delete a marker and we took it off the map instead. The
-     * server keeps sending it; every arrival is dropped again, so it stays gone.
+     * Set by earlier versions, which hid a marker the server would not delete instead of deleting
+     * it; every arrival is still struck out. Nothing sets it now - a delete forgets the marker -
+     * but archives written then still carry it, and showing everything again clears it.
      */
     boolean removedLocally;
     /**
