@@ -31,6 +31,14 @@ public interface Block {
     /** The block type, or {@code null} if the chunk / block catalog is not loaded. */
     BlockView type();
 
+    /**
+     * Which way this block faces, as the server stores it: an index 0..63 of
+     * {@code roll * 16 + pitch * 4 + yaw}, each a quarter turn ({@code 0} none, {@code 1} 90°,
+     * {@code 2} 180°, {@code 3} 270°). {@code 0} is unturned - also what a block that cannot turn,
+     * or one whose chunk is not loaded, reports. The prefab format stores the same number.
+     */
+    int rotation();
+
     /** Whether this block is air (or its chunk is not loaded). */
     boolean isAir();
 
