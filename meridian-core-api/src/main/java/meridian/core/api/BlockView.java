@@ -1,6 +1,7 @@
 package meridian.core.api;
 
 import java.util.List;
+import java.util.Map;
 import java.util.function.UnaryOperator;
 
 /**
@@ -24,6 +25,24 @@ public interface BlockView {
      * {@code withState}; a forged interaction is how state is changed.
      */
     String state();
+
+    /**
+     * Every state of this block's family, by name, as the block id each one is - {@code "on"} and
+     * {@code "off"} for a lamp. Empty for a block without states. Two blocks are the same block in
+     * different states when either one's id is among the other's values.
+     */
+    default Map<String, Integer> states() {
+        return Map.of();
+    }
+
+    /**
+     * Whether which way this block faces is part of what it is. False for a block that cannot be
+     * turned, and for one the game turns at random as it is placed - two rocks facing different
+     * ways are still the same rock.
+     */
+    default boolean rotationMatters() {
+        return false;
+    }
 
     boolean isSolid();
 

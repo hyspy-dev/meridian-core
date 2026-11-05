@@ -38,6 +38,12 @@ public final class ChunkTracker {
     /** Section coords &rarr; {@code int[32768]} block ids in {@code indexBlock} order. */
     private final Map<SectionKey, int[]> sections = new ConcurrentHashMap<>();
     /**
+     * Section coords &rarr; which way each block faces ({@code byte[32768]}, the server's rotation
+     * index), only for sections where something is turned - most have nothing, and an absent
+     * entry reads as all zero.
+     */
+    private final Map<SectionKey, byte[]> rotations = new ConcurrentHashMap<>();
+    /**
      * The same, for fluids - water and lava live here, not in the block layer.
      *
      * <p>The block array reads air where a fluid is; a player standing "on the surface" of a
@@ -59,8 +65,14 @@ public final class ChunkTracker {
 
     void onSetChunk(SetChunk packet) {
         try {
-            sections.put(new SectionKey(packet.x, packet.y, packet.z),
-                    ChunkDecoder.decodeBlockIds(packet.data));
+            SectionKey key = new SectionKey(packet.x, packet.y, packet.z);
+            ChunkDecoder.Section section = ChunkDecoder.decodeSection(packet.data);
+            sections.put(key, section.ids());
+            if (section.rotations() != null) {
+                rotations.put(key, section.rotations());
+            } else {
+                rotations.remove(key);
+            }
         } catch (RuntimeException e) {
             log.warn("meridian-core: failed to decode chunk section ({},{},{}): {}",
                     packet.x, packet.y, packet.z, e.toString());
@@ -68,9 +80,12 @@ public final class ChunkTracker {
     }
 
     void onServerSetBlock(ServerSetBlock packet) {
-        int[] section = sections.get(new SectionKey(packet.x >> 5, packet.y >> 5, packet.z >> 5));
+        SectionKey key = new SectionKey(packet.x >> 5, packet.y >> 5, packet.z >> 5);
+        int[] section = sections.get(key);
         if (section != null) {
-            section[indexBlock(packet.x, packet.y, packet.z)] = packet.blockId;
+            int index = indexBlock(packet.x, packet.y, packet.z);
+            section[index] = packet.blockId;
+            setRotation(key, index, packet.rotation);
         }
     }
 
@@ -78,7 +93,8 @@ public final class ChunkTracker {
         if (packet.cmds == null) {
             return;
         }
-        int[] section = sections.get(new SectionKey(packet.x, packet.y, packet.z));
+        SectionKey key = new SectionKey(packet.x, packet.y, packet.z);
+        int[] section = sections.get(key);
         if (section == null) {
             return;
         }
@@ -86,7 +102,17 @@ public final class ChunkTracker {
             int index = cmd.index & 0xFFFF;
             if (index < section.length) {
                 section[index] = cmd.blockId;
+                setRotation(key, index, cmd.rotation);
             }
+        }
+    }
+
+    /** Records which way one block now faces, making room only once something is turned. */
+    private void setRotation(SectionKey key, int index, byte rotation) {
+        byte[] section = rotation == 0 ? rotations.get(key)
+                : rotations.computeIfAbsent(key, k -> new byte[ChunkDecoder.SECTION_BLOCKS]);
+        if (section != null) {
+            section[index] = rotation;
         }
     }
 
@@ -126,6 +152,7 @@ public final class ChunkTracker {
                 SectionKey key = new SectionKey(sectionCoords[i], sectionCoords[i + 1],
                         sectionCoords[i + 2]);
                 sections.remove(key);
+                rotations.remove(key);
                 fluidSections.remove(key);
             }
         }
@@ -140,6 +167,7 @@ public final class ChunkTracker {
     /** Everything standing over one column of the world, at every height. */
     private void unloadColumn(int chunkX, int chunkZ) {
         sections.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
+        rotations.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
         fluidSections.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
     }
 
@@ -154,6 +182,15 @@ public final class ChunkTracker {
     public int blockIdAt(int x, int y, int z) {
         int[] section = sections.get(new SectionKey(x >> 5, y >> 5, z >> 5));
         return section == null ? -1 : section[indexBlock(x, y, z)];
+    }
+
+    /**
+     * Which way the block at a world position faces, as the server's rotation index (0..63), or
+     * {@code 0} when it is not turned or its section is not loaded.
+     */
+    public int rotationAt(int x, int y, int z) {
+        byte[] section = rotations.get(new SectionKey(x >> 5, y >> 5, z >> 5));
+        return section == null ? 0 : section[indexBlock(x, y, z)] & 0xFF;
     }
 
     /**

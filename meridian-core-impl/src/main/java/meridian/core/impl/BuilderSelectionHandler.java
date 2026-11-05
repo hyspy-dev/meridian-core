@@ -1,16 +1,29 @@
 package meridian.core.impl;
 
 import io.netty.channel.ChannelHandlerContext;
+import meridian.protocol.packets.interface_.ChatMessage;
+import meridian.protocol.InteractionState;
 import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import meridian.api.packet.Packet;
 import meridian.api.packet.PacketHandler;
 import meridian.api.session.ProxySession;
 import meridian.core.api.BuilderSelection;
 import meridian.core.api.BuilderSelection.Box;
 import meridian.protocol.InteractionType;
+import meridian.protocol.packets.buildertools.BuilderToolAction;
+import meridian.protocol.packets.buildertools.BuilderToolGeneralAction;
+import meridian.protocol.packets.buildertools.BuilderToolPasteClipboard;
+import meridian.protocol.packets.buildertools.BuilderToolRandomizeClipboard;
+import meridian.protocol.packets.buildertools.BuilderToolResetClipboardRotation;
+import meridian.protocol.packets.buildertools.BuilderToolRotateClipboard;
+import meridian.protocol.packets.buildertools.BuilderToolSelectionToolAskForClipboard;
 import meridian.protocol.packets.buildertools.BuilderToolSelectionUpdate;
 import meridian.protocol.packets.buildertools.BuilderToolsEnabledTools;
+import meridian.protocol.packets.interface_.EditorBlocksChange;
 import meridian.protocol.packets.inventory.UpdatePlayerInventory;
 import meridian.protocol.packets.interaction.SyncInteractionChain;
 import meridian.protocol.packets.interaction.SyncInteractionChains;
@@ -36,6 +49,37 @@ final class BuilderSelectionHandler implements PacketHandler {
             org.slf4j.LoggerFactory.getLogger("meridian-core");
 
     private final BuilderSelectionImpl tools;
+    /**
+     * Slot changes onto our tools that we answered instead of the server: chain id to the slot it
+     * went to. Their follow-ups - the client's own completion or desync report - belong to us too.
+     */
+    private final Map<Integer, Integer> answeredSwaps = new LinkedHashMap<>(16, 0.75f, false) {
+        @Override protected boolean removeEldestEntry(Map.Entry<Integer, Integer> eldest) {
+            return size() > 64;
+        }
+    };
+
+    /**
+     * A new chain of the same kind this soon after the last one let go is the button still held -
+     * the client restarts a finished chain while it is down (the builder tool's own cooldown is
+     * 50 ms) - not a second click.
+     */
+    private static final long REPEAT_GAP_MS = 100;
+
+    /** Per kind of input on our tools: the chain of the press in progress, and when it last spoke. */
+    private static final class Press {
+        int chainId;
+        boolean released;
+        long lastSeen;
+    }
+
+    private final Map<InteractionType, Press> presses = new EnumMap<>(InteractionType.class);
+    /** Chains on our tools we took, by id: their follow-ups are ours too, and say when it let go. */
+    private final Map<Integer, InteractionType> takenChains = new LinkedHashMap<>(16, 0.75f, false) {
+        @Override protected boolean removeEldestEntry(Map.Entry<Integer, InteractionType> eldest) {
+            return size() > 64;
+        }
+    };
 
     BuilderSelectionHandler(BuilderSelectionImpl tools) {
         this.tools = tools;
@@ -43,6 +87,12 @@ final class BuilderSelectionHandler implements PacketHandler {
 
     @Override
     public Action handleS2C(ChannelHandlerContext ctx, Packet packet, ProxySession session) {
+        if (packet instanceof EditorBlocksChange change && tools.ownsClipboard()
+                && (change.blocksChange != null || change.blocksOmitted || change.shapeOccupancy != null)) {
+            // The server's own clipboard, which would replace ours in the paste tool. A change that
+            // only moves the selection box carries no blocks and still goes through.
+            return Action.DROP;
+        }
         if (packet instanceof SyncInteractionChains chains) {
             // The other half of the item NAT: the server answers naming the real item it has in that
             // slot, but the client predicted the tool it is showing. Left alone the answer
@@ -96,6 +146,10 @@ final class BuilderSelectionHandler implements PacketHandler {
             return handleChains(chains);
         }
         if (packet instanceof BuilderToolSelectionUpdate u && !tools.forcedTools().isEmpty()) {
+            if (u.xMin == Integer.MIN_VALUE || u.xMax == Integer.MIN_VALUE) {
+                // No box: the client sends this as the selection tool is put away. Not a selection.
+                return Action.DROP;
+            }
             int xMin = Math.min(u.xMin, u.xMax);
             int yMin = Math.min(u.yMin, u.yMax);
             int zMin = Math.min(u.zMin, u.zMax);
@@ -104,6 +158,73 @@ final class BuilderSelectionHandler implements PacketHandler {
             int zMax = Math.max(u.zMin, u.zMax);
             tools.report(new Box(xMin, yMin, zMin, xMax, yMax, zMax));
             return Action.DROP;                 // captured; the server must not see the tool used
+        }
+        // Copying the selection fills the paste tool - ours to do while our tools are out, whatever
+        // the paste tool holds now: the copy key comes as a general builder action, a typed /copy
+        // as chat.
+        if (!tools.forcedTools().isEmpty()
+                && ((packet instanceof BuilderToolGeneralAction g && g.action == BuilderToolAction.SelectionCopy)
+                    || (packet instanceof ChatMessage c && c.message != null && c.message.trim().equalsIgnoreCase("/copy")))) {
+            LOG.info("meridian-core: tools taking the selection copy");
+            tools.firePaste(BuilderSelection.PasteListener::copyAsked);
+            return Action.DROP;
+        }
+        if (tools.ownsClipboard()) {
+            // The paste tool is holding our clipboard: the server's would be the wrong blocks, and a
+            // paste must not reach it - the module places a projection, not a building.
+            if (packet instanceof BuilderToolSelectionToolAskForClipboard) {
+                tools.replyWithClipboard();
+                return Action.DROP;
+            }
+            if (packet instanceof BuilderToolRotateClipboard r) {
+                BuilderSelection.Axis axis = switch (r.axis) {
+                    case X -> BuilderSelection.Axis.X;
+                    case Y -> BuilderSelection.Axis.Y;
+                    case Z -> BuilderSelection.Axis.Z;
+                };
+                tools.turn(axis, r.angle);
+                tools.firePaste(l -> l.turned(axis, r.angle));
+                return Action.DROP;
+            }
+            if (packet instanceof BuilderToolResetClipboardRotation) {
+                tools.resetTurns();
+                tools.firePaste(BuilderSelection.PasteListener::reset);
+                return Action.DROP;
+            }
+            if (packet instanceof BuilderToolPasteClipboard p) {
+                tools.firePaste(l -> l.pasted(p.x, p.y, p.z));
+                return Action.DROP;
+            }
+            if (packet instanceof BuilderToolRandomizeClipboard) {
+                return Action.DROP;             // nothing of ours to scatter; the server's would be wrong
+            }
+            // The paste tool's flip key, which the client sends as a command the server keeps to its
+            // editors - and would run on its own clipboard anyway.
+            if (packet instanceof ChatMessage chat && chat.message != null) {
+                String[] words = chat.message.trim().split("\\s+");
+                if (words[0].equalsIgnoreCase("/flip") && words.length <= 2) {
+                    BuilderSelection.Axis axis = tools.flipAxis(words.length == 2 ? words[1] : null);
+                    if (axis != null) {
+                        tools.firePaste(l -> l.flipped(axis));
+                        return Action.DROP;
+                    }
+                }
+            }
+        }
+        if (packet instanceof ChatMessage cmd && cmd.message != null && cmd.message.startsWith("/")
+                && !tools.forcedTools().isEmpty()) {
+            LOG.info("meridian-core: tools see command '{}' (forced={}, clipboard={})",
+                    cmd.message, tools.forcedTools(), tools.ownsClipboard());
+        }
+        // The prefab list is how a clipboard gets chosen in the first place, so it is ours whenever
+        // the paste tool is one we handed out - with or without a clipboard in it yet.
+        if (packet instanceof ChatMessage chat && chat.message != null
+                && tools.forcedTools().contains(BuilderSelection.PASTE_TOOL)) {
+            String[] words = chat.message.trim().split("\\s+");
+            if (words.length == 2 && words[0].equalsIgnoreCase("/prefab") && words[1].equalsIgnoreCase("list")) {
+                tools.firePaste(BuilderSelection.PasteListener::listAsked);
+                return Action.DROP;
+            }
         }
         return Action.FORWARD;
     }
@@ -127,6 +248,11 @@ final class BuilderSelectionHandler implements PacketHandler {
         //   - S2C ({@link #toClientItems}) the server answers naming the real item; give the id back
         //     to the tool the client shows, so the answer matches what it predicted and it does not
         //     roll the slot change back.
+        // Slot changes are kept from the server altogether while they touch our tools: the server
+        // would really move onto the item it has in that slot, start that item's own swap-in (a
+        // sword's draw, a bow's), and the answer would not match the tool the client predicted - so
+        // the client rolls the change back. A change onto a tool is answered here and the server
+        // stays where it was; a change off a tool reaches it as if made from that real slot.
         // Only a Primary/Secondary/Use on one of our tools is dropped - that one is ours to answer.
         // We run EARLY, before the interaction NAT, so a dropped chain never burns a server-side id.
         List<SyncInteractionChain> keep = new ArrayList<>();
@@ -135,11 +261,36 @@ final class BuilderSelectionHandler implements PacketHandler {
             // Logged before we touch anything: core's own chain dump runs at NORMAL, after this
             // handler, so what it prints is already our rewrite - only this line shows what the
             // client actually sent.
-            LOG.info("meridian-core: tools C2S raw {} chain={} initial={} desync={} slot={} "
+            LOG.info("meridian-core: tools C2S raw {} chain={} initial={} desync={} state={} slot={} "
                             + "target={} item={} tools={}",
-                    chain.interactionType, chain.chainId, chain.initial, chain.desync,
+                    chain.interactionType, chain.chainId, chain.initial, chain.desync, chain.state,
                     chain.activeHotbarSlot, chain.data == null ? "-" : chain.data.targetSlot,
                     chain.itemInHandId, chain.toolsItemId);
+            Integer answeredTarget;
+            synchronized (answeredSwaps) {
+                answeredTarget = chain.initial ? null : answeredSwaps.get(chain.chainId);
+            }
+            if (answeredTarget != null) {
+                // A follow-up to a change we answered. A desync means the client let go of it
+                // anyway; put it back - the server is not involved either way.
+                if (chain.desync) {
+                    tools.pushActiveSlot(answeredTarget);
+                }
+                changed = true;
+                continue;
+            }
+            if (isSlotSwap(chain.interactionType) && chain.initial && chain.data != null
+                    && tools.toolAt(chain.data.targetSlot) != null) {
+                // Onto one of our tools: the server never hears of it.
+                LOG.info("meridian-core: tools answering swap chain {} onto tool slot {} "
+                        + "(server stays on {})", chain.chainId, chain.data.targetSlot, tools.serverSlot());
+                synchronized (answeredSwaps) {
+                    answeredSwaps.put(chain.chainId, chain.data.targetSlot);
+                }
+                tools.answerSwap(chain);
+                changed = true;
+                continue;
+            }
             if (chain.desync && isSlotSwap(chain.interactionType)) {
                 // A tool whose own swap interaction fails on the client (EditorTool_Selection has
                 // one) makes the client undo the slot change by itself and report a desync, even
@@ -155,14 +306,44 @@ final class BuilderSelectionHandler implements PacketHandler {
                 changed = true;
                 continue;
             }
-            String named = ours(forced, chain);
-            BuilderSelection.Interaction kind = named == null ? null : kindOf(chain.interactionType);
-            if (kind != null) {
-                tools.fireTool(named, kind);    // we answer LKM / PKM / F ourselves, and drop it
+            InteractionType takenType;
+            synchronized (presses) {
+                takenType = chain.initial ? null : takenChains.get(chain.chainId);
+            }
+            if (takenType != null) {
+                // The rest of a press we took: never the server's (it would cancel a chain it never
+                // saw start). Finished, failed or given up on means the button is up.
+                synchronized (presses) {
+                    Press press = presses.get(takenType);
+                    if (press != null && press.chainId == chain.chainId) {
+                        press.lastSeen = System.currentTimeMillis();
+                        if (chain.desync || chain.state != InteractionState.NotFinished) {
+                            press.released = true;
+                        }
+                    }
+                }
                 changed = true;
                 continue;
             }
-            changed |= toServerItems(forced, chain);
+            String named = ours(forced, chain);
+            BuilderSelection.Interaction kind = named == null ? null : kindOf(chain.interactionType);
+            if (kind != null) {
+                // We answer LKM / PKM / F ourselves, and drop it - once per press: a held button
+                // keeps sending chains, and one click is one step.
+                if (press(chain)) {
+                    tools.fireTool(named, kind);
+                }
+                changed = true;
+                continue;
+            }
+            if (tools.toolAt(chain.activeHotbarSlot) != null) {
+                // Sent while holding a tool - a change off it, or anything else: the server has
+                // never left its own slot, so the chain has to say that slot and its real item.
+                tools.fromServerSlot(chain);
+                changed = true;
+            } else {
+                changed |= toServerItems(forced, chain);
+            }
             keep.add(chain);
         }
         if (!changed) {
@@ -173,6 +354,28 @@ final class BuilderSelectionHandler implements PacketHandler {
         }
         chains.updates = keep.toArray(new SyncInteractionChain[0]);
         return Action.MODIFIED;
+    }
+
+    /**
+     * Records the start of a chain on one of our tools.
+     *
+     * @return whether it is a new press - the button was up - rather than the same one still held
+     */
+    private boolean press(SyncInteractionChain chain) {
+        long now = System.currentTimeMillis();
+        synchronized (presses) {
+            takenChains.put(chain.chainId, chain.interactionType);
+            Press press = presses.computeIfAbsent(chain.interactionType, t -> new Press());
+            boolean held = press.lastSeen != 0
+                    && (!press.released || now - press.lastSeen < REPEAT_GAP_MS);
+            LOG.info("meridian-core: tools {} chain {} state={} - {} (last {} ms ago, released={})",
+                    chain.interactionType, chain.chainId, chain.state, held ? "held, no step" : "press",
+                    press.lastSeen == 0 ? -1 : now - press.lastSeen, press.released);
+            press.chainId = chain.chainId;
+            press.released = chain.state != InteractionState.NotFinished;
+            press.lastSeen = now;
+            return !held;
+        }
     }
 
     /** A hotbar slot change - the chain type whose follow-up carries the client's desync report. */

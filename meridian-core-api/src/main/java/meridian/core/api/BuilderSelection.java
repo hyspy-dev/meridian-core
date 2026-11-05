@@ -92,4 +92,85 @@ public interface BuilderSelection {
 
     /** Calls back whenever the dragged box changes; the latest is also always in {@link #current}. */
     void onSelection(Consumer<Box> listener);
+
+    // ------------------------------------------------------------------
+    // The paste tool, holding a clipboard of ours
+    // ------------------------------------------------------------------
+
+    /** A world axis, for a turn of the paste tool's clipboard. */
+    enum Axis { X, Y, Z }
+
+    /** What the player does with the paste tool while it holds a clipboard of ours. */
+    interface PasteListener {
+
+        /**
+         * The clipboard was turned around {@code axis}, about its anchor, by {@code degrees} - a
+         * multiple of 90, signed the way the client sends it. The client turns what it shows under
+         * the cursor by itself, then waits for the turned clipboard as the server would send it:
+         * answer with {@link #confirmTurn}.
+         */
+        void turned(Axis axis, int degrees);
+
+        /**
+         * The clipboard was mirrored across {@code axis} through its anchor - the paste tool's flip
+         * key, which the client sends as a {@code /flip} command. Answer with {@link #confirmTurn}.
+         * The axis is the server's: the one the player looks along, or the one a typed direction
+         * names.
+         */
+        default void flipped(Axis axis) {}
+
+        /**
+         * The player asked for the prefab list (the paste tool's own key, sent as
+         * {@code /prefab list}). The server's list would offer its prefabs, and only to an editor.
+         */
+        default void listAsked() {}
+
+        /**
+         * The player copied the selection - the selection tool's copy key, or {@code /copy} typed
+         * in chat - while our tools are out. The server would copy into its own clipboard, and only
+         * for an editor; fill the paste tool with {@link #setClipboard} instead.
+         */
+        default void copyAsked() {}
+
+        /** Every turn and flip so far was undone; hand the clipboard back with {@link #setClipboard}. */
+        void reset();
+
+        /** The player pasted: the clipboard's anchor goes at this block. */
+        void pasted(int x, int y, int z);
+    }
+
+    /**
+     * Fills the game's own paste tool with blocks of ours, so the player handles a blueprint with
+     * the real tool - it follows the cursor, turns on the usual keys, and shows every block.
+     *
+     * <p>The client keeps its clipboard from the server's {@code EditorBlocksChange}, sent after a
+     * copy or a cut; ours is handed over the same way, unturned. While it is set, the server's own
+     * clipboard updates are held back so they cannot replace it, and the tool's turns, reset and
+     * paste are reported to {@link #onPaste} and never reach the server - nothing is pasted into
+     * the world. {@code null} or an empty list hands the tool back to the server's clipboard.
+     *
+     * @param blocks positions relative to the clipboard's anchor, with each block's rotation
+     */
+    void setClipboard(List<PastePreview.Change> blocks);
+
+    /**
+     * Answers a turn or a flip the way the server does: the clipboard as it stands after it, sent
+     * with the angles turned so far; the client rebuilds its preview from it. Call from
+     * {@link PasteListener#turned} or {@link PasteListener#flipped}.
+     *
+     * @param turned the clipboard after every turn and flip so far, relative to its anchor
+     */
+    void confirmTurn(List<PastePreview.Change> turned);
+
+    /**
+     * Shows blocks in the spinning preview of the game's prefab list - the {@code
+     * PrefabPreviewComponent} of {@code Pages/PrefabListPage.ui} - as the server does when a
+     * prefab there is clicked. {@code null} or an empty list empties it.
+     *
+     * @param blocks positions relative to the prefab's anchor, with each block's rotation
+     */
+    void showPrefabPreview(List<PastePreview.Change> blocks);
+
+    /** Called for what the player does with the paste tool while our clipboard is in it. */
+    void onPaste(PasteListener listener);
 }
