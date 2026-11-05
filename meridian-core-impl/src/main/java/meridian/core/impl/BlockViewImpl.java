@@ -1,8 +1,11 @@
 package meridian.core.impl;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.UnaryOperator;
 import meridian.core.api.BlockView;
@@ -10,6 +13,8 @@ import meridian.protocol.BlockTextures;
 import meridian.protocol.BlockType;
 import meridian.protocol.ColorLight;
 import meridian.protocol.DrawType;
+import meridian.protocol.RandomRotation;
+import meridian.protocol.VariantRotation;
 
 /**
  * Immutable {@link BlockView} backed by a raw protocol {@link BlockType}.
@@ -39,6 +44,28 @@ final class BlockViewImpl implements BlockView {
     @Override
     public String state() {
         return WorldStateImpl.stateNameForBlock(blockType, id);
+    }
+
+    @Override
+    public Map<String, Integer> states() {
+        if (blockType.states == null || blockType.states.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Integer> out = new LinkedHashMap<>();
+        blockType.states.forEach((name, stateId) -> {
+            if (name != null && stateId != null) {
+                out.put(name, stateId);
+            }
+        });
+        return Collections.unmodifiableMap(out);
+    }
+
+    @Override
+    public boolean rotationMatters() {
+        // A block that cannot be turned stays at zero; one the game turns at random (rocks,
+        // grass) is the same block whichever way it faces.
+        return blockType.variantRotation != VariantRotation.None
+                && blockType.randomRotation == RandomRotation.None;
     }
 
     @Override

@@ -8,6 +8,7 @@ import meridian.api.module.ModuleContext;
 import meridian.api.module.ProxyModule;
 import meridian.api.packet.Direction;
 import meridian.api.packet.HandlerPosition;
+import meridian.core.api.Pages;
 import meridian.core.api.CameraControl;
 import meridian.core.api.Chat;
 import meridian.core.api.ChunkView;
@@ -70,6 +71,15 @@ public class MeridianCoreModule implements ProxyModule {
         // Drawing on the client: the command vocabulary without the packets, so a module can
         // build an overlay or a page and stay protocol-neutral.
         ctx.services().provide(Hud.class, new HudImpl(sessionHolder));
+        // Windows of our own - interactive pages the server never hears about. The C2S side
+        // takes their events and the acknowledgements they earn out of the stream before the
+        // server, which counts acknowledgements strictly, can see one too many.
+        PagesImpl pages = new PagesImpl(sessionHolder);
+        ctx.services().provide(Pages.class, pages);
+        ctx.registerHandler(Direction.C2S, HandlerPosition.EARLY,
+                (direction, session) -> new PagesHandler(pages));
+        ctx.registerHandler(Direction.S2C, HandlerPosition.NORMAL,
+                (direction, session) -> new PagesHandler(pages));
         ctx.registerHandler(Direction.S2C, HandlerPosition.NORMAL,
                 (direction, session) -> new AssetDedupGuard(clientAssets));
 

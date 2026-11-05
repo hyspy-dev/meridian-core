@@ -5,8 +5,8 @@ package meridian.core.impl;
  *
  * <p>A chunk section is 32×32×32 = 32768 blocks. {@code SetChunk.data} holds
  * three concatenated palettes — block ids, filler, rotation — each prefixed by
- * a {@code PaletteType} ordinal byte. Only the first (block ids) is needed
- * here, so decoding stops after it.
+ * a {@code PaletteType} ordinal byte. The block ids and the rotations are kept;
+ * the filler palette between them is read past.
  *
  * <p>A palette is {@code [short LE: entryCount]}, then {@code entryCount}
  * entries mapping an internal id to an external (real) block id, then a
@@ -44,23 +44,70 @@ final class ChunkDecoder {
         if (data == null || data.length < 1) {
             return blocks; // solid-air section
         }
-        int type = data[0] & 0xFF;
-        switch (type) {
-            case 0 -> { /* Empty — all zero */ }
-            case 1 -> decodePalette(data, 1, blocks, 4);
-            case 2 -> decodePalette(data, 1, blocks, 8);
-            case 3 -> decodePalette(data, 1, blocks, 16);
-            default -> throw new IllegalArgumentException("unknown palette type " + type);
-        }
+        decodeTyped(data, 0, blocks);
         return blocks;
     }
 
     /**
-     * Decodes one palette into {@code blocks}.
+     * A section's block ids and which way each block faces.
+     *
+     * @param rotations the server's rotation index per block (0..63: {@code roll*16 + pitch*4 +
+     *                  yaw}, each a quarter turn), or {@code null} when nothing in the section is
+     *                  turned - most sections, and the memory is not worth spending on zeros
+     */
+    record Section(int[] ids, byte[] rotations) {}
+
+    /**
+     * Decodes a section's block ids and its rotations. The rotation palette comes third, after
+     * the filler palette, which is stepped over. A payload that ends before it - nothing turned,
+     * or a server that sends less - gives no rotations rather than an error.
+     */
+    static Section decodeSection(byte[] data) {
+        int[] ids = new int[SECTION_BLOCKS];
+        if (data == null || data.length < 1) {
+            return new Section(ids, null);
+        }
+        int offset = decodeTyped(data, 0, ids);
+        if (offset >= data.length) {
+            return new Section(ids, null);
+        }
+        offset = decodeTyped(data, offset, null);            // filler: read past, not kept
+        if (offset >= data.length || (data[offset] & 0xFF) == 0) {
+            return new Section(ids, null);
+        }
+        int[] rotation = new int[SECTION_BLOCKS];
+        decodeTyped(data, offset, rotation);
+        byte[] rotations = new byte[SECTION_BLOCKS];
+        boolean any = false;
+        for (int i = 0; i < SECTION_BLOCKS; i++) {
+            rotations[i] = (byte) rotation[i];
+            any |= rotation[i] != 0;
+        }
+        return new Section(ids, any ? rotations : null);
+    }
+
+    /**
+     * Decodes the palette whose type byte sits at {@code offset}, into {@code out} when it is not
+     * {@code null}, and returns the offset just past it.
+     */
+    private static int decodeTyped(byte[] data, int offset, int[] out) {
+        int type = data[offset] & 0xFF;
+        return switch (type) {
+            case 0 -> offset + 1;                            // Empty: the type byte, nothing else
+            case 1 -> decodePalette(data, offset + 1, out, 4);
+            case 2 -> decodePalette(data, offset + 1, out, 8);
+            case 3 -> decodePalette(data, offset + 1, out, 16);
+            default -> throw new IllegalArgumentException("unknown palette type " + type);
+        };
+    }
+
+    /**
+     * Decodes one palette into {@code blocks}, or only steps over it when that is {@code null}.
      *
      * @param idBits internal-id width: 4 (HalfByte), 8 (Byte) or 16 (Short)
+     * @return the offset just past the palette
      */
-    private static void decodePalette(byte[] data, int offset, int[] blocks, int idBits) {
+    private static int decodePalette(byte[] data, int offset, int[] blocks, int idBits) {
         int count = u16(data, offset);
         offset += 2;
 
@@ -76,6 +123,10 @@ final class ChunkDecoder {
         }
         offset += count * entrySize;
 
+        int arrayBytes = idBits == 4 ? SECTION_BLOCKS / 2 : idBits == 8 ? SECTION_BLOCKS : SECTION_BLOCKS * 2;
+        if (blocks == null) {
+            return offset + arrayBytes;
+        }
         switch (idBits) {
             case 4 -> {
                 for (int i = 0; i < SECTION_BLOCKS; i++) {
@@ -96,6 +147,7 @@ final class ChunkDecoder {
             }
             default -> throw new IllegalArgumentException("bad idBits " + idBits);
         }
+        return offset + arrayBytes;
     }
 
     /** Unsigned little-endian 16-bit. */
