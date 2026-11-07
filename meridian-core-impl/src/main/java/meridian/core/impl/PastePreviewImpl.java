@@ -27,7 +27,8 @@ final class PastePreviewImpl implements PastePreview {
     }
 
     @Override
-    public void show(float anchorX, float anchorY, float anchorZ, List<Change> blocks) {
+    public void show(float anchorX, float anchorY, float anchorZ, List<Change> blocks,
+                     List<FluidChange> fluids) {
         ProxySession live = session.get().orElse(null);
         if (live == null) {
             return;
@@ -40,6 +41,16 @@ final class PastePreviewImpl implements PastePreview {
         ShowTriggerVolumePastePrefabPreview pkt = new ShowTriggerVolumePastePrefabPreview();
         pkt.position = new Vector3f(anchorX, anchorY, anchorZ);
         pkt.blocksChange = changes;
+        if (fluids != null && !fluids.isEmpty()) {
+            meridian.protocol.packets.interface_.FluidChange[] wet =
+                    new meridian.protocol.packets.interface_.FluidChange[fluids.size()];
+            for (int i = 0; i < wet.length; i++) {
+                FluidChange f = fluids.get(i);
+                wet[i] = new meridian.protocol.packets.interface_.FluidChange(
+                        f.dx(), f.dy(), f.dz(), f.fluidId(), (byte) f.level());
+            }
+            pkt.fluidsChange = wet;
+        }
         pkt.biomeTint = BIOME_TINT;
         pkt.waterTint = WATER_TINT;
         live.sendToClient(pkt);

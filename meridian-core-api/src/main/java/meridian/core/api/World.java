@@ -40,6 +40,24 @@ public interface World {
      */
     String fluidAt(int x, int y, int z);
 
+    /**
+     * The fluid at a world position with its id and level, or {@code null} when there is none
+     * (or the section is not loaded) - what copying a fluid needs, where {@link #fluidAt} only
+     * names it. A source and its flow are different fluids ({@code Water_Source} and
+     * {@code Water}); the level is the server's, kept as it sent it.
+     */
+    default FluidCell fluidCellAt(int x, int y, int z) {
+        return null;
+    }
+
+    /**
+     * The id this connection numbers a fluid by, from its name ({@code "Water_Source"}), or
+     * {@code -1} when the catalog has no such fluid (or has not arrived yet).
+     */
+    default int fluidId(String name) {
+        return -1;
+    }
+
     /** The local player, or empty until a client session is live. */
     Optional<Player> player();
 }

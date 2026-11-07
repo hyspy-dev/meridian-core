@@ -41,12 +41,22 @@ public final class WorldImpl implements World {
         BlockType blockType = id > 0 ? worldState.blockTypeById(id) : null;
         BlockView type = blockType == null ? null : new BlockViewImpl(id, blockType);
         return new BlockImpl(x, y, z, id, type, id > 0 ? chunks.rotationAt(x, y, z) : 0,
-                interactions);
+                id > 0 ? chunks.fillerAt(x, y, z) : 0, interactions);
     }
 
     @Override
     public String fluidAt(int x, int y, int z) {
         return chunks.fluidNameAt(x, y, z);
+    }
+
+    @Override
+    public meridian.core.api.FluidCell fluidCellAt(int x, int y, int z) {
+        return chunks.fluidCellAt(x, y, z);
+    }
+
+    @Override
+    public int fluidId(String name) {
+        return chunks.fluidIdByName(name);
     }
 
     @Override

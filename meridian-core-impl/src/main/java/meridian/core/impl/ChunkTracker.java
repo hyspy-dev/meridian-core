@@ -4,8 +4,11 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import meridian.protocol.packets.world.ServerSetBlock;
 import meridian.protocol.packets.world.ServerSetBlocks;
+import meridian.protocol.packets.world.ServerSetFluid;
+import meridian.protocol.packets.world.ServerSetFluids;
 import meridian.protocol.packets.world.SetBlockCmd;
 import meridian.protocol.packets.world.SetChunk;
+import meridian.protocol.packets.world.SetFluidCmd;
 import meridian.protocol.packets.world.SetFluids;
 import meridian.protocol.packets.world.UnloadChunk;
 import org.slf4j.Logger;
@@ -43,6 +46,12 @@ public final class ChunkTracker {
      */
     private final Map<SectionKey, byte[]> rotations = new ConcurrentHashMap<>();
     /**
+     * Section coords &rarr; per block, the offset back to the cell a bigger block stands on
+     * ({@code int[32768]}, see {@code Block.filler()}), only for sections where some block reaches
+     * past its own cell; an absent entry reads as all zero.
+     */
+    private final Map<SectionKey, int[]> fillers = new ConcurrentHashMap<>();
+    /**
      * The same, for fluids - water and lava live here, not in the block layer.
      *
      * <p>The block array reads air where a fluid is; a player standing "on the surface" of a
@@ -50,6 +59,11 @@ public final class ChunkTracker {
      * separate palette, so they are tracked separately and answered by {@link #fluidNameAt}.
      */
     private final Map<SectionKey, int[]> fluidSections = new ConcurrentHashMap<>();
+    /**
+     * Section coords &rarr; fluid levels, packed a nibble a cell as the server sends them (see
+     * {@link ChunkDecoder.Fluids}), only for sections where some level is not nought.
+     */
+    private final Map<SectionKey, byte[]> fluidLevels = new ConcurrentHashMap<>();
     /** Fluid id &rarr; name (Water, Lava, ...), from the fluid catalog. */
     private final Map<Integer, String> fluidNames = new ConcurrentHashMap<>();
 
@@ -72,6 +86,11 @@ public final class ChunkTracker {
             } else {
                 rotations.remove(key);
             }
+            if (section.fillers() != null) {
+                fillers.put(key, section.fillers());
+            } else {
+                fillers.remove(key);
+            }
         } catch (RuntimeException e) {
             log.warn("meridian-core: failed to decode chunk section ({},{},{}): {}",
                     packet.x, packet.y, packet.z, e.toString());
@@ -85,6 +104,7 @@ public final class ChunkTracker {
             int index = indexBlock(packet.x, packet.y, packet.z);
             section[index] = packet.blockId;
             setRotation(key, index, packet.rotation);
+            setFiller(key, index, packet.filler);
         }
     }
 
@@ -102,6 +122,7 @@ public final class ChunkTracker {
             if (index < section.length) {
                 section[index] = cmd.blockId;
                 setRotation(key, index, cmd.rotation);
+                setFiller(key, index, cmd.filler);
             }
         }
     }
@@ -115,13 +136,70 @@ public final class ChunkTracker {
         }
     }
 
+    /** Records one cell's filler offset, making room only once some block reaches past its cell. */
+    private void setFiller(SectionKey key, int index, short filler) {
+        int value = filler & 0xFFFF;
+        int[] section = value == 0 ? fillers.get(key)
+                : fillers.computeIfAbsent(key, k -> new int[ChunkDecoder.SECTION_BLOCKS]);
+        if (section != null) {
+            section[index] = value;
+        }
+    }
+
     void onSetFluids(SetFluids packet) {
         try {
-            fluidSections.put(new SectionKey(packet.x, packet.y, packet.z),
-                    ChunkDecoder.decodeFluidIds(packet.data));
+            SectionKey key = new SectionKey(packet.x, packet.y, packet.z);
+            ChunkDecoder.Fluids fluids = ChunkDecoder.decodeFluids(packet.data);
+            fluidSections.put(key, fluids.ids());
+            if (fluids.levels() != null) {
+                fluidLevels.put(key, fluids.levels());
+            } else {
+                fluidLevels.remove(key);
+            }
         } catch (RuntimeException e) {
             log.warn("meridian-core: failed to decode fluid section ({},{},{}): {}",
                     packet.x, packet.y, packet.z, e.toString());
+        }
+    }
+
+    /** One fluid cell changed; {@code ServerSetFluid.x/y/z} are block coordinates. */
+    void onServerSetFluid(ServerSetFluid packet) {
+        setFluid(new SectionKey(packet.x >> 5, packet.y >> 5, packet.z >> 5),
+                indexBlock(packet.x, packet.y, packet.z), packet.fluidId, packet.fluidLevel);
+    }
+
+    /** Several fluid cells of one section changed; its x/y/z are section coordinates. */
+    void onServerSetFluids(ServerSetFluids packet) {
+        if (packet.cmds == null) {
+            return;
+        }
+        SectionKey key = new SectionKey(packet.x, packet.y, packet.z);
+        for (SetFluidCmd cmd : packet.cmds) {
+            int index = cmd.index & 0xFFFF;
+            if (index < ChunkDecoder.SECTION_BLOCKS) {
+                setFluid(key, index, cmd.fluidId, cmd.fluidLevel);
+            }
+        }
+    }
+
+    /**
+     * Records one fluid cell. A section whose blocks are loaded but whose fluids never came is a
+     * dry one and gets its fluid layer here; one not loaded at all is left alone, as unknown.
+     */
+    private void setFluid(SectionKey key, int index, int fluidId, byte level) {
+        int[] ids = fluidSections.get(key);
+        if (ids == null) {
+            if (!sections.containsKey(key)) {
+                return;
+            }
+            ids = fluidSections.computeIfAbsent(key, k -> new int[ChunkDecoder.SECTION_BLOCKS]);
+        }
+        ids[index] = fluidId;
+        int value = level & 0x0F;
+        byte[] levels = value == 0 ? fluidLevels.get(key)
+                : fluidLevels.computeIfAbsent(key, k -> new byte[ChunkDecoder.LEVEL_BYTES]);
+        if (levels != null) {
+            ChunkDecoder.setLevel(levels, index, value);
         }
     }
 
@@ -138,7 +216,9 @@ public final class ChunkTracker {
     private void unloadColumn(int chunkX, int chunkZ) {
         sections.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
         rotations.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
+        fillers.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
         fluidSections.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
+        fluidLevels.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
     }
 
     // ------------------------------------------------------------------
@@ -161,6 +241,46 @@ public final class ChunkTracker {
     public int rotationAt(int x, int y, int z) {
         byte[] section = rotations.get(new SectionKey(x >> 5, y >> 5, z >> 5));
         return section == null ? 0 : section[indexBlock(x, y, z)] & 0xFF;
+    }
+
+    /**
+     * The filler offset of the cell at a world position (see {@code Block.filler()}), or {@code 0}
+     * when it is a block's own cell or its section is not loaded.
+     */
+    public int fillerAt(int x, int y, int z) {
+        int[] section = fillers.get(new SectionKey(x >> 5, y >> 5, z >> 5));
+        return section == null ? 0 : section[indexBlock(x, y, z)];
+    }
+
+    /**
+     * The fluid at a world position with its id and level, or {@code null} when there is none or
+     * its section's fluids have not arrived.
+     */
+    public meridian.core.api.FluidCell fluidCellAt(int x, int y, int z) {
+        SectionKey key = new SectionKey(x >> 5, y >> 5, z >> 5);
+        int[] section = fluidSections.get(key);
+        if (section == null) {
+            return null;
+        }
+        int index = indexBlock(x, y, z);
+        int id = section[index];
+        if (id <= 0) {
+            return null;
+        }
+        return new meridian.core.api.FluidCell(id, fluidNames.getOrDefault(id, "Fluid"),
+                ChunkDecoder.levelOf(fluidLevels.get(key), index));
+    }
+
+    /** The id of a fluid by name, or {@code -1} when the catalog has no such fluid. */
+    public int fluidIdByName(String name) {
+        if (name != null) {
+            for (Map.Entry<Integer, String> e : fluidNames.entrySet()) {
+                if (name.equals(e.getValue())) {
+                    return e.getKey();
+                }
+            }
+        }
+        return -1;
     }
 
     /**

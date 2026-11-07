@@ -151,7 +151,17 @@ public interface BuilderSelection {
      *
      * @param blocks positions relative to the clipboard's anchor, with each block's rotation
      */
-    void setClipboard(List<PastePreview.Change> blocks);
+    default void setClipboard(List<PastePreview.Change> blocks) {
+        setClipboard(blocks, List.of());
+    }
+
+    /**
+     * {@link #setClipboard(List)} with fluids as well - water and lava the paste tool shows
+     * beside the blocks. An empty clipboard is one with no blocks; fluids alone do not make one.
+     *
+     * @param fluids fluid cells relative to the same anchor; {@code null} for none
+     */
+    void setClipboard(List<PastePreview.Change> blocks, List<PastePreview.FluidChange> fluids);
 
     /**
      * Answers a turn or a flip the way the server does: the clipboard as it stands after it, sent
@@ -160,7 +170,12 @@ public interface BuilderSelection {
      *
      * @param turned the clipboard after every turn and flip so far, relative to its anchor
      */
-    void confirmTurn(List<PastePreview.Change> turned);
+    default void confirmTurn(List<PastePreview.Change> turned) {
+        confirmTurn(turned, List.of());
+    }
+
+    /** {@link #confirmTurn(List)} with the clipboard's fluids, turned the same way. */
+    void confirmTurn(List<PastePreview.Change> turned, List<PastePreview.FluidChange> fluids);
 
     /**
      * Shows blocks in the spinning preview of the game's prefab list - the {@code
