@@ -71,7 +71,12 @@ public final class WorldStateImpl implements WorldState {
             // Freshly-deserialised POJOs — store directly, nobody else mutates them.
             serverTruth.putAll(update.blockTypes);
         }
-        maxId = Math.max(maxId, update.maxId);
+        // The packet no longer carries maxId (build 272); the highest id seen stands in for the log.
+        if (update.blockTypes != null) {
+            for (Integer id : update.blockTypes.keySet()) {
+                maxId = Math.max(maxId, id);
+            }
+        }
         log.info("meridian-core: observed {} block type(s), maxId={}",
                 update.blockTypes != null ? update.blockTypes.size() : 0, maxId);
         // Re-apply standing overrides to freshly-arrived ids (coalesced).
@@ -270,7 +275,7 @@ public final class WorldStateImpl implements WorldState {
         if (changed.isEmpty()) return;
 
         UpdateBlockTypes packet = new UpdateBlockTypes(
-                UpdateType.AddOrUpdate, maxId, changed, true, true, true, true);
+                UpdateType.AddOrUpdate, changed, true, true, true, true);
         s.sendToClient(packet);
         log.info("meridian-core: emitted one UpdateBlockTypes(AddOrUpdate) for {} block id(s)", changed.size());
     }

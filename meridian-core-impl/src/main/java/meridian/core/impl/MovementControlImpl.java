@@ -166,7 +166,7 @@ final class MovementControlImpl {
                     | ModelTransformFields.LookOrientationPitch
                     | ModelTransformFields.LookOrientationRoll;
         }
-        s.sendToClient(new ClientTeleport(id, ignored, ModelTransformFields.None, transform, true));
+        s.sendToClient(new ClientTeleport(id, ignored, ModelTransformFields.None, transform, true, false));
     }
 
     /** A forged C2S {@code ClientMovement} carrying just the absolute (+ cached facing). */
