@@ -5,8 +5,7 @@ package meridian.core.impl;
  *
  * <p>A chunk section is 32×32×32 = 32768 blocks. {@code SetChunk.data} holds
  * three concatenated palettes — block ids, filler, rotation — each prefixed by
- * a {@code PaletteType} ordinal byte. The block ids and the rotations are kept;
- * the filler palette between them is read past.
+ * a {@code PaletteType} ordinal byte. All three are kept.
  *
  * <p>A palette is {@code [short LE: entryCount]}, then {@code entryCount}
  * entries mapping an internal id to an external (real) block id, then a
@@ -39,6 +38,48 @@ final class ChunkDecoder {
         return decodeBlockIds(data);
     }
 
+    /** Bytes of a fluid section's level array: a nibble a cell. */
+    static final int LEVEL_BYTES = SECTION_BLOCKS / 2;
+
+    /**
+     * A fluid section: the fluid id per cell, and the levels as the server packs them - a nibble a
+     * cell, the even cell in the <b>low</b> half (the reverse of a half-byte palette), or
+     * {@code null} when every level is nought.
+     */
+    record Fluids(int[] ids, byte[] levels) {}
+
+    /**
+     * Decodes a {@code SetFluids.data} section whole: the fluid palette, then a flag byte, then
+     * {@link #LEVEL_BYTES} of levels when the flag is set (the server's
+     * {@code FluidSection.serializeForPacket}).
+     */
+    static Fluids decodeFluids(byte[] data) {
+        int[] ids = new int[SECTION_BLOCKS];
+        if (data == null || data.length < 1) {
+            return new Fluids(ids, null);
+        }
+        int offset = decodeTyped(data, 0, ids);
+        if (offset >= data.length || data[offset] == 0 || offset + 1 + LEVEL_BYTES > data.length) {
+            return new Fluids(ids, null);
+        }
+        byte[] levels = new byte[LEVEL_BYTES];
+        System.arraycopy(data, offset + 1, levels, 0, LEVEL_BYTES);
+        return new Fluids(ids, levels);
+    }
+
+    /** One cell's level out of a packed level array ({@code null} reads as nought). */
+    static int levelOf(byte[] levels, int index) {
+        return levels == null ? 0 : (levels[index >> 1] >> ((index & 1) * 4)) & 0x0F;
+    }
+
+    /** Sets one cell's level in a packed level array. */
+    static void setLevel(byte[] levels, int index, int level) {
+        int b = levels[index >> 1];
+        levels[index >> 1] = (byte) ((index & 1) == 0
+                ? (b & 0xF0) | (level & 0x0F)
+                : (b & 0x0F) | ((level & 0x0F) << 4));
+    }
+
     static int[] decodeBlockIds(byte[] data) {
         int[] blocks = new int[SECTION_BLOCKS];
         if (data == null || data.length < 1) {
@@ -54,26 +95,33 @@ final class ChunkDecoder {
      * @param rotations the server's rotation index per block (0..63: {@code roll*16 + pitch*4 +
      *                  yaw}, each a quarter turn), or {@code null} when nothing in the section is
      *                  turned - most sections, and the memory is not worth spending on zeros
+     * @param fillers   per block, the offset back to the cell a bigger block stands on ({@code 0}
+     *                  for a block's own cell - see {@code Block.filler()}), or {@code null} when
+     *                  no block in the section reaches past its own cell
      */
-    record Section(int[] ids, byte[] rotations) {}
+    record Section(int[] ids, byte[] rotations, int[] fillers) {}
 
     /**
-     * Decodes a section's block ids and its rotations. The rotation palette comes third, after
-     * the filler palette, which is stepped over. A payload that ends before it - nothing turned,
-     * or a server that sends less - gives no rotations rather than an error.
+     * Decodes a section's block ids, its fillers and its rotations, the three palettes in that
+     * order. A payload that ends early - nothing filled or turned, or a server that sends less -
+     * gives none of what is missing rather than an error.
      */
     static Section decodeSection(byte[] data) {
         int[] ids = new int[SECTION_BLOCKS];
         if (data == null || data.length < 1) {
-            return new Section(ids, null);
+            return new Section(ids, null, null);
         }
         int offset = decodeTyped(data, 0, ids);
         if (offset >= data.length) {
-            return new Section(ids, null);
+            return new Section(ids, null, null);
         }
-        offset = decodeTyped(data, offset, null);            // filler: read past, not kept
+        int[] fillers = (data[offset] & 0xFF) == 0 ? null : new int[SECTION_BLOCKS];
+        offset = decodeTyped(data, offset, fillers);
+        if (fillers != null && allZero(fillers)) {
+            fillers = null;
+        }
         if (offset >= data.length || (data[offset] & 0xFF) == 0) {
-            return new Section(ids, null);
+            return new Section(ids, null, fillers);
         }
         int[] rotation = new int[SECTION_BLOCKS];
         decodeTyped(data, offset, rotation);
@@ -83,7 +131,16 @@ final class ChunkDecoder {
             rotations[i] = (byte) rotation[i];
             any |= rotation[i] != 0;
         }
-        return new Section(ids, any ? rotations : null);
+        return new Section(ids, any ? rotations : null, fillers);
+    }
+
+    private static boolean allZero(int[] values) {
+        for (int v : values) {
+            if (v != 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

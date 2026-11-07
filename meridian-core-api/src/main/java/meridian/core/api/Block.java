@@ -43,6 +43,42 @@ public interface Block {
     boolean isAir();
 
     /**
+     * Whether this cell is the block's own, or one a bigger block only reaches into.
+     *
+     * <p>A block wider than one cell - a door, a bed, a two-cell chest - stands on one cell and
+     * fills the others: each of those reports the same block type, plus this offset back to the
+     * cell it stands on. {@code 0} means the cell is the block's own. Otherwise the offset is the
+     * server's packing, five signed bits an axis: {@code x | z << 5 | y << 10}, and the block's
+     * own cell is this one minus it (see {@link #base()}).
+     *
+     * <p>Whoever copies blocks keeps only the own cells, as the server does: placing the block on
+     * its own cell brings the filled ones back, and placing it on a filled one too gives two.
+     * The prefab format stores the same number, under {@code filler}.
+     *
+     * @return the packed offset, or {@code 0} for a block's own cell, air, or a core too old to know
+     */
+    default int filler() {
+        return 0;
+    }
+
+    /** Whether this cell is only filled by a bigger block whose own cell is elsewhere. */
+    default boolean isFiller() {
+        return filler() != 0;
+    }
+
+    /** The cell this block stands on: this one, unless it {@linkplain #isFiller() only fills it}. */
+    default BlockPos base() {
+        int f = filler();
+        return new BlockPos(x() - fillerAxis(f), y() - fillerAxis(f >> 10), z() - fillerAxis(f >> 5));
+    }
+
+    /** One axis of a packed filler offset: the low five bits, signed. */
+    private static int fillerAxis(int bits) {
+        int v = bits & 31;
+        return (v & 16) != 0 ? v - 32 : v;
+    }
+
+    /**
      * Forges a {@code Use} interaction on this block — e.g. harvesting a crop.
      *
      * @return a future completing when the forged chain has played out

@@ -74,6 +74,8 @@ final class BuilderSelectionImpl implements BuilderSelection {
     private final List<PasteListener> pasteListeners = new ArrayList<>();
     /** The blocks the paste tool holds instead of the server's clipboard; null when it is the server's. */
     private volatile List<PastePreview.Change> clipboard;
+    /** The fluids that go with {@link #clipboard}, unturned; empty when it has none. */
+    private volatile List<PastePreview.FluidChange> clipboardFluids = List.of();
     /** Degrees the clipboard is turned around each axis, 0..359, kept as the server keeps them. */
     private volatile int turnX, turnY, turnZ;
 
@@ -491,18 +493,19 @@ final class BuilderSelectionImpl implements BuilderSelection {
     // ------------------------------------------------------------------
 
     @Override
-    public void setClipboard(List<PastePreview.Change> blocks) {
+    public void setClipboard(List<PastePreview.Change> blocks, List<PastePreview.FluidChange> fluids) {
         clipboard = blocks == null || blocks.isEmpty() ? null : List.copyOf(blocks);
+        clipboardFluids = clipboard == null || fluids == null ? List.of() : List.copyOf(fluids);
         turnX = turnY = turnZ = 0;
         if (clipboard != null) {
-            sendClipboard(clipboard);
+            sendClipboard(clipboard, clipboardFluids);
         }
     }
 
     @Override
-    public void confirmTurn(List<PastePreview.Change> turned) {
+    public void confirmTurn(List<PastePreview.Change> turned, List<PastePreview.FluidChange> fluids) {
         if (clipboard != null && turned != null) {
-            sendClipboard(turned);
+            sendClipboard(turned, fluids == null ? List.of() : fluids);
         }
     }
 
@@ -551,14 +554,14 @@ final class BuilderSelectionImpl implements BuilderSelection {
      * paste tool set to {@code RotateBlock: All}, where the client spins the preview itself; the
      * paste tool's default is {@code NonUniform}, and there the client waits for the turned blocks.
      */
-    private void sendClipboard(List<PastePreview.Change> blocks) {
+    private void sendClipboard(List<PastePreview.Change> blocks, List<PastePreview.FluidChange> fluids) {
         ProxySession live = session.get().orElse(null);
         if (live == null) {
             return;
         }
         EditorBlocksChange pkt = new EditorBlocksChange();
         pkt.blocksChange = toBlockChanges(blocks);
-        pkt.fluidsChange = new FluidChange[0];
+        pkt.fluidsChange = toFluidChanges(fluids);
         pkt.advancedPreview = true;
         pkt.blocksCount = blocks.size();
         pkt.skipPreviewRebuild = false;
@@ -573,6 +576,15 @@ final class BuilderSelectionImpl implements BuilderSelection {
         for (int i = 0; i < changes.length; i++) {
             PastePreview.Change c = blocks.get(i);
             changes[i] = new BlockChange(c.dx(), c.dy(), c.dz(), c.blockId(), (byte) c.rotation());
+        }
+        return changes;
+    }
+
+    private static FluidChange[] toFluidChanges(List<PastePreview.FluidChange> fluids) {
+        FluidChange[] changes = new FluidChange[fluids.size()];
+        for (int i = 0; i < changes.length; i++) {
+            PastePreview.FluidChange f = fluids.get(i);
+            changes[i] = new FluidChange(f.dx(), f.dy(), f.dz(), f.fluidId(), (byte) f.level());
         }
         return changes;
     }
@@ -601,7 +613,7 @@ final class BuilderSelectionImpl implements BuilderSelection {
         }
         BuilderToolSelectionToolReplyWithClipboard reply = new BuilderToolSelectionToolReplyWithClipboard();
         reply.blocksChange = toBlockChanges(blocks);
-        reply.fluidsChange = new FluidChange[0];
+        reply.fluidsChange = toFluidChanges(clipboardFluids);
         reply.entityChanges = new ClipboardEntityChange[0];
         live.sendToClient(reply);
     }

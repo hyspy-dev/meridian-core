@@ -17,8 +17,9 @@ import meridian.protocol.packets.world.UnloadChunks;
 /**
  * MONITOR-position S2C handler feeding {@link ChunkTracker} the world packets
  * ({@code SetChunk}, {@code ServerSetBlock}, {@code ServerSetBlocks},
- * {@code UnloadChunk}), and the fluid layer ({@code SetFluids} + the {@code UpdateFluids}
- * catalog) so water and lava can be told apart from air. Observe-only.
+ * {@code UnloadChunk}), and the fluid layer ({@code SetFluids}, its edits {@code ServerSetFluid} /
+ * {@code ServerSetFluids}, and the {@code UpdateFluids} catalog) so water and lava can be told
+ * apart from air. Observe-only.
  */
 final class ChunkObserver implements PacketHandler {
     private final ChunkTracker tracker;
@@ -37,6 +38,10 @@ final class ChunkObserver implements PacketHandler {
             tracker.onServerSetBlocks(setBlocks);
         } else if (packet instanceof SetFluids fluids) {
             tracker.onSetFluids(fluids);
+        } else if (packet instanceof meridian.protocol.packets.world.ServerSetFluid fluid) {
+            tracker.onServerSetFluid(fluid);
+        } else if (packet instanceof meridian.protocol.packets.world.ServerSetFluids fluids) {
+            tracker.onServerSetFluids(fluids);
         } else if (packet instanceof UpdateFluids catalog) {
             tracker.onFluidCatalog(named(catalog));
         } else if (packet instanceof UnloadChunk unload) {

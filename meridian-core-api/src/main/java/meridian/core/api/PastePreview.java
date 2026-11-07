@@ -19,6 +19,9 @@ public interface PastePreview {
     /** One block of the ghost: where it sits relative to the anchor, what it is, how it is turned. */
     record Change(int dx, int dy, int dz, int blockId, int rotation) {}
 
+    /** One fluid cell of a clipboard: where it sits relative to the anchor, which fluid, how high. */
+    record FluidChange(int dx, int dy, int dz, int fluidId, int level) {}
+
     /**
      * Shows the ghost, replacing any already up.
      *
@@ -27,7 +30,12 @@ public interface PastePreview {
      *
      * @param anchorX the world point the offsets are measured from
      */
-    void show(float anchorX, float anchorY, float anchorZ, List<Change> blocks);
+    default void show(float anchorX, float anchorY, float anchorZ, List<Change> blocks) {
+        show(anchorX, anchorY, anchorZ, blocks, List.of());
+    }
+
+    /** {@link #show(float, float, float, List)} with water and lava beside the blocks. */
+    void show(float anchorX, float anchorY, float anchorZ, List<Change> blocks, List<FluidChange> fluids);
 
     /** Takes the ghost down. Harmless when none is up. */
     void hide();
