@@ -18,9 +18,10 @@ final class BlockImpl implements Block {
     private final int blockId;
     private final BlockView type;
     private final int rotation;
+    private final int filler;
     private final InteractionControl interactions;
 
-    BlockImpl(int x, int y, int z, int blockId, BlockView type, int rotation,
+    BlockImpl(int x, int y, int z, int blockId, BlockView type, int rotation, int filler,
               InteractionControl interactions) {
         this.x = x;
         this.y = y;
@@ -28,7 +29,13 @@ final class BlockImpl implements Block {
         this.blockId = blockId;
         this.type = type;
         this.rotation = rotation;
+        this.filler = filler;
         this.interactions = interactions;
+    }
+
+    @Override
+    public int filler() {
+        return filler;
     }
 
     @Override
