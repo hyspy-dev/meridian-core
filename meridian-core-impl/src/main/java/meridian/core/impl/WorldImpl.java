@@ -39,7 +39,7 @@ public final class WorldImpl implements World {
     public Block blockAt(int x, int y, int z) {
         int id = chunks.blockIdAt(x, y, z);
         BlockType blockType = id > 0 ? worldState.blockTypeById(id) : null;
-        BlockView type = blockType == null ? null : new BlockViewImpl(id, blockType);
+        BlockView type = blockType == null ? null : new BlockViewImpl(id, blockType, worldState.itemCategories());
         return new BlockImpl(x, y, z, id, type, id > 0 ? chunks.rotationAt(x, y, z) : 0,
                 id > 0 ? chunks.fillerAt(x, y, z) : 0, interactions);
     }

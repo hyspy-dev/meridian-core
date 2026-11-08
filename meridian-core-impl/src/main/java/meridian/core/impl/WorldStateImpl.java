@@ -44,6 +44,19 @@ import org.slf4j.LoggerFactory;
  * {@link #ghostBlock} need chunk tracking and are not implemented yet.
  */
 public final class WorldStateImpl implements WorldState {
+    /** An item id's categories, from the server's item catalog - what a block view lists. */
+    private volatile java.util.function.Function<String, java.util.List<String>> itemCategories =
+            BlockViewImpl.NO_ITEMS;
+
+    /** Where a block's item categories come from: the item catalog. */
+    void itemCategories(java.util.function.Function<String, java.util.List<String>> lookup) {
+        itemCategories = lookup == null ? BlockViewImpl.NO_ITEMS : lookup;
+    }
+
+    java.util.function.Function<String, java.util.List<String>> itemCategories() {
+        return itemCategories;
+    }
+
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
 
     /** How long override changes are gathered before a single emit. */
@@ -170,7 +183,7 @@ public final class WorldStateImpl implements WorldState {
             // Read-only view — BlockViewImpl.with* clones before mutating, so
             // wrapping server-truth directly here is safe and avoids a deep clone
             // per block on every call.
-            out.add(new BlockViewImpl(e.getKey(), e.getValue()));
+            out.add(new BlockViewImpl(e.getKey(), e.getValue(), itemCategories));
         }
         return List.copyOf(out);
     }
@@ -214,7 +227,7 @@ public final class WorldStateImpl implements WorldState {
      * {@code truth}: the view clones before it changes anything.
      */
     BlockType clientView(int id, BlockType truth) {
-        BlockView view = new BlockViewImpl(id, truth);
+        BlockView view = new BlockViewImpl(id, truth, itemCategories);
         List<UnaryOperator<BlockView>> active;
         synchronized (rules) {
             active = new ArrayList<>(rules.values());

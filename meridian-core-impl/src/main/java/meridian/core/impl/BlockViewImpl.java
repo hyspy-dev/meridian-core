@@ -23,12 +23,26 @@ import meridian.protocol.VariantRotation;
  * onto the neutral API. A renamed protocol field is fixed here and nowhere else.
  */
 final class BlockViewImpl implements BlockView {
+    /** An item id's categories, from the server's item catalog - nothing until one is known. */
+    static final java.util.function.Function<String, List<String>> NO_ITEMS = item -> List.of();
+
     private final int id;
     private final BlockType blockType;
+    private final java.util.function.Function<String, List<String>> categoriesOf;
 
     BlockViewImpl(int id, BlockType blockType) {
+        this(id, blockType, NO_ITEMS);
+    }
+
+    BlockViewImpl(int id, BlockType blockType, java.util.function.Function<String, List<String>> categoriesOf) {
         this.id = id;
         this.blockType = blockType;
+        this.categoriesOf = categoriesOf == null ? NO_ITEMS : categoriesOf;
+    }
+
+    @Override
+    public List<String> categories() {
+        return blockType.item == null ? List.of() : categoriesOf.apply(blockType.item);
     }
 
     @Override
@@ -119,7 +133,7 @@ final class BlockViewImpl implements BlockView {
                 faces.right = remapped(remap, faces.right);
             }
         }
-        return new BlockViewImpl(id, copy);
+        return new BlockViewImpl(id, copy, categoriesOf);
     }
 
     private static String remapped(UnaryOperator<String> remap, String path) {
@@ -142,7 +156,7 @@ final class BlockViewImpl implements BlockView {
         // Vanilla pairs the blended modes with the blending flag and the others without it.
         copy.requiresAlphaBlending = opacity == BlockView.Opacity.TRANSPARENT
                 || opacity == BlockView.Opacity.SEMITRANSPARENT;
-        return new BlockViewImpl(id, copy);
+        return new BlockViewImpl(id, copy, categoriesOf);
     }
 
     @Override
@@ -151,7 +165,7 @@ final class BlockViewImpl implements BlockView {
         if (!visible) {
             copy.drawType = DrawType.Empty;
         }
-        return new BlockViewImpl(id, copy);
+        return new BlockViewImpl(id, copy, categoriesOf);
     }
 
     @Override
@@ -160,21 +174,21 @@ final class BlockViewImpl implements BlockView {
         if (!solid) {
             copy.hitbox = 0;
         }
-        return new BlockViewImpl(id, copy);
+        return new BlockViewImpl(id, copy, categoriesOf);
     }
 
     @Override
     public BlockView withLight(int radius, int red, int green, int blue) {
         BlockType copy = blockType.clone();
         copy.light = new ColorLight((byte) radius, (byte) red, (byte) green, (byte) blue);
-        return new BlockViewImpl(id, copy);
+        return new BlockViewImpl(id, copy, categoriesOf);
     }
 
     @Override
     public BlockView withoutLight() {
         BlockType copy = blockType.clone();
         copy.light = null;
-        return new BlockViewImpl(id, copy);
+        return new BlockViewImpl(id, copy, categoriesOf);
     }
 
     /** The underlying (possibly transformed) protocol block type. */

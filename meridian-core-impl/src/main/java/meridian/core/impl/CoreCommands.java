@@ -30,7 +30,7 @@ final class CoreCommands {
 
     static final String USAGE = "pos | block <x y z> | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
             + "use|plant|water <x y z> | hit|dig <x y z> [times] | place <x y z> [face] [orient] | "
-            + "entities [range] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>]";
+            + "entities [range] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | assets | asset <path>";
 
     /** Where the eyes are above the feet - {@code PlayerImpl}'s raycast origin. */
     private static final double EYE_HEIGHT = 1.6;
@@ -64,6 +64,8 @@ final class CoreCommands {
             case "look" -> CompletableFuture.completedFuture(look());
             case "inv" -> CompletableFuture.completedFuture(inventory());
             case "stats" -> CompletableFuture.completedFuture(stats());
+            case "assets" -> CompletableFuture.completedFuture(assets());
+            case "asset" -> CompletableFuture.completedFuture(asset(args.get(1)));
             case "chain" -> CompletableFuture.completedFuture(chain(Integer.parseInt(args.get(1))));
             case "face" -> CompletableFuture.completedFuture(args.size() == 2
                     ? faceEntity(Integer.parseInt(args.get(1))) : face(at(args, 1)));
@@ -173,6 +175,41 @@ final class CoreCommands {
         return java.time.Duration.ofNanos((long) (Double.parseDouble(args.get(at + 1)) * 1_000_000_000L));
     }
 
+    /** Where the game's own files come from: the installation, its version. */
+    private Map<String, Object> assets() {
+        meridian.core.api.GameAssets a = ctx.services().get(meridian.core.api.GameAssets.class)
+                .orElseThrow(() -> new IllegalStateException("no GameAssets service"));
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("available", a.available());
+        a.gameVersion().ifPresent(v -> out.put("version", v));
+        a.gameDirectory().ifPresent(d -> out.put("gameDirectory", d.toString()));
+        return out;
+    }
+
+    /** One of the game's files: where it comes from, how big, its sha256 - never the file itself. */
+    private Map<String, Object> asset(String path) {
+        meridian.core.api.GameAssets a = ctx.services().get(meridian.core.api.GameAssets.class)
+                .orElseThrow(() -> new IllegalStateException("no GameAssets service"));
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("path", path);
+        out.put("source", a.source(path).name());
+        a.read(path).ifPresent(bytes -> {
+            out.put("size", bytes.length);
+            try {
+                out.put("sha256", java.util.HexFormat.of().formatHex(
+                        java.security.MessageDigest.getInstance("SHA-256").digest(bytes)));
+            } catch (java.security.NoSuchAlgorithmException ignored) {
+                // every JVM has SHA-256
+            }
+        });
+        if (path.endsWith("/")) {
+            List<String> under = a.list(path);
+            out.put("count", under.size());
+            out.put("first", under.stream().limit(5).toList());
+        }
+        return out;
+    }
+
     /** The optional repeat count after {@code x y z}, at {@code at}: 1 when absent. */
     private static int times(List<String> args, int at) {
         return args.size() > at ? Math.max(1, Integer.parseInt(args.get(at))) : 1;
@@ -222,6 +259,9 @@ final class CoreCommands {
         out.put("type", b.type() == null ? null : b.type().name());
         out.put("id", b.type() == null ? 0 : b.type().id());
         out.put("air", b.isAir());
+        if (b.type() != null && !b.type().categories().isEmpty()) {
+            out.put("categories", b.type().categories());
+        }
         if (b.rotation() != 0) {
             out.put("rotation", b.rotation());
         }

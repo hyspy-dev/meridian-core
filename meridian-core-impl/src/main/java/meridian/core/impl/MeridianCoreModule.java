@@ -93,6 +93,23 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.services().provide(ServerAssets.class, serverAssets);
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
                 (direction, session) -> new ServerAssetsHandler(serverAssets));
+
+        // GameAssets: the game's own files, read from this machine - the installed build that speaks
+        // our protocol, and what this server announced of its own (as the game downloaded it).
+        // No module carries a copy of any.
+        java.util.Optional<java.nio.file.Path> gameDir = java.util.Optional.empty();
+        java.util.Optional<java.nio.file.Path> userDir = java.util.Optional.empty();
+        try {
+            gameDir = ctx.gameDirectory();
+            userDir = ctx.gameUserDirectory();
+        } catch (NoSuchMethodError olderProxy) {
+            // a proxy from before the game's location was passed on: core looks for it itself
+        }
+        meridian.core.impl.assets.GameAssetsImpl gameAssets =
+                new meridian.core.impl.assets.GameAssetsImpl(gameDir, userDir, ctx.offloadExecutor());
+        ctx.services().provide(meridian.core.api.GameAssets.class, gameAssets);
+        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
+                (direction, session) -> new meridian.core.impl.assets.GameAssetsObserver(gameAssets));
         // Files that must simply be there: announced to the client with the server's own
         // (S2C WorldSettings), then served by the proxy when the client asks for them (C2S
         // RequestAssets), so the server's rebuild indexes them before the block types bind.
@@ -214,6 +231,11 @@ public class MeridianCoreModule implements ProxyModule {
 
         // ItemRegistry: item asset catalog — interaction roots + interactionVars.
         ItemRegistry itemRegistry = new ItemRegistry();
+        // A block's kind is its item's categories (Blocks.Ores, Blocks.Rocks...), a mod's included.
+        worldState.itemCategories(item -> itemRegistry.item(item)
+                .map(i -> i.categories == null ? java.util.List.<String>of()
+                        : java.util.Arrays.stream(i.categories).filter(java.util.Objects::nonNull).toList())
+                .orElse(java.util.List.of()));
         ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
                 (direction, session) -> new ItemRegistryObserver(itemRegistry));
 

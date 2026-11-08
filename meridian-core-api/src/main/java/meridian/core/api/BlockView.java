@@ -60,6 +60,16 @@ public interface BlockView {
     List<String> textures();
 
     /**
+     * The categories of the item this block is, as the server's item catalog lists them
+     * ({@code Blocks.Ores}, {@code Blocks.Rocks}, {@code Blocks.Soils}) - what a module tells kinds of
+     * block apart by, a mod's blocks included, rather than by their names. Empty for a block that
+     * is no item, or before the catalog came.
+     */
+    default List<String> categories() {
+        return List.of();
+    }
+
+    /**
      * Re-points every cube face at {@code remap.apply(path)}. A {@code null} result keeps
      * that face as it is, so a partial map only touches what it names. Faces of every
      * weighted variant go through the function; the block's draw mode is untouched.
