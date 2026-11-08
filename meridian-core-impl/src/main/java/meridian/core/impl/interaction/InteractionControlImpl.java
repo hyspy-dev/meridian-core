@@ -770,8 +770,23 @@ public final class InteractionControlImpl implements InteractionControl {
     }
 
     @Override
+    public CompletableFuture<InteractionOutcome> useItem(Duration hold) {
+        return enqueueForge(() -> forgeAim(-1, InteractionType.Secondary, seconds(hold)));
+    }
+
+    @Override
     public CompletableFuture<InteractionOutcome> swing() {
         return enqueueForge(() -> forgeAim(-1, InteractionType.Primary));
+    }
+
+    @Override
+    public CompletableFuture<InteractionOutcome> swing(Duration hold) {
+        return enqueueForge(() -> forgeAim(-1, InteractionType.Primary, seconds(hold)));
+    }
+
+    /** A hold in seconds; a negative or missing one is a tap. */
+    private static float seconds(Duration hold) {
+        return hold == null || hold.isNegative() ? 0f : hold.toNanos() / 1_000_000_000f;
     }
 
     /** Where the eyes are above the feet - the server's player eye height. */
@@ -806,6 +821,11 @@ public final class InteractionControlImpl implements InteractionControl {
      * at nothing: no block, no entity.
      */
     private Started forgeAim(int entityId, InteractionType type) {
+        return forgeAim(entityId, type, Float.NaN);
+    }
+
+    /** {@link #forgeAim(int, InteractionType)} with the button held {@code holdSeconds} ({@code NaN}: the default hold). */
+    private Started forgeAim(int entityId, InteractionType type, float holdSeconds) {
         if (session == null) {
             log.warn("meridian-core: interaction {} requested but no session yet", type);
             return Started.NOTHING;
@@ -820,7 +840,7 @@ public final class InteractionControlImpl implements InteractionControl {
         }
         String itemId = inventory.itemInHandId();
         ForgeRun run = startRun(null, type, DataKind.NONE, itemId, BlockFace.None, null, Map.of(),
-                BlockFace.None, target, Integer.MIN_VALUE);
+                BlockFace.None, target, Integer.MIN_VALUE, holdSeconds);
         return run == null ? Started.NOTHING : Started.of(run);
     }
 
@@ -837,7 +857,7 @@ public final class InteractionControlImpl implements InteractionControl {
         // Empty hit-block map: the walk runs the SelectInteraction op but spawns no forks - the
         // server owns the area selection.
         ForgeRun run = startRun(pos, InteractionType.Primary, DataKind.BLOCK, itemId, BlockFace.Up, null,
-                Map.of(), BlockFace.Up, null, Integer.MIN_VALUE);
+                Map.of(), BlockFace.Up, null, Integer.MIN_VALUE, Float.NaN);
         if (run == null) {
             log.warn("meridian-core: dig swing — no Primary root for item {}", itemId);
             return Started.NOTHING;
@@ -881,6 +901,61 @@ public final class InteractionControlImpl implements InteractionControl {
                 }
             }
         }
+    }
+
+    /**
+     * A chain the server started for a headless player (a negative id): a projectile's miss, a stat
+     * effect. The client runs it too and sends its side - the server waits for that on every
+     * operation that takes the client's data, and cancels the chain after a few seconds without it.
+     * A game does this itself; for a headless session core is the client, and plays it as one more
+     * run from the root the server names on its first sync, following the server's word.
+     */
+    void onServerChain(SyncInteractionChain s) {
+        if (s == null) {
+            return;
+        }
+        ForgeRun run = runs.get(s.chainId);
+        boolean opens = s.forkedId == null && s.initial && s.overrideRootInteraction > 0;
+        if (opens && (run == null || run.isServerStarted())) {
+            // The server numbers its own chains itself and may use an id again once one is over.
+            ForgeRun fresh = answerServerChain(s);
+            if (fresh == null) {
+                return;
+            }
+            runs.put(s.chainId, fresh);
+        }
+        onServerEcho(s);
+    }
+
+    /** The client's side of a chain the server started: a run of its root, not yet playing. */
+    private ForgeRun answerServerChain(SyncInteractionChain s) {
+        CompiledInteraction compiled = compileRoot(s.overrideRootInteraction);
+        if (compiled == null || compiled.size() == 0) {
+            log.warn("meridian-core: server chain {} runs root {} - not in registry", s.chainId,
+                    s.overrideRootInteraction);
+            return null;
+        }
+        InteractionType type = s.interactionType != null ? s.interactionType : InteractionType.Primary;
+        BlockPosition block = s.data != null ? s.data.blockPosition : null;
+        InteractionContext ctx = contextFor(type, block, block == null ? DataKind.NONE : DataKind.BLOCK,
+                inventory.itemInHandId(), BlockFace.Up);
+        if (s.data != null && s.data.entityId >= 0) {
+            EntityTarget target = reachable(s.data.entityId);
+            if (target != null) {
+                ctx = ctx.withEntity(target);
+            }
+        }
+        InteractionChainData data = s.data != null ? s.data.clone() : new InteractionChainData();
+        if (data.proxyId == null) {
+            data.proxyId = new UUID(0L, 0L);
+        }
+        ForgeRun.Header header = new ForgeRun.Header(inventory.activeHotbarSlot(),
+                inventory.activeUtilitySlot(), inventory.activeToolsSlot(), inventory.itemInHandId(),
+                inventory.utilityItemId(), inventory.toolsItemId());
+        log.info("meridian-core: answering server chain {} ({} root {})", s.chainId, type,
+                s.overrideRootInteraction);
+        return new ForgeRun(host, s.chainId, header, type, new ChainWalk(compiled, ctx, resolver, Map.of()),
+                data, ctx, Map.of()).serverStarted();
     }
 
     /** The server cancelled a chain core forged, or one of its forks. */
@@ -1124,7 +1199,7 @@ public final class InteractionControlImpl implements InteractionControl {
         String itemId = inventory.itemInHandId();
         int from = inventory.activeHotbarSlot();
         ForgeRun run = startRun(null, InteractionType.SwapFrom, DataKind.NONE, itemId, BlockFace.None, null,
-                Map.of(), BlockFace.None, null, slot);
+                Map.of(), BlockFace.None, null, slot, Float.NaN);
         if (run == null) {
             log.warn("meridian-core: SwapFrom root for {} could not be walked", itemId);
             return Started.NOTHING;
@@ -1186,7 +1261,7 @@ public final class InteractionControlImpl implements InteractionControl {
         // resolved. No HitBlock forks of our own: the server runs a swing's selector and spawns them
         // (SelectInteraction maps only predicted entity forks), and they are answered as announced.
         ForgeRun run = startRun(pos, type, dataKind, itemId, face, hitBlocks, Map.of(), orientFace, null,
-                Integer.MIN_VALUE);
+                Integer.MIN_VALUE, Float.NaN);
         if (run != null) {
             return Started.of(run);
         }
@@ -1380,12 +1455,14 @@ public final class InteractionControlImpl implements InteractionControl {
     /** A simulated parallel fork: its spec and its per-tick packets. */
     /**
      * Starts playing the held item's {@code type} chain: a {@link ChainWalk} of its root under the
-     * action's context, live against the server ({@link ForgeRun}). The chain reports the held
+     * action's context, live against the server ({@link ForgeRun}), the button held
+     * {@code holdSeconds} ({@code NaN}: each charge to its first tier). The chain reports the held
      * items as they are now, for its whole length. {@code null} if the root cannot be resolved.
      */
     private ForgeRun startRun(BlockPos pos, InteractionType type, DataKind dataKind, String itemId,
                               BlockFace face, List<BlockPos> hitBlocks, Map<Integer, Integer> hitBlockMap,
-                              BlockFace orientFace, EntityTarget entity, int targetSlot) {
+                              BlockFace orientFace, EntityTarget entity, int targetSlot,
+                              float holdSeconds) {
         OptionalInt rootId = resolveRoot(type, itemId);
         if (rootId.isEmpty()) {
             log.warn("meridian-core: no root for {} with item {} — item catalog not "
@@ -1437,7 +1514,7 @@ public final class InteractionControlImpl implements InteractionControl {
                 inventory.utilityItemId(), inventory.toolsItemId());
         int forgedId = nat.allocateForged();
         ForgeRun run = new ForgeRun(host, forgedId, header, type,
-                new ChainWalk(compiled, ctx, resolver, hitBlockMap), data, ctx, hitBlockMap);
+                new ChainWalk(compiled, ctx, resolver, hitBlockMap).hold(holdSeconds), data, ctx, hitBlockMap);
         runs.put(forgedId, run);
         log.info("meridian-core: forged {} chain {} (root {}, item {}) at {} — live", type, forgedId,
                 rootId.getAsInt(), itemId,

@@ -128,6 +128,10 @@ final class InteractionObserver implements PacketHandler {
                     changed = true;
                     continue;
                 }
+                if (chain.chainId < 0 && headless(session)) {
+                    // A chain the server started for the player: a headless client answers it itself.
+                    control.onServerChain(chain);
+                }
                 int before = chain.chainId;
                 boolean chg = translateS2C(chain);
                 log.info("meridian-core: NAT S2C {} chain server={} -> client={} (initial={})",
@@ -149,6 +153,9 @@ final class InteractionObserver implements PacketHandler {
                 control.onServerCancel(cancel);
                 return Action.DROP;
             }
+            if (cancel.chainId < 0 && headless(session)) {
+                control.onServerCancel(cancel);
+            }
             int translated = control.nat().toClient(cancel.chainId);
             log.info("meridian-core: NAT S2C cancel chain server={} -> client={}",
                     cancel.chainId, translated);
@@ -158,6 +165,15 @@ final class InteractionObserver implements PacketHandler {
             }
         }
         return Action.FORWARD;
+    }
+
+    /** Whether no game is behind the session - then core is the client. */
+    private static boolean headless(ProxySession session) {
+        try {
+            return session != null && session.headless() != null;
+        } catch (NoSuchMethodError olderProxy) {
+            return false;
+        }
     }
 
     /** Rewrites a chain's {@code chainId} (and any nested forks) back to client space. */

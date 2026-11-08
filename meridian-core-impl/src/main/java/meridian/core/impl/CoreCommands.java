@@ -30,7 +30,7 @@ final class CoreCommands {
 
     static final String USAGE = "pos | block <x y z> | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
             + "use|plant|water <x y z> | hit|dig <x y z> [times] | place <x y z> [face] [orient] | "
-            + "entities [range] | attack <entity> [times] | useentity <entity> | useitem [times] | swing";
+            + "entities [range] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>]";
 
     /** Where the eyes are above the feet - {@code PlayerImpl}'s raycast origin. */
     private static final double EYE_HEIGHT = 1.6;
@@ -79,8 +79,17 @@ final class CoreCommands {
                 faceIfHeadless(id);
                 yield afterEntity(interactions().useOnEntity(id).thenApply(List::of), id);
             }
-            case "useitem" -> repeat(times(args, 1), () -> interactions().useItem()).thenApply(this::withPos);
-            case "swing" -> interactions().swing().thenApply(List::of).thenApply(this::withPos);
+            case "useitem" -> {
+                java.time.Duration hold = hold(args);
+                int n = args.size() > 1 && !args.get(1).equals("hold") ? times(args, 1) : 1;
+                yield repeat(n, () -> hold == null ? interactions().useItem() : interactions().useItem(hold))
+                        .thenApply(this::withPos);
+            }
+            case "swing" -> {
+                java.time.Duration hold = hold(args);
+                yield (hold == null ? interactions().swing() : interactions().swing(hold))
+                        .thenApply(List::of).thenApply(this::withPos);
+            }
             case "slot" -> interactions().switchHotbarSlot(Integer.parseInt(args.get(1)))
                     .thenApply(List::of).thenApply(this::withPos);
             case "tp" -> {
@@ -153,6 +162,15 @@ final class CoreCommands {
         Map<String, Object> out = new LinkedHashMap<>(pos());
         out.put("outcome", outcomes(list));
         return out;
+    }
+
+    /** {@code ... hold <seconds>}: how long the button is held; {@code null} when not said. */
+    private static java.time.Duration hold(List<String> args) {
+        int at = args.indexOf("hold");
+        if (at < 0 || at + 1 >= args.size()) {
+            return null;
+        }
+        return java.time.Duration.ofNanos((long) (Double.parseDouble(args.get(at + 1)) * 1_000_000_000L));
     }
 
     /** The optional repeat count after {@code x y z}, at {@code at}: 1 when absent. */

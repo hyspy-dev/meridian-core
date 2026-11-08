@@ -72,6 +72,11 @@ final class ChainWalk {
     private int ticks;
     private boolean awaiting;
     private InteractionState lastState = InteractionState.Finished;
+    /**
+     * How long the button is held, in seconds from the chain's start; {@code NaN} for the default
+     * hold - each charge just long enough for its first tier.
+     */
+    private float hold = Float.NaN;
 
     private final Map<Integer, Snapshot> snapshots = new HashMap<>();
     /** What each resolved operation was sent as, by operation index. */
@@ -86,6 +91,21 @@ final class ChainWalk {
         this.ctx = ctx.withEffects(ctx.effects().copy()); // this walk's own, to apply and clear on
         this.compiled = root;
         visitedRoots.add(root.rootId());
+    }
+
+    /**
+     * Holds the button {@code seconds} from the chain's start, then lets go - a bow's draw, a
+     * charged swing. A charge reached while it is held runs until the hold ends and takes the tier
+     * its time reaches; one reached after is let go at once. A tap is a hold of 0.
+     */
+    ChainWalk hold(float seconds) {
+        this.hold = seconds;
+        return this;
+    }
+
+    /** Whether the button is still down at {@code now}, seconds into the chain. */
+    private boolean held(float now) {
+        return Float.isNaN(hold) || now + InteractionSimulator.TICK_SECONDS / 2 < hold;
     }
 
     /** {@code true} once the walk has run off the end of its root. */
@@ -179,6 +199,7 @@ final class ChainWalk {
             return null;
         }
         awaiting = false;
+        float now = (ticks - 1) * InteractionSimulator.TICK_SECONDS; // seconds since the press
         List<InteractionSyncData> ops = new ArrayList<>();
         int base = flatIndex;
         for (int step = 0; step < InteractionSimulator.MAX_STEPS; step++) {
@@ -226,15 +247,19 @@ final class ChainWalk {
                 // Decided by the server alone: the client stands on it until the server says how it went.
                 state = InteractionState.NotFinished;
                 awaiting = true;
+            } else if (node.interaction() instanceof ChargingInteraction && !Float.isNaN(hold)) {
+                // Held for as long as the button is down; let go when it comes up.
+                state = held(now) ? InteractionState.NotFinished : InteractionState.Finished;
             } else {
                 state = InteractionSimulator.tickState(node.interaction(), ctx, opTime);
                 // Tap/hold gate: a plain SimpleInteraction whose failed branch enters a
-                // ChargingInteraction. Its Finished branch is the inert "tap"; a forged
-                // interaction holds, so it takes the hold branch.
+                // ChargingInteraction. Its Finished branch is the inert "tap"; the button still
+                // down when it ends takes the hold branch - by default a forged action holds.
                 if (state == InteractionState.Finished
                         && node.interaction().getClass() == SimpleInteraction.class
                         && node.labels().length > 0
-                        && InteractionSimulator.isChargeOp(compiled.op(node.labels()[0].index))) {
+                        && InteractionSimulator.isChargeOp(compiled.op(node.labels()[0].index))
+                        && held(now)) {
                     state = InteractionState.Failed;
                 }
             }
@@ -243,8 +268,8 @@ final class ChainWalk {
             if (node.interaction() instanceof ChargingInteraction charging) {
                 // Held: the client says so every tick (CHARGING_HELD), and on release how long
                 // it was held - which the server checks against its own clock.
-                sd.chargeValue = state == InteractionState.NotFinished
-                        ? InteractionSimulator.CHARGING_HELD : InteractionSimulator.lowestChargeKey(charging);
+                sd.chargeValue = state == InteractionState.NotFinished ? InteractionSimulator.CHARGING_HELD
+                        : Float.isNaN(hold) ? InteractionSimulator.lowestChargeKey(charging) : opTime;
             }
             ops.add(sd);
 
@@ -342,10 +367,15 @@ final class ChainWalk {
             } else if (node.interaction() instanceof ChargingInteraction charging
                     && state == InteractionState.Finished && node.labels().length > 0
                     && charging.chargedNext != null && !charging.chargedNext.isEmpty()) {
-                // ChargingInteraction.jumpToChargeValue: a finished charge routes to a charge-tier
-                // label - the basic tier (label 0) for a minimal hold. Without tiers (a spear's
-                // block, a WieldingInteraction) there is no jump: the walk goes on.
-                counter = node.labels()[0].index;
+                // ChargingInteraction.jumpToChargeValue: a finished charge routes to the tier of
+                // the highest key it reached. Short of the lowest there is no jump, nor without
+                // tiers (a spear's block, a WieldingInteraction): the walk goes on.
+                int tier = tierOf(charging, sd.chargeValue);
+                if (tier >= 0 && tier < node.labels().length) {
+                    counter = node.labels()[tier].index;
+                } else {
+                    counter++;
+                }
             } else if (node.interaction() instanceof DragPlaceBlockInteraction drag
                     && state != InteractionState.Failed) {
                 // A placement gesture (0.8): the client commits blocks and predicts one fork of
@@ -382,6 +412,21 @@ final class ChainWalk {
         log.warn("meridian-core: ticked sim hit the step cap (root {})", compiled.rootId());
         done = true;
         return ops.isEmpty() ? null : new InteractionSimulator.Packet(base, ops);
+    }
+
+    /**
+     * The tier a charge of {@code value} seconds takes - the server's {@code jumpToChargeValue}: the
+     * index, among the keys sorted up, of the highest one not above it; -1 below them all.
+     */
+    private static int tierOf(ChargingInteraction charging, float value) {
+        List<Float> keys = charging.chargedNext.keySet().stream().sorted().toList();
+        int tier = -1;
+        for (int i = 0; i < keys.size(); i++) {
+            if (keys.get(i) != null && value >= keys.get(i)) {
+                tier = i;
+            }
+        }
+        return tier;
     }
 
     /** The server's final outcome for the operation at {@code index}, where its path is the walk's. */

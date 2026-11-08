@@ -154,6 +154,8 @@ final class ForgeRun {
     private long localDoneNanos;
     private int corrections;
     private boolean looping;
+    /** A chain the server started (a negative id): core answers it, the server opened it. */
+    private boolean serverStarted;
     /** The outcome is decided (its future completes a moment later, on the scheduler). */
     private boolean settled;
 
@@ -166,6 +168,22 @@ final class ForgeRun {
         this.selectHitBlock = selectHitBlock;
         this.main = new Lane(null, type, walk, data, false, 0);
         lanes.put(main.key, main);
+        startNanos = System.nanoTime();
+        baseNanos = startNanos;
+    }
+
+    /**
+     * Marks the run as the client's side of a chain the server started - a projectile's miss, a stat
+     * effect: no packet of it is the chain's first, and it plays as soon as the server speaks.
+     */
+    ForgeRun serverStarted() {
+        serverStarted = true;
+        main.initialSent = true;
+        return this;
+    }
+
+    boolean isServerStarted() {
+        return serverStarted;
     }
 
     /**
@@ -215,6 +233,9 @@ final class ForgeRun {
     /** Sends the first tick now and the rest at 60&nbsp;Hz. */
     void start() {
         synchronized (this) {
+            if (looping) {
+                return;
+            }
             startNanos = System.nanoTime();
             baseNanos = startNanos;
             looping = true;
@@ -636,8 +657,8 @@ final class ForgeRun {
                     : InteractionOutcome.Status.TIMED_OUT);
         }
         InteractionOutcome result = new InteractionOutcome(status, steps, forks, corrections);
-        log.info("meridian-core: forged chain {} {} ({} op(s), {} fork(s), {} correction(s))", chainId, status,
-                steps.size(), forks.size(), corrections);
+        log.info("meridian-core: {} chain {} {} ({} op(s), {} fork(s), {} correction(s))",
+                serverStarted ? "server" : "forged", chainId, status, steps.size(), forks.size(), corrections);
         // Callbacks run on the scheduler, never under this run's monitor.
         try {
             host.scheduler().schedule(() -> outcome.complete(result), Duration.ZERO);

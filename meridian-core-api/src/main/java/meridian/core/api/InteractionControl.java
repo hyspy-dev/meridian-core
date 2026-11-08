@@ -1,5 +1,6 @@
 package meridian.core.api;
 
+import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
@@ -175,12 +176,35 @@ public interface InteractionControl {
     }
 
     /**
+     * {@link #useItem()} with the button held for {@code hold}, then let go. A charge reached while
+     * it is held - a bow's guard, a thrown item's wind-up - runs until it is let go and takes the
+     * tier its time reached; {@link Duration#ZERO} is a tap. Without a hold, a forge holds each
+     * charge just long enough for its first tier.
+     *
+     * @return how the server ran the use
+     */
+    default CompletableFuture<InteractionOutcome> useItem(Duration hold) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("useItem(hold)"));
+    }
+
+    /**
      * Forges the held item's {@code Primary} swing aimed at nothing - a swing in the open air.
      *
      * @return how the server ran the swing
      */
     default CompletableFuture<InteractionOutcome> swing() {
         return CompletableFuture.failedFuture(new UnsupportedOperationException("swing"));
+    }
+
+    /**
+     * {@link #swing()} with the button held for {@code hold}, then let go - a bow's draw: held past
+     * its first tier (0.1 s) it shoots, the stronger the longer. {@link Duration#ZERO} is a tap,
+     * which for a bow nocks an arrow and puts it back.
+     *
+     * @return how the server ran the swing
+     */
+    default CompletableFuture<InteractionOutcome> swing(Duration hold) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("swing(hold)"));
     }
 
     /** {@code true} once a client session is live and packets can be sent. */
