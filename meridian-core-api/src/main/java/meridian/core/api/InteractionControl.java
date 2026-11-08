@@ -192,6 +192,15 @@ public interface InteractionControl {
      *
      * @return how the server ran the swing
      */
+    /**
+     * A dodge ({@code InteractionType.Dodge}): to the side the movement keys are held - left or
+     * right - a quick push of the body, with the stamina it costs. Only where the server binds a
+     * dodge to the player or the held item; the vanilla game binds none, and the server cancels it.
+     */
+    default CompletableFuture<InteractionOutcome> dodge() {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("dodge"));
+    }
+
     default CompletableFuture<InteractionOutcome> swing() {
         return CompletableFuture.failedFuture(new UnsupportedOperationException("swing"));
     }

@@ -1,80 +1,122 @@
 package meridian.core.impl.movement;
 
 import meridian.core.api.Movement;
+import meridian.protocol.packets.setup.ClientFeature;
+import meridian.protocol.FlyMode;
 import meridian.protocol.MovementSettings;
 
 /**
- * The numbers a body moves by: the server's movement settings ({@code UpdateMovementSettings}),
- * the game's defaults ({@code Server/Entity/MovementConfig/Default.json}) until they come, and what
- * the client does not get told - gravity (the server's {@code PhysicsConstants}), the player's
- * hitbox ({@code Models/Human/Player.json}) and the pull-up, which the client alone knows.
+ * What the body can do, worked out by the body's own physics on open flat ground: how high a jump
+ * goes, how far a running jump carries, how far a fall stays below the speed that hurts. A path is
+ * planned with the same numbers the body moves by.
  */
 final class BodySettings {
 
-    /** The server's gravity, blocks per second squared. */
-    static final double GRAVITY = 32;
-    /** The client's movement tick. */
-    static final double TICK = 1.0 / 60.0;
-    /** A fall faster than this, when the body lands, hurts (the game's {@code MinFallSpeedToEngageRoll}). */
-    static final double HURT_FALL_SPEED = 21;
-    /** How long pulling up onto a ledge takes (the {@code Mantle_Up} animation: 60 frames). */
-    static final double MANTLE_SECONDS = 1.0;
-    /** The highest ledge a pull-up reaches: hands at the top of a jump. The client keeps its own; this is ours. */
-    static final double MANTLE_HEIGHT = 3.0;
-    /** What the body walks up without a jump. */
-    static final double STEP_HEIGHT = 0.6;
+    /** The highest ledge pulled up onto: three blocks, as the game's players know it. Not fitted. */
+    static final double MANTLE_MAX_HEIGHT = 3.0;
 
-    volatile double baseSpeed = 5.5;
-    volatile double jumpForce = 11.8;
-    volatile double acceleration = 0.1;
-    volatile double walkMultiplier = 0.3;
-    volatile double runMultiplier = 1.0;
-    volatile double sprintMultiplier = 1.273;
+    private final Physics physics;
+    private MovementSettings last;
+    private Surroundings.BodyShape lastShape;
+    private FlyMode lastFly;
+    private boolean lastMantle;
+    private Movement.Capabilities cached;
 
-    void update(MovementSettings s) {
-        if (s == null) {
-            return;
-        }
-        if (s.baseSpeed > 0) {
-            baseSpeed = s.baseSpeed;
-        }
-        if (s.jumpForce > 0) {
-            jumpForce = s.jumpForce;
-        }
-        if (s.acceleration > 0) {
-            acceleration = s.acceleration;
-        }
-        if (s.forwardWalkSpeedMultiplier > 0) {
-            walkMultiplier = s.forwardWalkSpeedMultiplier;
-        }
-        if (s.forwardRunSpeedMultiplier > 0) {
-            runMultiplier = s.forwardRunSpeedMultiplier;
-        }
-        if (s.forwardSprintSpeedMultiplier > 0) {
-            sprintMultiplier = s.forwardSprintSpeedMultiplier;
-        }
+    BodySettings(Physics physics) {
+        this.physics = physics;
     }
 
-    double speed(Movement.Gait gait) {
-        return baseSpeed * switch (gait) {
-            case WALK -> walkMultiplier;
-            case RUN -> runMultiplier;
-            case SPRINT -> runMultiplier * sprintMultiplier;
-        };
+    synchronized Movement.Capabilities capabilities() {
+        Surroundings around = physics.surroundings();
+        MovementSettings p = around.settings();
+        Surroundings.BodyShape shape = around.shape();
+        FlyMode fly = around.flyMode();
+        boolean mantle = around.feature(ClientFeature.Mantling);
+        if (cached != null && p == last && shape.equals(lastShape) && fly == lastFly && mantle == lastMantle) {
+            return cached;
+        }
+        last = p;
+        lastShape = shape;
+        lastFly = fly;
+        lastMantle = mantle;
+        cached = p == null ? none(shape) : compute(p, shape, fly, mantle);
+        return cached;
     }
 
-    /** The top of a jump, above the feet. */
-    double jumpApex() {
-        return jumpForce * jumpForce / (2 * GRAVITY);
+    private static Movement.Capabilities none(Surroundings.BodyShape shape) {
+        return new Movement.Capabilities(shape.width(), shape.height(), shape.eyeHeight(), 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0);
     }
 
-    Movement.Capabilities capabilities() {
-        double apex = jumpApex();
-        // A jump onto what the feet clear with room to spare; a drop that lands under the hurt speed.
-        double jump = Math.max(STEP_HEIGHT, Math.min(1.25, apex - 0.5));
-        double safe = HURT_FALL_SPEED * HURT_FALL_SPEED / (2 * GRAVITY) - 0.5;
-        return new Movement.Capabilities(2 * Terrain.HALF, Terrain.HEIGHT, 1.6, STEP_HEIGHT, jump,
-                Math.min(MANTLE_HEIGHT, apex + 1.0), safe, speed(Movement.Gait.WALK), speed(Movement.Gait.RUN),
-                speed(Movement.Gait.SPRINT));
+    private Movement.Capabilities compute(MovementSettings p, Surroundings.BodyShape shape, FlyMode fly,
+                                          boolean mantle) {
+        double walk = p.baseSpeed * p.forwardWalkSpeedMultiplier;
+        double run = p.baseSpeed * p.forwardRunSpeedMultiplier;
+        double sprint = run * p.forwardSprintSpeedMultiplier;
+        double apex = apex(p);
+        // Onto a block the feet clear at the top with room to come down on it.
+        double jump = Math.max(Tuning.STEP_HEIGHT, apex - 0.3);
+        double safe = safeDrop(p);
+        double runLeap = leap(p, run, shape);
+        double sprintLeap = leap(p, sprint, shape);
+        double swim = run * 0.6;
+        double climb = p.climbSpeed * Tuning.CLIMB_SPEED_PER_TICK;
+        double flySpeed = fly == FlyMode.Disabled ? 0 : p.horizontalFlySpeed;
+        return new Movement.Capabilities(shape.width(), shape.height(), shape.eyeHeight(), Tuning.STEP_HEIGHT, jump,
+                mantle ? MANTLE_MAX_HEIGHT : 0, safe, walk, run, sprint, runLeap, sprintLeap, swim, climb, flySpeed);
+    }
+
+    /** The top of a standing jump, above the feet, tick by tick as the body rises. */
+    private double apex(MovementSettings p) {
+        double vy = p.jumpForce;
+        double y = 0;
+        double top = 0;
+        for (int i = 0; i < 600 && (vy > 0 || y > 0); i++) {
+            vy = physics.fall(vy, p, 1);
+            y += vy * Physics.DT;
+            top = Math.max(top, y);
+        }
+        return top;
+    }
+
+    /**
+     * The longest drop whose last falling tick stays at or under the speed that hurts - the speed
+     * the server takes the damage from.
+     */
+    private double safeDrop(MovementSettings p) {
+        double hurt = p.minFallSpeedToEngageRoll > 0 ? p.minFallSpeedToEngageRoll : 21;
+        double vy = 0;
+        double fell = 0;
+        for (int i = 0; i < 6000; i++) {
+            double nv = physics.fall(vy, p, 1);
+            if (-nv > hurt) {
+                return fell;
+            }
+            vy = nv;
+            fell -= vy * Physics.DT;
+        }
+        return fell;
+    }
+
+    /**
+     * The widest level gap a jump at speed {@code v} clears: off at the last ground under the
+     * body, down onto the first ground across - the body is a width wide either side.
+     */
+    private double leap(MovementSettings p, double v, Surroundings.BodyShape shape) {
+        double vy = p.jumpForce;
+        double y = 0;
+        double[] h = {v, 0};
+        double[] wish = {v, 0};
+        double x = 0;
+        for (int i = 0; i < 600; i++) {
+            Physics.airHorizontal(h, wish, p);
+            vy = physics.fall(vy, p, 1);
+            y += vy * Physics.DT;
+            x += h[0] * Physics.DT;
+            if (y <= 0 && vy < 0) {
+                break;
+            }
+        }
+        return Math.max(0, x + shape.width() - 0.2);
     }
 }

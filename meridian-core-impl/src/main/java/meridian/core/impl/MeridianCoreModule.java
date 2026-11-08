@@ -207,9 +207,12 @@ public class MeridianCoreModule implements ProxyModule {
         meridian.core.impl.movement.MovementImpl movement = new meridian.core.impl.movement.MovementImpl(
                 terrain, blockHitboxes, ctx.scheduler(),
                 () -> sessionHolder.get().map(HeadlessClientHandler::headlessOf).orElse(null),
-                () -> entityTracker.localPosition().orElse(null));
+                () -> entityTracker.localPosition().orElse(null),
+                entityTracker::localEntityId, entityTracker::effectsOf);
         ctx.services().provide(meridian.core.api.Movement.class, movement);
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY, (direction, session) -> movement.observer());
+        // Last on the client side: what actually goes out - a teleport's answer, core's own teleport.
+        ctx.registerHandler(Direction.C2S, HandlerPosition.MONITOR, (direction, session) -> movement.clientObserver());
 
         // ChunkView: what the client is allowed to forget. Sits at NORMAL because it drops, and
         // downstream of the feed above, which has already seen the unload.
@@ -264,6 +267,17 @@ public class MeridianCoreModule implements ProxyModule {
                     }
 
                     @Override
+                    public java.util.Map<meridian.protocol.InteractionType, Integer> selfInteractions() {
+                        java.util.OptionalInt me = entityTracker.localEntityId();
+                        if (me.isEmpty()) {
+                            return java.util.Map.of();
+                        }
+                        java.util.Map<meridian.protocol.InteractionType, Integer> m =
+                                entityTracker.interactionsOf(me.getAsInt());
+                        return m == null ? java.util.Map.of() : m;
+                    }
+
+                    @Override
                     public java.util.Set<Integer> selfEffects() {
                         return entityTracker.selfEffects();
                     }
@@ -274,6 +288,8 @@ public class MeridianCoreModule implements ProxyModule {
                     }
                 });
         ctx.services().provide(InteractionControl.class, interactionControl);
+        // A forged ApplyForce pushes the headless body, as the client's own push would.
+        interactionControl.forceBody(movement.forceBody());
         ctx.registerHandler(Direction.BOTH, HandlerPosition.NORMAL,
                 (direction, session) -> interactionControl.newObserver());
 

@@ -6,6 +6,12 @@
   "updateUrl": "https://github.com/hyspy-dev/meridian-core/releases",
   "requires": {
     "packets": [
+      "ChangeVelocity",
+      "UpdateFluidFX",
+      "UpdateEntityEffects",
+      "UpdateFeatures",
+      "SetGameMode",
+      "SetMovementStates",
       "UpdateBlockTypes",
       "EntityUpdates",
       "SetClientId",

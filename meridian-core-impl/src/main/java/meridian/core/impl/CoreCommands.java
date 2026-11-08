@@ -30,7 +30,9 @@ final class CoreCommands {
 
     static final String USAGE = "pos | block <x y z> | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
             + "use|plant|water <x y z> | hit|dig <x y z> [times] | place <x y z> [face] [orient] | "
-            + "entities [range] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | assets | asset <path> | movement | stand <x y z> | move <walk|jump|mantle|drop> <x y z> [walk|run|sprint]";
+            + "entities [range] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | dodge | assets | asset <path> | "
+            + "movement | body | stand <x y z> | move <walk|jump|mantle|drop|leap|swim|climb|fly> <x y z> [walk|run|sprint] | "
+            + "predict <kind> <x y z> [gait] [trace] | hold <forward> <strafe> <yaw> [jump] [crouch] [sprint] [walk] [fly] | hold off | halt";
 
     /** Where the eyes are above the feet - {@code PlayerImpl}'s raycast origin. */
     private static final double EYE_HEIGHT = 1.6;
@@ -68,6 +70,13 @@ final class CoreCommands {
             case "movement" -> CompletableFuture.completedFuture(movement());
             case "stand" -> CompletableFuture.completedFuture(stand(at(args, 1)));
             case "move" -> move(args);
+            case "body" -> CompletableFuture.completedFuture(body());
+            case "hold" -> CompletableFuture.completedFuture(holdKeys(args));
+            case "predict" -> CompletableFuture.completedFuture(predict(args));
+            case "halt" -> {
+                movementService().stop();
+                yield CompletableFuture.completedFuture(body());
+            }
             case "asset" -> CompletableFuture.completedFuture(asset(args.get(1)));
             case "chain" -> CompletableFuture.completedFuture(chain(Integer.parseInt(args.get(1))));
             case "face" -> CompletableFuture.completedFuture(args.size() == 2
@@ -95,6 +104,7 @@ final class CoreCommands {
                 yield (hold == null ? interactions().swing() : interactions().swing(hold))
                         .thenApply(List::of).thenApply(this::withPos);
             }
+            case "dodge" -> interactions().dodge().thenApply(List::of).thenApply(this::withPos);
             case "slot" -> interactions().switchHotbarSlot(Integer.parseInt(args.get(1)))
                     .thenApply(List::of).thenApply(this::withPos);
             case "tp" -> {
@@ -208,27 +218,107 @@ final class CoreCommands {
         return out;
     }
 
-    /** {@code move <walk|jump|mantle|drop> <x y z> [walk|run|sprint]}: one move onto that cell. */
+    /**
+     * {@code move <walk|jump|mantle|drop|leap|swim|climb|fly> <x y z> [walk|run|sprint]}: one move
+     * onto that cell - its floor, or for a swim, a climb or a flight the cell itself when nobody
+     * stands there.
+     */
     private CompletableFuture<Map<String, Object>> move(List<String> args) {
         meridian.core.api.Movement m = movementService();
+        meridian.core.api.Movement.Move move = moveOf(m, args);
+        return m.move(move).thenApply(CoreCommands::result);
+    }
+
+    private static meridian.core.api.Movement.Move moveOf(meridian.core.api.Movement m, List<String> args) {
         meridian.core.api.Movement.Kind kind = meridian.core.api.Movement.Kind.valueOf(args.get(1).toUpperCase(Locale.ROOT));
         BlockPos cell = at(args, 2);
         meridian.core.api.Movement.Gait gait = args.size() > 5
                 ? meridian.core.api.Movement.Gait.valueOf(args.get(5).toUpperCase(Locale.ROOT))
                 : meridian.core.api.Movement.Gait.RUN;
         java.util.OptionalDouble feet = m.standAt(cell);
-        if (feet.isEmpty()) {
+        double y;
+        if (feet.isPresent()) {
+            y = feet.getAsDouble();
+        } else if (kind == meridian.core.api.Movement.Kind.SWIM || kind == meridian.core.api.Movement.Kind.FLY
+                || kind == meridian.core.api.Movement.Kind.CLIMB) {
+            y = cell.y();
+        } else {
             throw new IllegalArgumentException("nobody stands in " + cell);
         }
-        Vec3 to = new Vec3(cell.x() + 0.5, feet.getAsDouble(), cell.z() + 0.5);
-        return m.move(new meridian.core.api.Movement.Move(kind, to, gait)).thenApply(r -> {
-            Map<String, Object> out = new LinkedHashMap<>();
-            out.put("status", r.status().name());
-            if (r.at() != null) {
-                out.put("at", Map.of("x", r.at().x(), "y", r.at().y(), "z", r.at().z()));
-            }
-            return out;
-        });
+        return new meridian.core.api.Movement.Move(kind, new Vec3(cell.x() + 0.5, y, cell.z() + 0.5), gait);
+    }
+
+    private static Map<String, Object> result(meridian.core.api.Movement.MoveResult r) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("status", r.status().name());
+        if (r.at() != null) {
+            out.put("at", Map.of("x", r.at().x(), "y", r.at().y(), "z", r.at().z()));
+        }
+        return out;
+    }
+
+    /** The whole body now: where, how fast, what it is doing. */
+    private Map<String, Object> body() {
+        meridian.core.api.Movement.State s = movementService().state();
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (s.position() != null) {
+            out.put("at", Map.of("x", s.position().x(), "y", s.position().y(), "z", s.position().z()));
+        }
+        out.put("velocity", Map.of("x", s.velocity().x(), "y", s.velocity().y(), "z", s.velocity().z()));
+        out.put("yaw", s.yaw());
+        List<String> doing = new java.util.ArrayList<>();
+        if (s.onGround()) doing.add("onGround");
+        if (s.inFluid()) doing.add("inFluid");
+        if (s.swimming()) doing.add("swimming");
+        if (s.climbing()) doing.add("climbing");
+        if (s.flying()) doing.add("flying");
+        if (s.crouching()) doing.add("crouching");
+        if (s.sprinting()) doing.add("sprinting");
+        if (s.sliding()) doing.add("sliding");
+        if (s.rolling()) doing.add("rolling");
+        if (s.mantling()) doing.add("mantling");
+        if (s.hanging()) doing.add("hanging");
+        out.put("states", doing);
+        return out;
+    }
+
+    /**
+     * {@code hold <forward> <strafe> <yaw degrees> [jump] [crouch] [sprint] [walk] [fly]} holds
+     * keys; {@code hold off} lets go.
+     */
+    private Map<String, Object> holdKeys(List<String> args) {
+        meridian.core.api.Movement m = movementService();
+        if (args.size() > 1 && args.get(1).equalsIgnoreCase("off")) {
+            m.hold(null);
+            return body();
+        }
+        double forward = Double.parseDouble(args.get(1));
+        double strafe = Double.parseDouble(args.get(2));
+        float yaw = (float) Math.toRadians(Double.parseDouble(args.get(3)));
+        java.util.Set<String> keys = new java.util.HashSet<>();
+        for (int i = 4; i < args.size(); i++) {
+            keys.add(args.get(i).toLowerCase(Locale.ROOT));
+        }
+        m.hold(new meridian.core.api.Movement.Controls(forward, strafe, yaw, 0f, keys.contains("jump"),
+                keys.contains("crouch"), keys.contains("sprint"), keys.contains("walk"), keys.contains("fly")));
+        return body();
+    }
+
+    /** {@code predict <kind> <x y z> [gait]}: how the move would go, played on a copy of the body. */
+    private Map<String, Object> predict(List<String> args) {
+        meridian.core.api.Movement m = movementService();
+        List<String> trace = args.contains("trace") ? new java.util.ArrayList<>() : null;
+        List<String> rest = args.stream().filter(a -> !a.equals("trace")).toList();
+        meridian.core.api.Movement.Prediction p = trace != null
+                && m instanceof meridian.core.impl.movement.MovementImpl impl
+                ? impl.predict(List.of(moveOf(m, rest)), trace) : m.predict(moveOf(m, rest));
+        Map<String, Object> out = new LinkedHashMap<>(result(p.result()));
+        if (trace != null) {
+            out.put("trace", trace);
+        }
+        out.put("seconds", p.seconds());
+        out.put("hurt", p.hurt());
+        return out;
     }
 
     /** Where the game's own files come from: the installation, its version. */

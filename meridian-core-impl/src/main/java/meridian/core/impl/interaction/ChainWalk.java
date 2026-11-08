@@ -8,12 +8,18 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import meridian.protocol.AppliedForce;
+import meridian.protocol.ApplyForceInteraction;
+import meridian.protocol.ApplyForceState;
 import meridian.protocol.ChainingInteraction;
+import meridian.protocol.ChangeVelocityType;
 import meridian.protocol.ChargingInteraction;
 import meridian.protocol.DamageEntityInteraction;
 import meridian.protocol.DragPlaceBlockInteraction;
 import meridian.protocol.InteractionState;
 import meridian.protocol.InteractionSyncData;
+import meridian.protocol.MovementConditionInteraction;
+import meridian.protocol.MovementDirection;
 import meridian.protocol.ParallelInteraction;
 import meridian.protocol.PlaceModeSelectInteraction;
 import meridian.protocol.ReplaceInteraction;
@@ -77,6 +83,10 @@ final class ChainWalk {
      * hold - each charge just long enough for its first tier.
      */
     private float hold = Float.NaN;
+    /** The body a live walk pushes ({@code ApplyForceInteraction}); none for a prediction. */
+    private ForceBody body;
+    /** How the push under way stands: waiting, or ended on the ground or by its time. */
+    private ApplyForceState forceState = ApplyForceState.Waiting;
 
     private final Map<Integer, Snapshot> snapshots = new HashMap<>();
     /** What each resolved operation was sent as, by operation index. */
@@ -91,6 +101,86 @@ final class ChainWalk {
         this.ctx = ctx.withEffects(ctx.effects().copy()); // this walk's own, to apply and clear on
         this.compiled = root;
         visitedRoots.add(root.rootId());
+    }
+
+    /** A charge's last tier, the most it is held before it lets go by itself; 0 without tiers. */
+    private static float highestKey(ChargingInteraction charge) {
+        float top = 0f;
+        if (charge.chargedNext != null) {
+            for (Float k : charge.chargedNext.keySet()) {
+                if (k != null && k > top) {
+                    top = k;
+                }
+            }
+        }
+        return top;
+    }
+
+    /** A walk played for real: its pushes move {@code body}. */
+    ChainWalk live(ForceBody body) {
+        this.body = body;
+        return this;
+    }
+
+    /**
+     * One tick of an {@code ApplyForceInteraction}, as the client runs it (the server's own copy,
+     * for chains it runs itself, is {@code simulateTick0}): on the first tick, and every tick while
+     * {@code duration} lasts, each force is turned by the look - up and down by the pitch (within
+     * {@code verticalClamp}) where it says so, around by the yaw - and pushes the body, the first
+     * as {@code changeVelocityType}, the rest added. After that it ends on the ground once
+     * {@code groundCheckDelay} is past (when it waits for the ground), or when {@code runTime} is.
+     */
+    private InteractionState applyForce(ApplyForceInteraction force, float t) {
+        if (t <= 0f || (force.duration > 0f && t < force.duration)) {
+            float yaw = body.yaw();
+            float pitch = body.pitch();
+            ChangeVelocityType type = force.changeVelocityType;
+            for (AppliedForce f : force.forces) {
+                double dx = f.direction.x();
+                double dy = f.direction.y();
+                double dz = f.direction.z();
+                if (f.adjustVertical) {
+                    double lx = pitch;
+                    if (force.verticalClamp != null) {
+                        lx = Math.max(Math.toRadians(force.verticalClamp.inclusiveMin),
+                                Math.min(Math.toRadians(force.verticalClamp.inclusiveMax), lx));
+                    }
+                    double c = Math.cos(lx);
+                    double sn = Math.sin(lx);
+                    double ny = dy * c - dz * sn;
+                    double nz = dy * sn + dz * c;
+                    dy = ny;
+                    dz = nz;
+                }
+                dx *= f.force;
+                dy *= f.force;
+                dz *= f.force;
+                double c = Math.cos(yaw);
+                double sn = Math.sin(yaw);
+                double nx = dx * c + dz * sn;
+                double nz = -dx * sn + dz * c;
+                body.push(nx, dy, nz, type, force.velocityConfig);
+                if (t <= 0f) {
+                    log.info("meridian-core: forged push ({}, {}, {}) {} on the body", nx, dy, nz, type);
+                }
+                type = ChangeVelocityType.Add;
+            }
+            forceState = ApplyForceState.Waiting;
+            return InteractionState.NotFinished;
+        }
+        boolean ground = t >= force.groundCheckDelay && force.waitForGround && body.grounded();
+        boolean instantly = force.runTime <= 0f && !force.waitForGround && !force.waitForCollision;
+        boolean timer = instantly || (force.runTime > 0f && t >= force.runTime);
+        if (ground) {
+            forceState = ApplyForceState.Ground;
+            return InteractionState.Finished;
+        }
+        if (timer) {
+            forceState = ApplyForceState.Timer;
+            return InteractionState.Finished;
+        }
+        forceState = ApplyForceState.Waiting;
+        return InteractionState.NotFinished;
     }
 
     /**
@@ -247,9 +337,18 @@ final class ChainWalk {
                 // Decided by the server alone: the client stands on it until the server says how it went.
                 state = InteractionState.NotFinished;
                 awaiting = true;
-            } else if (node.interaction() instanceof ChargingInteraction && !Float.isNaN(hold)) {
-                // Held for as long as the button is down; let go when it comes up.
-                state = held(now) ? InteractionState.NotFinished : InteractionState.Finished;
+            } else if (node.interaction() instanceof ApplyForceInteraction force && body != null) {
+                // The client's own push: the body is pushed, and the op ends on the ground or when
+                // its time is up - which the server takes from applyForceState.
+                state = applyForce(force, opTime);
+            } else if (node.interaction() instanceof ChargingInteraction charge && !Float.isNaN(hold)) {
+                // Held for as long as the button is down; let go when it comes up - or, unless it
+                // may be held on and on, once it reaches its last tier: the client lets go there
+                // by itself (ChargingInteraction: allowIndefiniteHold || time < highestChargeValue),
+                // and the hold carries on into what follows.
+                float top = highestKey(charge);
+                boolean capped = !charge.allowIndefiniteHold && top > 0f && opTime >= top;
+                state = held(now) && !capped ? InteractionState.NotFinished : InteractionState.Finished;
             } else {
                 state = InteractionSimulator.tickState(node.interaction(), ctx, opTime);
                 // Tap/hold gate: a plain SimpleInteraction whose failed branch enters a
@@ -268,8 +367,14 @@ final class ChainWalk {
             if (node.interaction() instanceof ChargingInteraction charging) {
                 // Held: the client says so every tick (CHARGING_HELD), and on release how long
                 // it was held - which the server checks against its own clock.
+                float top = highestKey(charging);
+                float released = !charging.allowIndefiniteHold && top > 0f ? Math.min(opTime, top) : opTime;
                 sd.chargeValue = state == InteractionState.NotFinished ? InteractionSimulator.CHARGING_HELD
-                        : Float.isNaN(hold) ? InteractionSimulator.lowestChargeKey(charging) : opTime;
+                        : Float.isNaN(hold) ? InteractionSimulator.lowestChargeKey(charging) : released;
+            }
+            if (node.interaction() instanceof ApplyForceInteraction) {
+                sd.applyForceState = verdict != null ? verdict.applyForceState
+                        : body != null ? forceState : ApplyForceState.Timer;
             }
             ops.add(sd);
 
@@ -400,6 +505,20 @@ final class ChainWalk {
                 int label = verdict != null && verdict.nextLabel >= 0 && verdict.nextLabel < node.labels().length
                         ? verdict.nextLabel : 0;
                 sd.nextLabel = label;
+                counter = node.labels()[label].index;
+            } else if (node.interaction() instanceof MovementConditionInteraction && state == InteractionState.Finished
+                    && node.labels().length >= 9) {
+                // The branch of the way the keys are held, its label the direction's number; none
+                // held (or no body) is the failed one.
+                MovementDirection dir = verdict != null && verdict.movementDirection != null ? verdict.movementDirection
+                        : body != null ? body.direction() : MovementDirection.None;
+                sd.movementDirection = dir;
+                counter = node.labels()[dir.getValue()].index;
+            } else if (node.interaction() instanceof ApplyForceInteraction && state == InteractionState.Finished
+                    && node.labels().length >= 3) {
+                // Next, ground or collision branch, as the push ended.
+                ApplyForceState how = sd.applyForceState;
+                int label = how == ApplyForceState.Ground ? 1 : how == ApplyForceState.Collision ? 2 : 0;
                 counter = node.labels()[label].index;
             } else if (state == InteractionState.Failed && node.labels().length > 0) {
                 counter = node.labels()[0].index; // failed branch

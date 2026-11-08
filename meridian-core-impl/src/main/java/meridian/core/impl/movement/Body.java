@@ -2,131 +2,232 @@ package meridian.core.impl.movement;
 
 import java.time.Duration;
 import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Supplier;
 import meridian.api.module.Scheduler;
 import meridian.api.session.HeadlessClient;
 import meridian.core.api.Movement;
+import meridian.core.api.Movement.Controls;
 import meridian.core.api.Movement.MoveResult;
 import meridian.core.api.Vec3;
+import meridian.protocol.ChangeVelocityType;
 import meridian.protocol.Direction;
 import meridian.protocol.MovementStates;
 import meridian.protocol.Position;
+import meridian.protocol.VelocityConfig;
 import meridian.protocol.Vector3d;
 import meridian.protocol.packets.player.ClientMovement;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * The headless player's body: plays moves a tick at a time and reports each tick the way the client
- * does - a {@code ClientMovement} with where the feet are, how fast they go, and the movement
- * states (on the ground, running, jumping, falling, pulling up).
+ * The headless player's body, alive: simulated a client tick at a time, 60 a second, from the
+ * moment the server places it until the session ends - with a move's pilot, held keys, or none -
+ * and reported each tick it changes, the way the client reports it: a {@code ClientMovement} with
+ * where the feet are, the body's and the look's yaw, the velocity and the movement states.
  *
- * <p>A move is worked out whole before it starts, from the client's numbers ({@link BodySettings}):
- * a walk picks up speed by the server's acceleration; a jump leaves the ground at the jump force and
- * comes down under the server's gravity; a drop falls the same way, and lands at the speed it fell,
- * which is what the server takes fall damage from. Every tick of the plan is checked against the
- * blocks first ({@link Terrain#fits}); a move that would pass through one does not start.
- *
- * <p>Nothing is simulated beyond the plan: the body is where its moves put it. A teleport from the
- * server cuts a move short, and the next one starts wherever the server put the player.
+ * <p>Where it is follows every position the client side sends that is not the body's own: the
+ * answer to a server teleport, a teleport core makes (which is a position sent as the client).
  */
 public final class Body {
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
     private static final long TICK_NANOS = 1_000_000_000L / 60L;
+    private static final double MOVED = 1e-6;
 
-    /** One tick of a plan. */
-    private record Sample(double x, double y, double z, double vx, double vy, double vz, Kind kind) {}
-
-    /** What the body is doing in a tick - the movement states it reports. */
-    private enum Kind { WALK, RUN, SPRINT, JUMP_UP, FALL, MANTLE, LAND }
-
-    private record Queued(Movement.Move move, CompletableFuture<MoveResult> done) {}
+    private record Queued(Pilot pilot, CompletableFuture<MoveResult> done) {}
 
     private final Scheduler scheduler;
-    private final Terrain terrain;
-    private final BodySettings settings;
+    private final Physics physics;
     private final Supplier<HeadlessClient> client;
-    private final Supplier<Vec3> trackedFeet;
+    private final Supplier<Surroundings.EffectMotion> effects;
 
     private final ArrayDeque<Queued> queue = new ArrayDeque<>();
     private Queued current;
-    private List<Sample> plan;
-    private int index;
+    private Controls held;
+
+    private BodyState state;
     private boolean looping;
     private long baseNanos;
     private long ticks;
+    private boolean quiet;
+    /**
+     * Where the body's own last reports put it, so the client-side watch does not take them for a
+     * teleport (the packet reaching the watch need not be the object sent).
+     */
+    private final ArrayDeque<double[]> own = new ArrayDeque<>();
+    private MovementStates lastStates;
+    /** The keys of the last tick. */
+    private volatile Controls lastControls;
 
-    private boolean positioned;
-    private double x;
-    private double y;
-    private double z;
-    private float yaw;
-    /** Horizontal speed carried from one walk into the next. */
-    private double carried;
-    private boolean onGround = true;
-
-    Body(Scheduler scheduler, Terrain terrain, BodySettings settings, Supplier<HeadlessClient> client,
-         Supplier<Vec3> trackedFeet) {
+    Body(Scheduler scheduler, Physics physics, Supplier<HeadlessClient> client,
+         Supplier<Surroundings.EffectMotion> effects) {
         this.scheduler = scheduler;
-        this.terrain = terrain;
-        this.settings = settings;
+        this.physics = physics;
         this.client = client;
-        this.trackedFeet = trackedFeet;
+        this.effects = effects;
     }
 
-    synchronized Vec3 position() {
-        if (!positioned) {
-            Vec3 t = trackedFeet.get();
-            return t;
-        }
-        return new Vec3(x, y, z);
+    // ------------------------------------------------------------------
+    // Read
+    // ------------------------------------------------------------------
+
+    synchronized boolean placed() {
+        return state != null;
     }
 
-    synchronized boolean onGround() {
-        return onGround;
+    /** The keys of the last tick, or {@code null} before the first. */
+    Controls lastControls() {
+        return lastControls;
     }
+
+    synchronized BodyState snapshot() {
+        return state == null ? null : state.copy();
+    }
+
+    // ------------------------------------------------------------------
+    // Driven
+    // ------------------------------------------------------------------
 
     synchronized CompletableFuture<MoveResult> enqueue(Movement.Move move) {
         CompletableFuture<MoveResult> done = new CompletableFuture<>();
-        if (client.get() == null) {
+        if (client.get() == null || state == null || physics.surroundings().settings() == null) {
             done.complete(new MoveResult(MoveResult.Status.NOT_AVAILABLE, position()));
             return done;
         }
-        queue.addLast(new Queued(move, done));
-        if (!looping) {
-            looping = true;
-            baseNanos = System.nanoTime();
-            ticks = 0;
-            schedule(0);
-        }
+        queue.addLast(new Queued(new Pilot(move, physics, false), done));
+        wake();
         return done;
     }
 
-    /** Ends after the move under way; the queued ones are dropped. */
+    synchronized void hold(Controls controls) {
+        held = controls;
+        wake();
+    }
+
     synchronized void stop() {
+        held = null;
+        if (current != null) {
+            current.pilot().interrupt(state);
+            current.done().complete(current.pilot().result());
+            current = null;
+        }
         Vec3 at = position();
         while (!queue.isEmpty()) {
             queue.pollFirst().done().complete(new MoveResult(MoveResult.Status.INTERRUPTED, at));
         }
     }
 
-    /** The server moved the player: the move under way and the queued ones are over. */
-    synchronized void teleported() {
-        positioned = false;
-        carried = 0;
-        onGround = true;
-        Vec3 at = trackedFeet.get();
-        if (current != null) {
-            current.done().complete(new MoveResult(MoveResult.Status.INTERRUPTED, at));
-            current = null;
-            plan = null;
+    /** A push from the server ({@code ChangeVelocity}). */
+    synchronized void push(float x, float y, float z, ChangeVelocityType type, VelocityConfig config) {
+        if (state != null) {
+            physics.push(state, x, y, z, type, config);
+            wake();
         }
+    }
+
+    /** The server teleported the player: what is under way is over. */
+    synchronized void teleported(boolean resetVelocity) {
+        if (state != null && resetVelocity) {
+            state.vx = state.vy = state.vz = 0;
+            state.kx = state.kz = 0;
+            state.pushes.clear();
+        }
+        if (state != null) {
+            state.ledge = null;
+            state.mantling = false;
+            state.climbing = false;
+        }
+        if (current != null) {
+            current.pilot().interrupt(state != null ? state : new BodyState());
+            current.done().complete(current.pilot().result());
+            current = null;
+        }
+        Vec3 at = position();
         while (!queue.isEmpty()) {
             queue.pollFirst().done().complete(new MoveResult(MoveResult.Status.INTERRUPTED, at));
+        }
+    }
+
+    /**
+     * A position the client side sent that the body did not: it is there now (a teleport's
+     * answer, a teleport core made). Takes the body's place from it.
+     */
+    synchronized void sentByOther(ClientMovement m) {
+        if (m.absolutePosition == null || ownReport(m.absolutePosition)) {
+            return;
+        }
+        if (state == null) {
+            state = new BodyState();
+            state.onGround = false;
+        }
+        state.x = m.absolutePosition.x;
+        state.y = m.absolutePosition.y;
+        state.z = m.absolutePosition.z;
+        if (m.lookOrientation != null) {
+            state.yaw = m.lookOrientation.yaw;
+            state.pitch = m.lookOrientation.pitch;
+        }
+        if (m.teleportAck == null) {
+            // A teleport core made: the move under way would steer from the old place.
+            if (current != null) {
+                current.pilot().interrupt(state);
+                current.done().complete(current.pilot().result());
+                current = null;
+            }
+        }
+        quiet = false;
+        wake();
+    }
+
+    /** The server says whether the body flies ({@code SetMovementStates}). */
+    synchronized void setFlying(boolean flying) {
+        if (state != null) {
+            state.flying = flying;
+            wake();
+        }
+    }
+
+    /** Something changed around the body (a block): a tick to see whether it falls or slides. */
+    synchronized void nudge() {
+        if (state != null) {
+            wake();
+        }
+    }
+
+    private boolean ownReport(Position p) {
+        for (java.util.Iterator<double[]> it = own.iterator(); it.hasNext(); ) {
+            double[] o = it.next();
+            if (o[0] == p.x && o[1] == p.y && o[2] == p.z) {
+                it.remove();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The session went away. */
+    synchronized void reset() {
+        stop();
+        state = null;
+        lastStates = null;
+    }
+
+    private Vec3 position() {
+        return state == null ? null : new Vec3(state.x, state.y, state.z);
+    }
+
+    // ------------------------------------------------------------------
+    // The tick
+    // ------------------------------------------------------------------
+
+    private void wake() {
+        quiet = false;
+        if (!looping && state != null) {
+            looping = true;
+            baseNanos = System.nanoTime();
+            ticks = 0;
+            schedule(0);
         }
     }
 
@@ -141,257 +242,183 @@ public final class Body {
     }
 
     private void tick() {
+        try {
+            tickOnce();
+        } catch (RuntimeException e) {
+            // A tick that throws must not stop the body for good: say so and go on next tick.
+            log.warn("meridian-core: body tick failed", e);
+            synchronized (this) {
+                looping = false;
+                quiet = false;
+            }
+            try {
+                scheduler.schedule(this::wakeLater, Duration.ofMillis(50));
+            } catch (RejectedExecutionException ignored) {
+                // shutting down
+            }
+        }
+    }
+
+    private synchronized void wakeLater() {
+        wake();
+    }
+
+    private void tickOnce() {
         long next;
         synchronized (this) {
             HeadlessClient c = client.get();
-            if (c == null) {
-                teleported();
+            if (c == null || state == null) {
+                reset();
                 looping = false;
                 return;
             }
-            while (plan == null && !queue.isEmpty()) {
-                current = queue.pollFirst();
-                plan = planFor(current.move());
-                index = 0;
-                if (plan == null) {
-                    current.done().complete(new MoveResult(MoveResult.Status.BLOCKED, position()));
-                    current = null;
-                }
+            Controls controls = controls();
+            lastControls = controls;
+            BodyState before = state.copy();
+            boolean moved = physics.step(state, controls, effects.get());
+            boolean changed = moved && changed(before, state);
+            MovementStates states = states(state, controls);
+            if (changed || !states.equals(lastStates)) {
+                send(c, states);
+                quiet = false;
+            } else if (current == null && queue.isEmpty() && held == null && state.onGround
+                    && state.pushes.carried.isEmpty() && state.kx == 0 && state.kz == 0) {
+                // At rest with nothing to do: sleep until something wakes the body.
+                quiet = true;
             }
-            if (plan == null) {
-                // Nothing left: a last report standing still, then quiet.
-                if (positioned) {
-                    c.sendAsClient(packet(x, y, z, 0, 0, 0, Kind.LAND, true));
-                }
+            if (quiet) {
                 looping = false;
                 return;
-            }
-            Sample s = plan.get(index++);
-            x = s.x();
-            y = s.y();
-            z = s.z();
-            onGround = s.kind() == Kind.WALK || s.kind() == Kind.RUN || s.kind() == Kind.SPRINT || s.kind() == Kind.LAND;
-            c.sendAsClient(packet(s.x(), s.y(), s.z(), s.vx(), s.vy(), s.vz(), s.kind(), false));
-            if (index >= plan.size()) {
-                carried = s.kind() == Kind.LAND ? 0 : Math.hypot(s.vx(), s.vz());
-                onGround = true;
-                current.done().complete(new MoveResult(MoveResult.Status.ARRIVED, new Vec3(x, y, z)));
-                current = null;
-                plan = null;
             }
             ticks++;
             next = baseNanos + ticks * TICK_NANOS - System.nanoTime();
+            if (next < -TICK_NANOS * 30) {
+                // Far behind (a stall): catch the clock up rather than replaying the backlog.
+                baseNanos = System.nanoTime();
+                ticks = 0;
+                next = 0;
+            }
         }
         schedule(next);
     }
 
-    // ------------------------------------------------------------------
-    // Plans
-    // ------------------------------------------------------------------
-
-    /** The ticks of one move from where the body is, or {@code null} when it cannot be made. */
-    private List<Sample> planFor(Movement.Move move) {
-        if (!positioned) {
-            Vec3 t = trackedFeet.get();
-            if (t == null) {
-                return null;
-            }
-            x = t.x();
-            y = t.y();
-            z = t.z();
-            positioned = true;
-        }
-        Vec3 to = move.to();
-        double dx = to.x() - x;
-        double dz = to.z() - z;
-        double d = Math.hypot(dx, dz);
-        if (d > 1e-6) {
-            yaw = (float) Math.atan2(-dx, -dz);
-        }
-        double ux = d > 1e-6 ? dx / d : 0;
-        double uz = d > 1e-6 ? dz / d : 0;
-        double rise = to.y() - y;
-        List<Sample> out = switch (move.kind()) {
-            case WALK -> Math.abs(rise) > BodySettings.STEP_HEIGHT + 0.01 ? null : walk(to, d, ux, uz, move.gait());
-            case JUMP -> jump(to, d, ux, uz, rise);
-            case MANTLE -> rise <= 0 || rise > settings.capabilities().mantleHeight() + 1e-6
-                    ? null : mantle(to, d, ux, uz, rise);
-            case DROP -> rise >= 0 ? null : drop(to, d, ux, uz, move.gait());
-        };
-        if (out == null || out.isEmpty()) {
-            log.info("meridian-core: {} to {} cannot be made from ({}, {}, {})", move.kind(), to, x, y, z);
-            return null;
-        }
-        for (Sample s : out) {
-            if (!terrain.fits(s.x(), s.y(), s.z(), Terrain.HEIGHT)) {
-                log.info("meridian-core: {} to {} is blocked at ({}, {}, {})", move.kind(), to, s.x(), s.y(), s.z());
-                return null;
-            }
-        }
-        return out;
-    }
-
-    /** Along the ground: speed picked up by the acceleration, a step taken at once, a step down at the edge. */
-    private List<Sample> walk(Vec3 to, double d, double ux, double uz, Movement.Gait gait) {
-        List<Sample> out = new ArrayList<>();
-        double speed = settings.speed(gait);
-        double v = carried;
-        double s = 0;
-        double y0 = y;
-        Kind kind = gait == Movement.Gait.WALK ? Kind.WALK : gait == Movement.Gait.SPRINT ? Kind.SPRINT : Kind.RUN;
-        if (d < 1e-6) {
-            out.add(new Sample(to.x(), to.y(), to.z(), 0, 0, 0, Kind.LAND));
-            return out;
-        }
-        while (s < d - 1e-9) {
-            v += (speed - v) * settings.acceleration;
-            v = Math.max(v, 0.5); // a standing start still moves the first tick
-            s = Math.min(d, s + v * BodySettings.TICK);
-            double h = to.y() > y0 ? to.y() : (s >= d * 0.5 ? to.y() : y0);
-            out.add(new Sample(x + ux * s, h, z + uz * s, ux * v, 0, uz * v, kind));
-            if (out.size() > 60 * 60) {
-                return null;
-            }
-        }
-        return out;
-    }
-
-    /** Off the ground at the jump force, over to the point, down under gravity onto it. */
-    private List<Sample> jump(Vec3 to, double d, double ux, double uz, double rise) {
-        double v0 = settings.jumpForce;
-        double g = BodySettings.GRAVITY;
-        double disc = v0 * v0 - 2 * g * rise;
-        if (disc < 0) {
-            return null;
-        }
-        double time = (v0 + Math.sqrt(disc)) / g;
-        double hv = d / time;
-        List<Sample> out = new ArrayList<>();
-        int n = (int) Math.ceil(time / BodySettings.TICK);
-        for (int i = 1; i <= n; i++) {
-            double t = Math.min(i * BodySettings.TICK, time);
-            double f = t / time;
-            double vy = v0 - g * t;
-            if (i == n) {
-                out.add(new Sample(to.x(), to.y(), to.z(), ux * hv, vy, uz * hv, Kind.LAND));
-            } else {
-                out.add(new Sample(x + ux * d * f, y + v0 * t - g * t * t / 2, z + uz * d * f, ux * hv, vy, uz * hv,
-                        vy > 0 ? Kind.JUMP_UP : Kind.FALL));
-            }
-        }
-        return out;
-    }
-
-    /**
-     * Up a wall to a ledge: a jump close to the wall until the hands are over the edge, then the
-     * pull-up - first up, beside the wall, then over the top onto the ledge.
-     */
-    private List<Sample> mantle(Vec3 to, double d, double ux, double uz, double rise) {
-        double v0 = settings.jumpForce;
-        double g = BodySettings.GRAVITY;
-        double apex = settings.jumpApex();
-        double grab = Math.min(rise - 1.2, apex * 0.9); // feet height (above the start) where the hands reach
-        double approach = Math.max(0, Math.min(d, 0.5) - Terrain.HALF); // up to the wall, not into it
-        List<Sample> out = new ArrayList<>();
-        double gx = x;
-        double gy = y;
-        double gz = z;
-        if (grab > 0) {
-            double tGrab = (v0 - Math.sqrt(Math.max(0, v0 * v0 - 2 * g * grab))) / g;
-            int n = Math.max(1, (int) Math.ceil(tGrab / BodySettings.TICK));
-            for (int i = 1; i <= n; i++) {
-                double t = Math.min(i * BodySettings.TICK, tGrab);
-                double f = t / tGrab;
-                double vy = v0 - g * t;
-                gx = x + ux * approach * f;
-                gy = y + v0 * t - g * t * t / 2;
-                gz = z + uz * approach * f;
-                out.add(new Sample(gx, gy, gz, ux * approach / tGrab, vy, uz * approach / tGrab, Kind.JUMP_UP));
-            }
-        }
-        int pull = (int) Math.round(BodySettings.MANTLE_SECONDS / BodySettings.TICK);
-        for (int i = 1; i <= pull; i++) {
-            double f = (double) i / pull;
-            double up = Math.min(1, f / 0.6);          // the first part of the pull-up raises the body
-            double over = Math.max(0, (f - 0.6) / 0.4); // then the rest takes it over the edge
-            double py = gy + (to.y() - gy) * up;
-            double px = gx + (to.x() - gx) * over;
-            double pz = gz + (to.z() - gz) * over;
-            out.add(new Sample(px, py, pz, 0, 0, 0, i == pull ? Kind.LAND : Kind.MANTLE));
-        }
-        return out;
-    }
-
-    /** Off an edge: walking until the body is past it, then falling under gravity, landing at the speed it fell. */
-    private List<Sample> drop(Vec3 to, double d, double ux, double uz, Movement.Gait gait) {
-        List<Sample> out = new ArrayList<>();
-        double speed = settings.speed(gait == Movement.Gait.SPRINT ? Movement.Gait.RUN : gait);
-        double edge = Math.min(d, 0.5 + Terrain.HALF + 0.05);
-        double v = Math.max(carried, 0.5);
-        double s = 0;
-        while (s < edge - 1e-9) {
-            v += (speed - v) * settings.acceleration;
-            s = Math.min(edge, s + v * BodySettings.TICK);
-            out.add(new Sample(x + ux * s, y, z + uz * s, ux * v, 0, uz * v, Kind.RUN));
-        }
-        double py = y;
-        double vy = 0;
-        int guard = 0;
+    /** The keys this tick: the move's pilot, else what is held, else none. */
+    private Controls controls() {
         while (true) {
-            vy -= BodySettings.GRAVITY * BodySettings.TICK;
-            py += vy * BodySettings.TICK;
-            s = Math.min(d, s + v * BodySettings.TICK);
-            double hv = s < d ? v : 0;
-            if (py <= to.y() || ++guard > 60 * 30) {
-                out.add(new Sample(to.x(), to.y(), to.z(), ux * hv, vy, uz * hv, Kind.LAND));
-                return out;
+            if (current == null) {
+                current = queue.pollFirst();
+                if (current == null) {
+                    break;
+                }
             }
-            out.add(new Sample(x + ux * s, py, z + uz * s, ux * hv, vy, uz * hv, Kind.FALL));
+            // Another move waiting: go through this one's point instead of stopping on it.
+            current.pilot().through(!queue.isEmpty());
+            Controls k = current.pilot().next(state);
+            if (k != null) {
+                return k;
+            }
+            current.done().complete(current.pilot().result());
+            current = null;
         }
+        if (held != null) {
+            return held;
+        }
+        // No keys: a body in flight stays in flight, as the client's does until flying is toggled off.
+        return new Controls(0, 0, state.yaw, state.pitch, false, false, false, false, state.flying);
     }
 
-    // ------------------------------------------------------------------
-    // The report
-    // ------------------------------------------------------------------
+    private static boolean changed(BodyState a, BodyState b) {
+        return Math.abs(a.x - b.x) > MOVED || Math.abs(a.y - b.y) > MOVED || Math.abs(a.z - b.z) > MOVED
+                || a.yaw != b.yaw || a.pitch != b.pitch;
+    }
 
-    private ClientMovement packet(double px, double py, double pz, double vx, double vy, double vz, Kind kind,
-                                  boolean idle) {
+    private void send(HeadlessClient c, MovementStates states) {
         ClientMovement m = new ClientMovement();
-        m.absolutePosition = new Position(px, py, pz);
-        m.bodyOrientation = new Direction(yaw, 0f, 0f);
-        m.lookOrientation = new Direction(yaw, 0f, 0f);
-        m.velocity = new Vector3d(vx, vy, vz);
-        m.movementStates = states(kind, idle, Math.abs(vy));
+        m.absolutePosition = new Position(state.x, state.y, state.z);
+        m.bodyOrientation = new Direction(state.yaw, 0f, 0f);
+        m.lookOrientation = new Direction(state.yaw, state.pitch, 0f);
+        m.velocity = new Vector3d(state.totalX(), state.totalY(), state.totalZ());
+        m.movementStates = states;
         m.mountedTo = 0;
+        own.addLast(new double[] {state.x, state.y, state.z});
+        while (own.size() > 32) {
+            own.pollFirst();
+        }
+        lastStates = states;
+        c.sendAsClient(m);
+    }
+
+    private static MovementStates states(BodyState s, Controls k) {
+        MovementStates m = new MovementStates();
+        boolean horizontal = Math.hypot(s.totalX(), s.totalZ()) > 1e-3;
+        m.horizontalIdle = !horizontal;
+        m.idle = !horizontal && Math.abs(s.totalY()) < 1e-3;
+        m.jumping = s.jumping;
+        m.flying = s.flying;
+        m.walking = s.walking && s.onGround;
+        m.running = s.running && s.onGround && !s.sprinting;
+        m.sprinting = s.sprinting;
+        m.crouching = s.crouching;
+        m.forcedCrouching = s.forcedCrouching;
+        m.falling = s.falling;
+        m.fallingFar = s.falling && -s.totalY() > 21;
+        m.climbing = s.climbing;
+        m.inFluid = s.inFluid;
+        m.swimming = s.swimming;
+        m.swimJumping = s.swimJumping;
+        m.onGround = s.onGround;
+        m.mantling = s.mantling;
+        m.sliding = s.sliding;
+        m.rolling = s.rolling;
         return m;
     }
 
-    private static MovementStates states(Kind kind, boolean idle, double fallSpeed) {
-        MovementStates s = new MovementStates();
-        s.idle = idle;
-        s.horizontalIdle = idle || kind == Kind.MANTLE || kind == Kind.LAND;
-        switch (kind) {
-            case WALK -> {
-                s.walking = true;
-                s.onGround = true;
-            }
-            case RUN -> {
-                s.running = true;
-                s.onGround = true;
-            }
-            case SPRINT -> {
-                s.running = true;
-                s.sprinting = true;
-                s.onGround = true;
-            }
-            case JUMP_UP -> s.jumping = true;
-            case FALL -> {
-                s.falling = true;
-                s.fallingFar = fallSpeed > BodySettings.HURT_FALL_SPEED;
-            }
-            case MANTLE -> s.mantling = true;
-            case LAND -> s.onGround = true;
+    // ------------------------------------------------------------------
+    // Prediction
+    // ------------------------------------------------------------------
+
+    /** Moves played on a copy of the body, one after another. */
+    synchronized Movement.Prediction predict(java.util.List<Movement.Move> moves, java.util.List<String> trace) {
+        if (state == null || physics.surroundings().settings() == null) {
+            return new Movement.Prediction(new MoveResult(MoveResult.Status.NOT_AVAILABLE, null), 0, false, 0);
         }
-        return s;
+        return predictFrom(state.copy(), moves, physics, effects.get(), trace);
+    }
+
+    static Movement.Prediction predictFrom(BodyState s, java.util.List<Movement.Move> moves, Physics physics,
+                                           Surroundings.EffectMotion effects, java.util.List<String> trace) {
+        int n = 0;
+        boolean hurt = false;
+        double hurtSpeed = physics.surroundings().settings().minFallSpeedToEngageRoll;
+        int arrived = 0;
+        MoveResult last = new MoveResult(MoveResult.Status.ARRIVED, new Vec3(s.x, s.y, s.z));
+        for (int i = 0; i < moves.size(); i++) {
+            Pilot p = new Pilot(moves.get(i), physics, i + 1 < moves.size());
+            while (true) {
+                Controls k = p.next(s);
+                if (k == null) {
+                    break;
+                }
+                boolean wasGround = s.onGround;
+                physics.step(s, k, effects);
+                if (!wasGround && s.onGround && s.landingSpeed > hurtSpeed && !s.inFluid && !s.rolling) {
+                    hurt = true;
+                }
+                if (trace != null && trace.size() < 4000) {
+                    trace.add(String.format(java.util.Locale.ROOT,
+                            "%d.%d p=(%.3f %.3f %.3f) v=(%.2f %.2f %.2f) f=%.2f s=%.2f yaw=%.0f%s%s%s%s%s", i, n, s.x, s.y,
+                            s.z, s.totalX(), s.totalY(), s.totalZ(), k.forward(), k.strafe(), Math.toDegrees(k.yaw()),
+                            k.jump() ? " J" : "", s.onGround ? " G" : "", s.climbing ? " C" : "", s.swimming ? " W" : "",
+                            s.ledge != null ? " L" : ""));
+                }
+                n++;
+            }
+            last = p.result();
+            if (!last.arrived()) {
+                break;
+            }
+            arrived++;
+        }
+        return new Movement.Prediction(last, n * Physics.DT, hurt, arrived);
     }
 }

@@ -74,6 +74,9 @@ final class ForgeRun {
 
         InteractionSimulator.RootResolver resolver();
 
+        /** The body a forged chain pushes, or {@code null} where core plays no body. */
+        ForceBody forceBody();
+
         Scheduler scheduler();
 
         /** The run is settled and done; it may be forgotten. */
@@ -463,7 +466,7 @@ final class ForgeRun {
             if (f.block() != null) {
                 data.blockPosition = f.block().clone();
             }
-            Lane lane = new Lane(id, main.type, new ChainWalk(root, forkCtx, host.resolver(), selectHitBlock),
+            Lane lane = new Lane(id, main.type, new ChainWalk(root, forkCtx, host.resolver(), selectHitBlock).live(host.forceBody()),
                     data, false, ticks + 1);
             lane.forkIndex = i;
             lanes.put(lane.key, lane);

@@ -114,9 +114,22 @@ public final class ChunkTracker {
         }
     }
 
+    /**
+     * The blocks of a section, for a change to them: one the server left out of a column it sent
+     * is all air and gets made now (a block placed high in the sky); one of a column never sent
+     * stays unknown.
+     */
+    private int[] sectionForChange(SectionKey key) {
+        int[] section = sections.get(key);
+        if (section == null && columns.contains(column(key.x(), key.z()))) {
+            section = sections.computeIfAbsent(key, k -> new int[ChunkDecoder.SECTION_BLOCKS]);
+        }
+        return section;
+    }
+
     void onServerSetBlock(ServerSetBlock packet) {
         SectionKey key = new SectionKey(packet.x >> 5, packet.y >> 5, packet.z >> 5);
-        int[] section = sections.get(key);
+        int[] section = sectionForChange(key);
         if (section != null) {
             int index = indexBlock(packet.x, packet.y, packet.z);
             section[index] = packet.blockId;
@@ -130,7 +143,7 @@ public final class ChunkTracker {
             return;
         }
         SectionKey key = new SectionKey(packet.x, packet.y, packet.z);
-        int[] section = sections.get(key);
+        int[] section = sectionForChange(key);
         if (section == null) {
             return;
         }

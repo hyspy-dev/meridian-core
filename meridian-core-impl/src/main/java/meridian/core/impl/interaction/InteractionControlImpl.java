@@ -159,6 +159,14 @@ public final class InteractionControlImpl implements InteractionControl {
     private final Map<Integer, ForgeRun> runs = new ConcurrentHashMap<>();
     /** How long a settled run still hears the server: a late fork, a late replay. */
     private static final Duration RUN_LINGER = Duration.ofSeconds(30);
+    /** The body forged pushes move ({@code ApplyForceInteraction}); set by core for a headless session. */
+    private volatile ForceBody forceBody;
+
+    /** The body forged chains push: core's, for the session it plays the client of. */
+    public void forceBody(ForceBody body) {
+        this.forceBody = body;
+    }
+
     /** What a run needs from this control. */
     private final ForgeRun.Host host = new ForgeRun.Host() {
         @Override
@@ -179,6 +187,11 @@ public final class InteractionControlImpl implements InteractionControl {
         @Override
         public InteractionSimulator.RootResolver resolver() {
             return resolver;
+        }
+
+        @Override
+        public ForceBody forceBody() {
+            return forceBody;
         }
 
         @Override
@@ -765,6 +778,11 @@ public final class InteractionControlImpl implements InteractionControl {
     }
 
     @Override
+    public CompletableFuture<InteractionOutcome> dodge() {
+        return enqueueForge(() -> forgeAim(-1, InteractionType.Dodge));
+    }
+
+    @Override
     public CompletableFuture<InteractionOutcome> useItem() {
         return enqueueForge(() -> forgeAim(-1, InteractionType.Secondary));
     }
@@ -954,7 +972,7 @@ public final class InteractionControlImpl implements InteractionControl {
                 inventory.utilityItemId(), inventory.toolsItemId());
         log.info("meridian-core: answering server chain {} ({} root {})", s.chainId, type,
                 s.overrideRootInteraction);
-        return new ForgeRun(host, s.chainId, header, type, new ChainWalk(compiled, ctx, resolver, Map.of()),
+        return new ForgeRun(host, s.chainId, header, type, new ChainWalk(compiled, ctx, resolver, Map.of()).live(forceBody),
                 data, ctx, Map.of()).serverStarted();
     }
 
@@ -1005,7 +1023,7 @@ public final class InteractionControlImpl implements InteractionControl {
             data.entityId = serverFork.data.entityId;
             data.hitLocation = serverFork.data.hitLocation;
         }
-        if (run.answerFork(forkedId, forkType, new ChainWalk(compiled, ctx, resolver, Map.of()), data)) {
+        if (run.answerFork(forkedId, forkType, new ChainWalk(compiled, ctx, resolver, Map.of()).live(forceBody), data)) {
             log.info("meridian-core: answering server fork {} of chain {} (root {})",
                     ForgeRun.path(forkedId), run.chainId(), forkRoot);
         }
@@ -1514,7 +1532,7 @@ public final class InteractionControlImpl implements InteractionControl {
                 inventory.utilityItemId(), inventory.toolsItemId());
         int forgedId = nat.allocateForged();
         ForgeRun run = new ForgeRun(host, forgedId, header, type,
-                new ChainWalk(compiled, ctx, resolver, hitBlockMap).hold(holdSeconds), data, ctx, hitBlockMap);
+                new ChainWalk(compiled, ctx, resolver, hitBlockMap).live(forceBody).hold(holdSeconds), data, ctx, hitBlockMap);
         runs.put(forgedId, run);
         log.info("meridian-core: forged {} chain {} (root {}, item {}) at {} — live", type, forgedId,
                 rootId.getAsInt(), itemId,
@@ -1528,6 +1546,12 @@ public final class InteractionControlImpl implements InteractionControl {
      * or the chain observed for this (type, item) when the catalog is not in yet.
      */
     private OptionalInt resolveRoot(InteractionType type, String itemId) {
+        // The server's InteractionContext.getRootInteractionId: the player entity's own roots
+        // first (its Interactions component), then the held item's.
+        Integer own = entities.selfInteractions().get(type);
+        if (own != null) {
+            return OptionalInt.of(own);
+        }
         OptionalInt fromItem = items.rootFor(itemId, type);
         if (fromItem.isPresent()) {
             return fromItem;

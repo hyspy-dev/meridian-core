@@ -13,4 +13,12 @@ public interface EntityLookup {
 
     /** The player's own stats, as the server last said. */
     StatSheet selfStats();
+
+    /**
+     * The player entity's own interaction roots ({@code Interactions} component) by type - what
+     * the server looks at before the held item (a dodge lives here). Empty when it has none.
+     */
+    default java.util.Map<meridian.protocol.InteractionType, Integer> selfInteractions() {
+        return java.util.Map.of();
+    }
 }
