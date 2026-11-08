@@ -13,9 +13,10 @@ import java.util.concurrent.CompletableFuture;
  *
  * <p><b>The action methods are asynchronous.</b> A forge plays out over server
  * ticks and core serializes all forges through one queue; each method returns a
- * {@link CompletableFuture} that completes when that chain has finished, so
- * follow-up work can be sequenced with {@code .thenRun(...)}. See
- * {@link InteractionControl} for the queue's semantics.
+ * {@link CompletableFuture} of how the server ran that chain
+ * ({@link InteractionOutcome}), so follow-up work can act on it with
+ * {@code .thenAccept(...)}. See {@link InteractionControl} for the queue's
+ * semantics.
  */
 public interface Block {
 
@@ -81,42 +82,42 @@ public interface Block {
     /**
      * Forges a {@code Use} interaction on this block — e.g. harvesting a crop.
      *
-     * @return a future completing when the forged chain has played out
+     * @return how the server ran the chain
      */
-    CompletableFuture<Void> use();
+    CompletableFuture<InteractionOutcome> use();
 
     /**
      * Forges a {@code Primary} (left-click) interaction on this block — a single
      * hit. The held item acts as the tool; the server applies the damage, so a
      * harder block or a weaker tool may need several hits to break.
      *
-     * @return a future completing when the forged chain has played out
+     * @return how the server ran the chain
      */
-    CompletableFuture<Void> hit();
+    CompletableFuture<InteractionOutcome> hit();
 
     /**
      * Forges a seed-planting interaction; the crop block lands one above.
      *
-     * @return a future completing when the forged chain has played out
+     * @return how the server ran the chain
      */
-    CompletableFuture<Void> plant();
+    CompletableFuture<InteractionOutcome> plant();
 
     /**
      * Forges a block placement on this block's top face (one above). Shorthand
      * for {@link #place(Face)} with {@link Face#UP}.
      *
-     * @return a future completing when the forged chain has played out
+     * @return how the server ran the chain
      */
-    CompletableFuture<Void> place();
+    CompletableFuture<InteractionOutcome> place();
 
     /**
      * Forges a block placement against this block's {@code face}; the held
      * building block lands in the adjacent cell. Any face — build sideways
      * (bridge) or below, not just on top.
      *
-     * @return a future completing when the forged chain has played out
+     * @return how the server ran the chain
      */
-    CompletableFuture<Void> place(Face face);
+    CompletableFuture<InteractionOutcome> place(Face face);
 
     /**
      * Forges a block placement against this block's {@code against} face (where
@@ -126,14 +127,14 @@ public interface Block {
      * whatever neighbour exists, yet pin a rotatable block's orientation.
      * {@link #place(Face)} is this with {@code orient == against}.
      *
-     * @return a future completing when the forged chain has played out
+     * @return how the server ran the chain
      */
-    CompletableFuture<Void> place(Face against, Face orient);
+    CompletableFuture<InteractionOutcome> place(Face against, Face orient);
 
     /**
      * Forges a watering-can interaction on this block.
      *
-     * @return a future completing when the forged charge has played out
+     * @return how the server ran the chain
      */
-    CompletableFuture<Void> water();
+    CompletableFuture<InteractionOutcome> water();
 }

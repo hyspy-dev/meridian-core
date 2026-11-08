@@ -64,12 +64,12 @@ public interface Player {
      * so this is the honest way to equip a different item before an action.
      *
      * <p>Asynchronous, like every forge — see {@link Block}. The returned future
-     * completes once the switch chain has played out, so an action that needs
-     * the new item can be chained with {@code .thenRun(...)}.
+     * completes with how the server ran the switch, so an action that needs the
+     * new item can be chained with {@code .thenCompose(...)}.
      *
-     * @return a future completing when the switch chain has played out
+     * @return how the server ran the switch; {@code FINISHED} at once when the slot is active already
      */
-    CompletableFuture<Void> selectHotbarSlot(int slot);
+    CompletableFuture<InteractionOutcome> selectHotbarSlot(int slot);
 
     /**
      * Teleports the player to {@code position} — a real teleport the player sees.

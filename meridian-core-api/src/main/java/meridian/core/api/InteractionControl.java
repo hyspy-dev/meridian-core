@@ -11,20 +11,27 @@ import java.util.concurrent.CompletableFuture;
  * interaction ids, the VM produces the operation data, the inventory tracker
  * supplies the held-item state. A Layer-2 consumer just names a block.
  *
- * <p><b>Forges are asynchronous.</b> A forge does not run instantly — a
- * watering charge plays out over many server ticks — and core serializes all
- * forges through one queue so concurrent callers never clobber each other.
- * Every forge method therefore returns a {@link CompletableFuture} that
- * completes once <em>that</em> chain has fully played out, so the caller can
- * sequence follow-up work with {@code .thenRun(...)} / {@code .thenCompose(...)}.
- * The queue only serializes — it adds no padding, so queued forges run
- * back-to-back at the tick rate; any human-like spacing is the caller's choice.
- * The future always completes normally — a forge that could not run (no
- * session, no root) simply completes with no effect. Callbacks run on core's
- * scheduler thread.
+ * <p><b>Forges are played as the client plays them.</b> A chain goes out a
+ * packet per tick - a watering charge plays out over many - and core follows
+ * the server while it does: an operation only the server decides waits for the
+ * server's word, and where the server ran an operation otherwise than core
+ * guessed, core goes back there and replays the rest the server's way.
+ *
+ * <p><b>Forges are asynchronous.</b> Core serializes all forges through one
+ * queue so concurrent callers never clobber each other; the next chain starts a
+ * tick after the one before has been played, as the client's would. Every forge
+ * method returns a {@link CompletableFuture} of the {@link InteractionOutcome} -
+ * how the server ran <em>that</em> chain - once the server has said so, so the
+ * caller can act on it with {@code .thenAccept(...)} / {@code .thenCompose(...)}:
+ * retry, undo its own plans, try something else. The queue only serializes - it
+ * adds no padding, so queued forges run back-to-back at the tick rate; any
+ * human-like spacing is the caller's choice. The future always completes
+ * normally - a forge that could not run (no session, no root) completes with
+ * {@link InteractionOutcome.Status#NOT_SENT}. Callbacks run on core's scheduler
+ * thread.
  *
  * <p>All calls are no-ops while {@link #available()} is {@code false}; the
- * returned future still completes.
+ * returned future still completes, {@code NOT_SENT}.
  */
 public interface InteractionControl {
 
@@ -38,35 +45,35 @@ public interface InteractionControl {
      * Forges a {@code Use} interaction on {@code pos} — e.g. harvesting a ripe
      * crop. The server resolves the interaction from the target block.
      *
-     * @return a future completing when the forged chain has played out
+     * @return how the server ran the chain
      */
-    CompletableFuture<Void> useOnBlock(BlockPos pos);
+    CompletableFuture<InteractionOutcome> useOnBlock(BlockPos pos);
 
     /**
      * Forges a {@code Primary} (left-click) interaction on {@code pos} — a
      * single hit. The held item acts as the tool; the server applies the
      * damage, so a block may need several hits to break.
      *
-     * @return a future completing when the forged chain has played out
+     * @return how the server ran the chain
      */
-    CompletableFuture<Void> hitBlock(BlockPos pos);
+    CompletableFuture<InteractionOutcome> hitBlock(BlockPos pos);
 
     /**
      * Forges a seed-planting interaction on {@code pos} (tilled soil); the crop
      * block lands at {@code y + 1}. The held item must be the seed.
      *
-     * @return a future completing when the forged chain has played out
+     * @return how the server ran the chain
      */
-    CompletableFuture<Void> plantOnBlock(BlockPos pos);
+    CompletableFuture<InteractionOutcome> plantOnBlock(BlockPos pos);
 
     /**
      * Forges a block placement on the top face of {@code pos} (lands at
      * {@code y + 1}). Shorthand for {@link #placeOnBlock(BlockPos, Face)} with
      * {@link Face#UP}.
      *
-     * @return a future completing when the forged chain has played out
+     * @return how the server ran the chain
      */
-    CompletableFuture<Void> placeOnBlock(BlockPos pos);
+    CompletableFuture<InteractionOutcome> placeOnBlock(BlockPos pos);
 
     /**
      * Forges a block placement against {@code target}'s {@code face}: the held
@@ -79,9 +86,9 @@ public interface InteractionControl {
      * (distance) check — no adjacent-support requirement — so {@code target}
      * just needs to be a block you click and the destination cell within reach.
      *
-     * @return a future completing when the forged chain has played out
+     * @return how the server ran the chain
      */
-    CompletableFuture<Void> placeOnBlock(BlockPos target, Face face);
+    CompletableFuture<InteractionOutcome> placeOnBlock(BlockPos target, Face face);
 
     /**
      * Forges a block placement against {@code target}'s {@code face} (the
@@ -94,17 +101,17 @@ public interface InteractionControl {
      * an existing one) yet pin a rotatable block's facing to a fixed direction.
      * {@link #placeOnBlock(BlockPos, Face)} is this with {@code orient == face}.
      *
-     * @return a future completing when the forged chain has played out
+     * @return how the server ran the chain
      */
-    CompletableFuture<Void> placeOnBlock(BlockPos target, Face face, Face orient);
+    CompletableFuture<InteractionOutcome> placeOnBlock(BlockPos target, Face face, Face orient);
 
     /**
      * Forges a watering-can interaction on {@code pos}. The held item must be
      * the can.
      *
-     * @return a future completing when the forged charge has played out
+     * @return how the server ran the chain
      */
-    CompletableFuture<Void> waterBlock(BlockPos pos);
+    CompletableFuture<InteractionOutcome> waterBlock(BlockPos pos);
 
     /**
      * Forges a hotbar slot switch — a {@code SwapFrom} / {@code ChangeActiveSlot}
@@ -113,9 +120,9 @@ public interface InteractionControl {
      * the active slot, so this is the only honest way to "equip" a different
      * item before forging an interaction that needs it.
      *
-     * @return a future completing when the switch chain has played out
+     * @return how the server ran the switch; {@code FINISHED} at once when the slot is active already
      */
-    CompletableFuture<Void> switchHotbarSlot(int slot);
+    CompletableFuture<InteractionOutcome> switchHotbarSlot(int slot);
 
     /**
      * Forges one native dig swing of the held tool, aimed at {@code aim}. Only the
@@ -127,21 +134,21 @@ public interface InteractionControl {
      * player). A tool without a {@code SelectInteraction} (e.g. a pickaxe) simply
      * breaks the aimed block.
      *
-     * @return a future completing when the forged swing's main chain has played out
+     * @return how the server ran the swing; its {@code forks} are the blocks it broke
      */
-    CompletableFuture<Void> digSwing(BlockPos aim);
+    CompletableFuture<InteractionOutcome> digSwing(BlockPos aim);
 
     /**
      * Forges one attack on an entity: the held item's {@code Primary} swing, reporting the
      * entity as what it hit. The server takes a player's entity hits from the client and runs
      * the item's hit (its damage, knockback, effects) on the entity - as when the player clicks
-     * it. Reach is the caller's to keep: the server does not check it for a swing.
+     * it. The damage lands only within the held item's reach (plus a little), from the eyes.
      *
      * @param entityId the entity's network id ({@link EntityTracker})
-     * @return a future completing when the swing has played out; an entity core does not see
-     *         sends nothing
+     * @return how the server ran the swing; its {@code forks} are the hits it landed. An entity
+     *         core does not see sends nothing
      */
-    default CompletableFuture<Void> hitEntity(int entityId) {
+    default CompletableFuture<InteractionOutcome> hitEntity(int entityId) {
         return CompletableFuture.failedFuture(new UnsupportedOperationException("hitEntity"));
     }
 
@@ -151,9 +158,9 @@ public interface InteractionControl {
      * and only within the player's reach.
      *
      * @param entityId the entity's network id ({@link EntityTracker})
-     * @return a future completing when the use has played out
+     * @return how the server ran the use
      */
-    default CompletableFuture<Void> useOnEntity(int entityId) {
+    default CompletableFuture<InteractionOutcome> useOnEntity(int entityId) {
         return CompletableFuture.failedFuture(new UnsupportedOperationException("useOnEntity"));
     }
 
@@ -161,18 +168,18 @@ public interface InteractionControl {
      * Forges the held item's {@code Secondary} use aimed at nothing - eating, drinking, a
      * thrown or charged item: what the right mouse button does in the open air.
      *
-     * @return a future completing when the use has played out
+     * @return how the server ran the use
      */
-    default CompletableFuture<Void> useItem() {
+    default CompletableFuture<InteractionOutcome> useItem() {
         return CompletableFuture.failedFuture(new UnsupportedOperationException("useItem"));
     }
 
     /**
      * Forges the held item's {@code Primary} swing aimed at nothing - a swing in the open air.
      *
-     * @return a future completing when the swing has played out
+     * @return how the server ran the swing
      */
-    default CompletableFuture<Void> swing() {
+    default CompletableFuture<InteractionOutcome> swing() {
         return CompletableFuture.failedFuture(new UnsupportedOperationException("swing"));
     }
 

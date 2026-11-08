@@ -11,6 +11,7 @@ import meridian.core.api.Block;
 import meridian.core.api.BlockPos;
 import meridian.core.api.EntityTracker;
 import meridian.core.api.Face;
+import meridian.core.api.InteractionOutcome;
 import meridian.core.api.FluidCell;
 import meridian.core.api.InteractionControl;
 import meridian.core.api.Player;
@@ -76,42 +77,82 @@ final class CoreCommands {
             case "useentity" -> {
                 int id = Integer.parseInt(args.get(1));
                 faceIfHeadless(id);
-                yield afterEntity(interactions().useOnEntity(id), id);
+                yield afterEntity(interactions().useOnEntity(id).thenApply(List::of), id);
             }
-            case "useitem" -> repeat(times(args, 1), () -> interactions().useItem()).thenApply(v -> pos());
-            case "swing" -> interactions().swing().thenApply(v -> pos());
+            case "useitem" -> repeat(times(args, 1), () -> interactions().useItem()).thenApply(this::withPos);
+            case "swing" -> interactions().swing().thenApply(List::of).thenApply(this::withPos);
             case "slot" -> interactions().switchHotbarSlot(Integer.parseInt(args.get(1)))
-                    .thenApply(v -> pos());
+                    .thenApply(List::of).thenApply(this::withPos);
             case "tp" -> {
                 BlockPos p = at(args, 1);
                 player().teleport(new Vec3(p.x() + 0.5, p.y(), p.z() + 0.5));
                 yield CompletableFuture.completedFuture(Map.of("teleported", p));
             }
-            case "use" -> after(interactions().useOnBlock(at(args, 1)), at(args, 1));
+            case "use" -> after(interactions().useOnBlock(at(args, 1)).thenApply(List::of), at(args, 1));
             case "hit" -> after(repeat(times(args, 4), () -> interactions().hitBlock(at(args, 1))), at(args, 1));
-            case "plant" -> after(interactions().plantOnBlock(at(args, 1)), Face.UP.from(at(args, 1)));
-            case "water" -> after(interactions().waterBlock(at(args, 1)), at(args, 1));
+            case "plant" -> after(interactions().plantOnBlock(at(args, 1)).thenApply(List::of), Face.UP.from(at(args, 1)));
+            case "water" -> after(interactions().waterBlock(at(args, 1)).thenApply(List::of), at(args, 1));
             case "dig" -> after(repeat(times(args, 4), () -> interactions().digSwing(at(args, 1))), at(args, 1));
             case "place" -> {
                 BlockPos target = at(args, 1);
                 Face face = args.size() > 4 ? face(args.get(4)) : Face.UP;
                 Face orient = args.size() > 5 ? face(args.get(5)) : face;
-                yield after(interactions().placeOnBlock(target, face, orient), face.from(target));
+                yield after(interactions().placeOnBlock(target, face, orient).thenApply(List::of), face.from(target));
             }
             default -> throw new IllegalArgumentException("core: " + USAGE);
         };
     }
 
     /**
-     * Runs an action {@code n} times, each once the one before has played out - the way a held
-     * button swings: a block's damage wears off between hits spaced further apart.
+     * Runs an action {@code n} times, each once the server has said how the one before went - the
+     * way a held button swings: a block's damage wears off between hits spaced further apart.
      */
-    private static CompletableFuture<Void> repeat(int n, java.util.function.Supplier<CompletableFuture<Void>> action) {
-        CompletableFuture<Void> f = action.get();
+    private static CompletableFuture<List<InteractionOutcome>> repeat(int n,
+            java.util.function.Supplier<CompletableFuture<InteractionOutcome>> action) {
+        List<InteractionOutcome> all = new java.util.concurrent.CopyOnWriteArrayList<>();
+        CompletableFuture<InteractionOutcome> f = action.get().thenApply(o -> add(all, o));
         for (int i = 1; i < n; i++) {
-            f = f.thenCompose(v -> action.get());
+            f = f.thenCompose(v -> action.get()).thenApply(o -> add(all, o));
         }
-        return f;
+        return f.thenApply(v -> List.copyOf(all));
+    }
+
+    private static InteractionOutcome add(List<InteractionOutcome> all, InteractionOutcome o) {
+        all.add(o);
+        return o;
+    }
+
+    /** How the server ran each chain - one, or a list of them. */
+    private static Object outcomes(List<InteractionOutcome> list) {
+        if (list.size() == 1) {
+            return outcome(list.get(0));
+        }
+        return list.stream().map(CoreCommands::outcome).toList();
+    }
+
+    /** One chain's outcome: how it ended, what failed in it, its forks, how often core was corrected. */
+    private static Map<String, Object> outcome(InteractionOutcome o) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("status", o.status().name());
+        out.put("ops", o.steps().size());
+        List<String> failed = o.failedSteps().stream().map(s -> s.index() + " " + s.operation()).toList();
+        if (!failed.isEmpty()) {
+            out.put("failed", failed);
+        }
+        if (!o.forks().isEmpty()) {
+            out.put("forks", o.forks());
+        }
+        if (o.corrections() > 0) {
+            out.put("corrections", o.corrections());
+        }
+        return out;
+    }
+
+    /** Where the player is, with how the chains went. */
+    private Map<String, Object> withPos(List<InteractionOutcome> list) {
+        Map<String, Object> out = new LinkedHashMap<>(pos());
+        out.put("outcome", outcomes(list));
+        return out;
     }
 
     /** The optional repeat count after {@code x y z}, at {@code at}: 1 when absent. */
@@ -119,16 +160,16 @@ final class CoreCommands {
         return args.size() > at ? Math.max(1, Integer.parseInt(args.get(at))) : 1;
     }
 
-    /** When the chain has played out: the block it was aimed at, as core now sees it. */
-    private CompletableFuture<Map<String, Object>> after(CompletableFuture<Void> chain, BlockPos look) {
-        // The chain is done when our last packet is out; the server's block update follows a
-        // tick or so later, so the block is read after a short wait - what it is then is the
-        // server's answer, not our guess.
-        return chain.thenCompose(v -> CompletableFuture.supplyAsync(() -> null,
-                CompletableFuture.delayedExecutor(300, java.util.concurrent.TimeUnit.MILLISECONDS)))
-                .thenApply(v -> {
+    /** When the server has said how the chain went: that, and the block it was aimed at as core now sees it. */
+    private CompletableFuture<Map<String, Object>> after(CompletableFuture<List<InteractionOutcome>> chain,
+                                                         BlockPos look) {
+        // The server's block update comes about with its word on the chain; the block is read a
+        // moment later, so what it is then is the server's answer, not our guess.
+        return chain.thenCompose(list -> CompletableFuture.supplyAsync(() -> list,
+                CompletableFuture.delayedExecutor(150, java.util.concurrent.TimeUnit.MILLISECONDS)))
+                .thenApply(list -> {
             Map<String, Object> out = new LinkedHashMap<>();
-            out.put("done", true);
+            out.put("outcome", outcomes(list));
             out.put("block", block(look));
             return out;
         });
@@ -271,13 +312,14 @@ final class CoreCommands {
         return e;
     }
 
-    /** When the action has played out: the entity as core now sees it, or that it is gone. */
-    private CompletableFuture<Map<String, Object>> afterEntity(CompletableFuture<Void> action, int id) {
-        return action.thenCompose(v -> CompletableFuture.supplyAsync(() -> null,
-                CompletableFuture.delayedExecutor(300, java.util.concurrent.TimeUnit.MILLISECONDS)))
-                .thenApply(v -> {
+    /** When the server has said how the action went: that, and the entity as core now sees it, or that it is gone. */
+    private CompletableFuture<Map<String, Object>> afterEntity(CompletableFuture<List<InteractionOutcome>> action,
+                                                               int id) {
+        return action.thenCompose(list -> CompletableFuture.supplyAsync(() -> list,
+                CompletableFuture.delayedExecutor(150, java.util.concurrent.TimeUnit.MILLISECONDS)))
+                .thenApply(list -> {
                     Map<String, Object> out = new LinkedHashMap<>();
-                    out.put("done", true);
+                    out.put("outcome", outcomes(list));
                     Optional<Vec3> at = entityTracker().positionOf(id);
                     out.put("entity", at.isPresent() ? entity(id, distanceTo(at.get())) : Map.of("id", id, "gone", true));
                     return out;
