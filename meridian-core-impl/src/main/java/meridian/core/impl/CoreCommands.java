@@ -30,7 +30,7 @@ final class CoreCommands {
 
     static final String USAGE = "pos | block <x y z> | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
             + "use|plant|water <x y z> | hit|dig <x y z> [times] | place <x y z> [face] [orient] | "
-            + "entities [range] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | assets | asset <path>";
+            + "entities [range] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | assets | asset <path> | movement | stand <x y z> | move <walk|jump|mantle|drop> <x y z> [walk|run|sprint]";
 
     /** Where the eyes are above the feet - {@code PlayerImpl}'s raycast origin. */
     private static final double EYE_HEIGHT = 1.6;
@@ -65,6 +65,9 @@ final class CoreCommands {
             case "inv" -> CompletableFuture.completedFuture(inventory());
             case "stats" -> CompletableFuture.completedFuture(stats());
             case "assets" -> CompletableFuture.completedFuture(assets());
+            case "movement" -> CompletableFuture.completedFuture(movement());
+            case "stand" -> CompletableFuture.completedFuture(stand(at(args, 1)));
+            case "move" -> move(args);
             case "asset" -> CompletableFuture.completedFuture(asset(args.get(1)));
             case "chain" -> CompletableFuture.completedFuture(chain(Integer.parseInt(args.get(1))));
             case "face" -> CompletableFuture.completedFuture(args.size() == 2
@@ -173,6 +176,59 @@ final class CoreCommands {
             return null;
         }
         return java.time.Duration.ofNanos((long) (Double.parseDouble(args.get(at + 1)) * 1_000_000_000L));
+    }
+
+    private meridian.core.api.Movement movementService() {
+        return ctx.services().get(meridian.core.api.Movement.class)
+                .orElseThrow(() -> new IllegalStateException("no Movement service"));
+    }
+
+    /** The body: where it is, whether it stands, and what it can do. */
+    private Map<String, Object> movement() {
+        meridian.core.api.Movement m = movementService();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("available", m.available());
+        Vec3 p = m.position();
+        if (p != null) {
+            out.put("position", Map.of("x", p.x(), "y", p.y(), "z", p.z()));
+        }
+        out.put("onGround", m.onGround());
+        out.put("capabilities", m.capabilities());
+        return out;
+    }
+
+    /** Where the feet are when the body stands in a cell, or that it cannot. */
+    private Map<String, Object> stand(BlockPos cell) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("cell", cell);
+        java.util.OptionalDouble feet = movementService().standAt(cell);
+        out.put("stands", feet.isPresent());
+        feet.ifPresent(f -> out.put("feet", f));
+        out.put("known", movementService().known(cell));
+        return out;
+    }
+
+    /** {@code move <walk|jump|mantle|drop> <x y z> [walk|run|sprint]}: one move onto that cell. */
+    private CompletableFuture<Map<String, Object>> move(List<String> args) {
+        meridian.core.api.Movement m = movementService();
+        meridian.core.api.Movement.Kind kind = meridian.core.api.Movement.Kind.valueOf(args.get(1).toUpperCase(Locale.ROOT));
+        BlockPos cell = at(args, 2);
+        meridian.core.api.Movement.Gait gait = args.size() > 5
+                ? meridian.core.api.Movement.Gait.valueOf(args.get(5).toUpperCase(Locale.ROOT))
+                : meridian.core.api.Movement.Gait.RUN;
+        java.util.OptionalDouble feet = m.standAt(cell);
+        if (feet.isEmpty()) {
+            throw new IllegalArgumentException("nobody stands in " + cell);
+        }
+        Vec3 to = new Vec3(cell.x() + 0.5, feet.getAsDouble(), cell.z() + 0.5);
+        return m.move(new meridian.core.api.Movement.Move(kind, to, gait)).thenApply(r -> {
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("status", r.status().name());
+            if (r.at() != null) {
+                out.put("at", Map.of("x", r.at().x(), "y", r.at().y(), "z", r.at().z()));
+            }
+            return out;
+        });
     }
 
     /** Where the game's own files come from: the installation, its version. */

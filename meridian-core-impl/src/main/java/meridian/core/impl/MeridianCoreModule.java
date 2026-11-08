@@ -199,6 +199,18 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
                 (direction, session) -> new HeadlessClientHandler(entityTracker));
 
+        // Movement: the headless player's body - what the ground allows (the blocks' own collision
+        // shapes) and moves along it, reported tick by tick as the client reports them.
+        meridian.core.impl.movement.BlockHitboxes blockHitboxes = new meridian.core.impl.movement.BlockHitboxes();
+        meridian.core.impl.movement.Terrain terrain =
+                new meridian.core.impl.movement.Terrain(chunkTracker, worldState, blockHitboxes);
+        meridian.core.impl.movement.MovementImpl movement = new meridian.core.impl.movement.MovementImpl(
+                terrain, blockHitboxes, ctx.scheduler(),
+                () -> sessionHolder.get().map(HeadlessClientHandler::headlessOf).orElse(null),
+                () -> entityTracker.localPosition().orElse(null));
+        ctx.services().provide(meridian.core.api.Movement.class, movement);
+        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY, (direction, session) -> movement.observer());
+
         // ChunkView: what the client is allowed to forget. Sits at NORMAL because it drops, and
         // downstream of the feed above, which has already seen the unload.
         ChunkViewImpl chunkView = new ChunkViewImpl();

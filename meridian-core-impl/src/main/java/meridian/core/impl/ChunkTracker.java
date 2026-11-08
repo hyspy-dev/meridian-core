@@ -77,11 +77,27 @@ public final class ChunkTracker {
     // Ingest
     // ------------------------------------------------------------------
 
+    /** Columns (by section x, z) the server has sent sections of - where a missing section is air. */
+    private final java.util.Set<Long> columns = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    private static long column(int sectionX, int sectionZ) {
+        return ((long) sectionX << 32) | (sectionZ & 0xFFFFFFFFL);
+    }
+
+    /**
+     * Whether the server has sent the column a world position stands in. The server leaves out a
+     * column's sections of nothing but air, so there a missing section is air, not unknown.
+     */
+    public boolean columnKnown(int x, int z) {
+        return columns.contains(column(x >> 5, z >> 5));
+    }
+
     void onSetChunk(SetChunk packet) {
         try {
             SectionKey key = new SectionKey(packet.x, packet.y, packet.z);
             ChunkDecoder.Section section = ChunkDecoder.decodeSection(packet.data);
             sections.put(key, section.ids());
+            columns.add(column(packet.x, packet.z));
             if (section.rotations() != null) {
                 rotations.put(key, section.rotations());
             } else {
@@ -246,6 +262,7 @@ public final class ChunkTracker {
 
     /** Everything standing over one column of the world, at every height. */
     private void unloadColumn(int chunkX, int chunkZ) {
+        columns.remove(column(chunkX, chunkZ));
         sections.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
         rotations.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
         fillers.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
