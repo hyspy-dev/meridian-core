@@ -176,6 +176,12 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
                 (direction, session) -> new ChunkObserver(chunkTracker));
 
+        // A headless session - no game behind it - needs the game's side of the conversation
+        // answered: assets, ready, pings, teleports. Early, so what another handler drops is still
+        // answered; an ordinary session passes straight through.
+        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
+                (direction, session) -> new HeadlessClientHandler(entityTracker));
+
         // ChunkView: what the client is allowed to forget. Sits at NORMAL because it drops, and
         // downstream of the feed above, which has already seen the unload.
         ChunkViewImpl chunkView = new ChunkViewImpl();
@@ -217,7 +223,22 @@ public class MeridianCoreModule implements ProxyModule {
         // chains never collide with the player's own counter.
         InteractionControlImpl interactionControl = new InteractionControlImpl(
                 interactionRegistry, inventoryTracker, chunkTracker, worldState, itemRegistry,
-                ctx.scheduler());
+                ctx.scheduler(), new meridian.core.impl.interaction.EntityLookup() {
+                    @Override
+                    public meridian.core.impl.interaction.EntityTarget target(int id) {
+                        return entityTracker.entityTarget(id, PlayerImpl.EYE_HEIGHT);
+                    }
+
+                    @Override
+                    public java.util.Set<Integer> selfEffects() {
+                        return entityTracker.selfEffects();
+                    }
+
+                    @Override
+                    public meridian.core.impl.interaction.StatSheet selfStats() {
+                        return playerState.sheet();
+                    }
+                });
         ctx.services().provide(InteractionControl.class, interactionControl);
         ctx.registerHandler(Direction.BOTH, HandlerPosition.NORMAL,
                 (direction, session) -> interactionControl.newObserver());
@@ -316,6 +337,10 @@ public class MeridianCoreModule implements ProxyModule {
                 .liveText("No-clip", () -> noClip.isEnabled() ? "on (client-side)" : "off")
                 .build());
         // --- end 0.6+ only ----------------------------------------------------------
+
+        // The services above on the proxy's command channel: core <conn> ..., for driving and
+        // checking the forged chains from outside the game.
+        CoreCommands.register(ctx, sessionHolder);
 
         ctx.getLogger().info("meridian-core ready (WorldState, EntityTracker, CameraControl, "
                 + "InteractionRegistry, InventoryTracker, ChunkTracker, ItemRegistry, "

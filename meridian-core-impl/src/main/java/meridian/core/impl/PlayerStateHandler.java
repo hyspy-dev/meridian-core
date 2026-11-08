@@ -58,7 +58,7 @@ final class PlayerStateHandler implements PacketHandler {
         if (packet instanceof SetClientId id) {
             localId = id.clientId;
         } else if (packet instanceof UpdateEntityStatTypes types) {
-            state.onStatTypes(names(types));
+            state.onStatTypes(types);
         } else if (packet instanceof UpdatePlayerInventory inventory) {
             panels(inventory);
         } else if (packet instanceof SetActiveSlot slot) {
@@ -134,9 +134,9 @@ final class PlayerStateHandler implements PacketHandler {
                 return;
             }
             for (EntityStatUpdate change : changes) {
-                // The last word wins: the server sends the value it wants us to show.
+                // Changes, not values: an Add carries the amount, a Set the value - applied in turn.
                 if (change != null) {
-                    state.onStat(statId, change.value);
+                    state.onStat(statId, change);
                 }
             }
         });
@@ -210,17 +210,5 @@ final class PlayerStateHandler implements PacketHandler {
             case -12 -> RUNE_BAG;
             default -> null;
         };
-    }
-
-    private static Map<Integer, String> names(UpdateEntityStatTypes types) {
-        Map<Integer, String> out = new HashMap<>();
-        if (types.types != null) {
-            types.types.forEach((id, type) -> {
-                if (type != null && type.id != null) {
-                    out.put(id, type.id);
-                }
-            });
-        }
-        return out;
     }
 }

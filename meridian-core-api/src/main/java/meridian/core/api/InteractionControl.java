@@ -131,6 +131,51 @@ public interface InteractionControl {
      */
     CompletableFuture<Void> digSwing(BlockPos aim);
 
+    /**
+     * Forges one attack on an entity: the held item's {@code Primary} swing, reporting the
+     * entity as what it hit. The server takes a player's entity hits from the client and runs
+     * the item's hit (its damage, knockback, effects) on the entity - as when the player clicks
+     * it. Reach is the caller's to keep: the server does not check it for a swing.
+     *
+     * @param entityId the entity's network id ({@link EntityTracker})
+     * @return a future completing when the swing has played out; an entity core does not see
+     *         sends nothing
+     */
+    default CompletableFuture<Void> hitEntity(int entityId) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("hitEntity"));
+    }
+
+    /**
+     * Forges a use ({@code Use}, the F key) on an entity - what that entity does when used:
+     * an NPC's talk, a mount, a tame. The server runs the entity's own interaction for the use,
+     * and only within the player's reach.
+     *
+     * @param entityId the entity's network id ({@link EntityTracker})
+     * @return a future completing when the use has played out
+     */
+    default CompletableFuture<Void> useOnEntity(int entityId) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("useOnEntity"));
+    }
+
+    /**
+     * Forges the held item's {@code Secondary} use aimed at nothing - eating, drinking, a
+     * thrown or charged item: what the right mouse button does in the open air.
+     *
+     * @return a future completing when the use has played out
+     */
+    default CompletableFuture<Void> useItem() {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("useItem"));
+    }
+
+    /**
+     * Forges the held item's {@code Primary} swing aimed at nothing - a swing in the open air.
+     *
+     * @return a future completing when the swing has played out
+     */
+    default CompletableFuture<Void> swing() {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("swing"));
+    }
+
     /** {@code true} once a client session is live and packets can be sent. */
     boolean available();
 }

@@ -8,7 +8,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import meridian.core.api.EntityTracker;
 import meridian.core.api.Vec3;
 import meridian.protocol.ComponentUpdate;
+import meridian.core.impl.interaction.EntityTarget;
 import meridian.protocol.Direction;
+import meridian.protocol.EffectOp;
+import meridian.protocol.EntityEffectUpdate;
+import meridian.protocol.EntityEffectsUpdate;
+import meridian.protocol.InteractionType;
+import meridian.protocol.InteractionsUpdate;
 import meridian.protocol.ModelTransform;
 import meridian.protocol.ModelUpdate;
 import meridian.protocol.NameplateUpdate;
@@ -57,6 +63,12 @@ final class EntityTrackerImpl implements EntityTracker {
      * {@link #types} map treats the model path.
      */
     private final Set<Integer> players = ConcurrentHashMap.newKeySet();
+    /** Which way each entity's body faces - what a hit on it reports. */
+    private final Map<Integer, Direction> bodies = new ConcurrentHashMap<>();
+    /** Each entity's own interaction roots by type ({@code Interactions}) - what a use on it runs. */
+    private final Map<Integer, Map<InteractionType, Integer>> interactions = new ConcurrentHashMap<>();
+    /** Each entity's active effects by index - added and removed as the server says. */
+    private final Map<Integer, Set<Integer>> effects = new ConcurrentHashMap<>();
     private volatile int localId = Integer.MIN_VALUE;
     private volatile Vec3 localPos;
     /** Look orientation of the local player, radians. */
@@ -82,6 +94,9 @@ final class EntityTrackerImpl implements EntityTracker {
                 modelAssetIds.remove(id);
                 nameplates.remove(id);
                 players.remove(id);
+                bodies.remove(id);
+                interactions.remove(id);
+                effects.remove(id);
             }
         }
         if (packet.updates != null) {
@@ -93,6 +108,24 @@ final class EntityTrackerImpl implements EntityTracker {
                         if (pos != null) {
                             positions.put(update.networkId, pos);
                         }
+                        if (transform.transform != null && transform.transform.bodyOrientation != null) {
+                            bodies.put(update.networkId, transform.transform.bodyOrientation);
+                        }
+                    } else if (component instanceof EntityEffectsUpdate effectUpdates
+                            && effectUpdates.entityEffectUpdates != null) {
+                        Set<Integer> active = effects.computeIfAbsent(update.networkId,
+                                k -> ConcurrentHashMap.newKeySet());
+                        for (EntityEffectUpdate e : effectUpdates.entityEffectUpdates) {
+                            if (e == null) continue;
+                            if (e.type == EffectOp.Remove) {
+                                active.remove(e.id);
+                            } else {
+                                active.add(e.id);
+                            }
+                        }
+                    } else if (component instanceof InteractionsUpdate entityInteractions
+                            && entityInteractions.interactions != null) {
+                        interactions.put(update.networkId, Map.copyOf(entityInteractions.interactions));
                     } else if (component instanceof ModelUpdate modelUpdate
                             && modelUpdate.model != null) {
                         if (modelUpdate.model.path != null && !modelUpdate.model.path.isEmpty()) {
@@ -137,6 +170,47 @@ final class EntityTrackerImpl implements EntityTracker {
      */
     Vec3 localLookAngles() {
         return haveLook ? new Vec3(lookPitch, lookYaw, lookRoll) : null;
+    }
+
+    /**
+     * An entity as something to aim at, with the local player's pose - what a forged hit or use
+     * on it reports. {@code null} while the entity, or the local player, is not in sight.
+     *
+     * <p>The hit point is on the entity's vertical middle line, at the height of the player's
+     * eyes kept within the body - where a straight look at it lands.
+     */
+    EntityTarget entityTarget(int entityId, double eyeHeight) {
+        Vec3 at = positions.get(entityId);
+        Vec3 me = localPos;
+        if (at == null || me == null) {
+            return null;
+        }
+        Direction body = bodies.getOrDefault(entityId, new Direction(0f, 0f, 0f));
+        double hitY = Math.max(at.y() + 0.2, Math.min(at.y() + 1.2, me.y() + eyeHeight));
+        return new EntityTarget(entityId,
+                new Position(at.x(), at.y(), at.z()),
+                new Direction(body.yaw, body.pitch, body.roll),
+                new org.joml.Vector3f((float) at.x(), (float) hitY, (float) at.z()),
+                new Position(me.x(), me.y(), me.z()),
+                new Direction(lookYaw, lookPitch, lookRoll),
+                interactions.getOrDefault(entityId, Map.of()),
+                Set.copyOf(effectsOf(entityId)), true);
+    }
+
+    /** An entity's active effects by index, as last seen; empty when none were. */
+    Set<Integer> effectsOf(int entityId) {
+        Set<Integer> active = effects.get(entityId);
+        return active == null ? Set.of() : Set.copyOf(active);
+    }
+
+    /** The local player's own active effects. */
+    Set<Integer> selfEffects() {
+        return localId == Integer.MIN_VALUE ? Set.of() : effectsOf(localId);
+    }
+
+    /** An entity's own interaction roots by type, as last seen; empty when none were. */
+    Map<InteractionType, Integer> interactionsOf(int entityId) {
+        return interactions.getOrDefault(entityId, Map.of());
     }
 
     private static Vec3 positionOf(ModelTransform transform) {

@@ -23,7 +23,7 @@ final class PlayerImpl implements Player {
 
     /** Hytale humanoid eye-height above the feet position, in blocks.
      *  Matches the origin of the in-game crosshair raycast. */
-    private static final double EYE_HEIGHT = 1.6;
+    static final double EYE_HEIGHT = 1.6;
     /** Default reach for {@link #lookedAtBlock()} when callers don't pass
      *  an explicit range. Picked to sit just past the player's normal
      *  block-interact reach — far enough that the picker matches the

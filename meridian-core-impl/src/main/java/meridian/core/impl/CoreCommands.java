@@ -1,0 +1,346 @@
+package meridian.core.impl;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import meridian.api.module.ModuleContext;
+import meridian.core.api.Block;
+import meridian.core.api.BlockPos;
+import meridian.core.api.EntityTracker;
+import meridian.core.api.Face;
+import meridian.core.api.FluidCell;
+import meridian.core.api.InteractionControl;
+import meridian.core.api.Player;
+import meridian.core.api.PlayerState;
+import meridian.core.api.Vec3;
+import meridian.core.api.World;
+
+/**
+ * Core's services on the proxy's command channel - {@code core <conn> <what> ...} - so the forged
+ * chains can be driven and checked from outside the game, a headless client's above all.
+ *
+ * <p>Actions answer once their chain has played out; whether the server took it shows in what it
+ * sends back ({@code expect}, {@code block}) and in its own log.
+ */
+final class CoreCommands {
+
+    static final String USAGE = "pos | block <x y z> | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
+            + "use|plant|water <x y z> | hit|dig <x y z> [times] | place <x y z> [face] [orient] | "
+            + "entities [range] | attack <entity> [times] | useentity <entity> | useitem [times] | swing";
+
+    /** Where the eyes are above the feet - {@code PlayerImpl}'s raycast origin. */
+    private static final double EYE_HEIGHT = 1.6;
+
+    private final ModuleContext ctx;
+    private final SessionHolder sessions;
+
+    private CoreCommands(ModuleContext ctx, SessionHolder sessions) {
+        this.ctx = ctx;
+        this.sessions = sessions;
+    }
+
+    /** Offers the commands; a proxy without a command channel - or too old to have one - has none. */
+    static void register(ModuleContext ctx, SessionHolder sessions) {
+        try {
+            CoreCommands c = new CoreCommands(ctx, sessions);
+            ctx.registerCommand("core", USAGE, c::run);
+        } catch (NoSuchMethodError olderProxy) {
+            // no command channel there
+        }
+    }
+
+    private CompletableFuture<?> run(List<String> args, String json) {
+        if (args.isEmpty()) {
+            throw new IllegalArgumentException(USAGE);
+        }
+        String what = args.get(0).toLowerCase(Locale.ROOT);
+        return switch (what) {
+            case "pos" -> CompletableFuture.completedFuture(pos());
+            case "block" -> CompletableFuture.completedFuture(block(at(args, 1)));
+            case "look" -> CompletableFuture.completedFuture(look());
+            case "inv" -> CompletableFuture.completedFuture(inventory());
+            case "stats" -> CompletableFuture.completedFuture(stats());
+            case "chain" -> CompletableFuture.completedFuture(chain(Integer.parseInt(args.get(1))));
+            case "face" -> CompletableFuture.completedFuture(args.size() == 2
+                    ? faceEntity(Integer.parseInt(args.get(1))) : face(at(args, 1)));
+            case "entities" -> CompletableFuture.completedFuture(
+                    entities(args.size() > 1 ? Double.parseDouble(args.get(1)) : 32));
+            case "attack" -> {
+                int id = Integer.parseInt(args.get(1));
+                faceIfHeadless(id);
+                yield afterEntity(repeat(times(args, 2), () -> interactions().hitEntity(id)), id);
+            }
+            case "useentity" -> {
+                int id = Integer.parseInt(args.get(1));
+                faceIfHeadless(id);
+                yield afterEntity(interactions().useOnEntity(id), id);
+            }
+            case "useitem" -> repeat(times(args, 1), () -> interactions().useItem()).thenApply(v -> pos());
+            case "swing" -> interactions().swing().thenApply(v -> pos());
+            case "slot" -> interactions().switchHotbarSlot(Integer.parseInt(args.get(1)))
+                    .thenApply(v -> pos());
+            case "tp" -> {
+                BlockPos p = at(args, 1);
+                player().teleport(new Vec3(p.x() + 0.5, p.y(), p.z() + 0.5));
+                yield CompletableFuture.completedFuture(Map.of("teleported", p));
+            }
+            case "use" -> after(interactions().useOnBlock(at(args, 1)), at(args, 1));
+            case "hit" -> after(repeat(times(args, 4), () -> interactions().hitBlock(at(args, 1))), at(args, 1));
+            case "plant" -> after(interactions().plantOnBlock(at(args, 1)), Face.UP.from(at(args, 1)));
+            case "water" -> after(interactions().waterBlock(at(args, 1)), at(args, 1));
+            case "dig" -> after(repeat(times(args, 4), () -> interactions().digSwing(at(args, 1))), at(args, 1));
+            case "place" -> {
+                BlockPos target = at(args, 1);
+                Face face = args.size() > 4 ? face(args.get(4)) : Face.UP;
+                Face orient = args.size() > 5 ? face(args.get(5)) : face;
+                yield after(interactions().placeOnBlock(target, face, orient), face.from(target));
+            }
+            default -> throw new IllegalArgumentException("core: " + USAGE);
+        };
+    }
+
+    /**
+     * Runs an action {@code n} times, each once the one before has played out - the way a held
+     * button swings: a block's damage wears off between hits spaced further apart.
+     */
+    private static CompletableFuture<Void> repeat(int n, java.util.function.Supplier<CompletableFuture<Void>> action) {
+        CompletableFuture<Void> f = action.get();
+        for (int i = 1; i < n; i++) {
+            f = f.thenCompose(v -> action.get());
+        }
+        return f;
+    }
+
+    /** The optional repeat count after {@code x y z}, at {@code at}: 1 when absent. */
+    private static int times(List<String> args, int at) {
+        return args.size() > at ? Math.max(1, Integer.parseInt(args.get(at))) : 1;
+    }
+
+    /** When the chain has played out: the block it was aimed at, as core now sees it. */
+    private CompletableFuture<Map<String, Object>> after(CompletableFuture<Void> chain, BlockPos look) {
+        // The chain is done when our last packet is out; the server's block update follows a
+        // tick or so later, so the block is read after a short wait - what it is then is the
+        // server's answer, not our guess.
+        return chain.thenCompose(v -> CompletableFuture.supplyAsync(() -> null,
+                CompletableFuture.delayedExecutor(300, java.util.concurrent.TimeUnit.MILLISECONDS)))
+                .thenApply(v -> {
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("done", true);
+            out.put("block", block(look));
+            return out;
+        });
+    }
+
+    private Map<String, Object> pos() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        Optional<Player> p = world().player();
+        out.put("available", p.isPresent());
+        p.ifPresent(player -> {
+            out.put("position", player.position());
+            out.put("look", player.lookDirection());
+            out.put("heldItem", player.heldItem());
+            out.put("activeSlot", player.activeHotbarSlot());
+        });
+        return out;
+    }
+
+    private Map<String, Object> look() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        Optional<BlockPos> at = player().lookedAtBlock();
+        out.put("lookedAt", at.orElse(null));
+        at.ifPresent(b -> out.put("block", block(b)));
+        return out;
+    }
+
+    private Map<String, Object> block(BlockPos pos) {
+        World w = world();
+        Block b = w.blockAt(pos.x(), pos.y(), pos.z());
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("pos", pos);
+        out.put("type", b.type() == null ? null : b.type().name());
+        out.put("id", b.type() == null ? 0 : b.type().id());
+        out.put("air", b.isAir());
+        if (b.rotation() != 0) {
+            out.put("rotation", b.rotation());
+        }
+        if (b.isFiller()) {
+            out.put("filler", b.filler());
+            out.put("base", b.base());
+        }
+        FluidCell fluid = w.fluidCellAt(pos.x(), pos.y(), pos.z());
+        if (fluid != null) {
+            out.put("fluid", fluid);
+        }
+        return out;
+    }
+
+    /**
+     * Turns a headless client's head and body to the middle of a block, the way a player aims: a
+     * movement at the spot it stands on, sent as the client's own. What is selected by where the
+     * player looks - a shovel's area dig - is then aimed there. A game turns its own head.
+     */
+    private Map<String, Object> face(BlockPos target) {
+        Map<String, Object> out = faceAt(new Vec3(target.x() + 0.5, target.y() + 0.5, target.z() + 0.5));
+        out.put("at", target);
+        return out;
+    }
+
+    /** Turns a headless client to an entity's middle - where a swing at it aims. */
+    private Map<String, Object> faceEntity(int entityId) {
+        Vec3 at = entityTracker().positionOf(entityId)
+                .orElseThrow(() -> new IllegalArgumentException("entity " + entityId + " is not in sight"));
+        Map<String, Object> out = faceAt(new Vec3(at.x(), at.y() + 0.9, at.z()));
+        out.put("entity", entityId);
+        return out;
+    }
+
+    /** A headless client turns to the entity before acting on it; a game aims by itself. */
+    private void faceIfHeadless(int entityId) {
+        if (sessions.get().map(HeadlessClientHandler::headlessOf).isPresent()
+                && entityTracker().positionOf(entityId).isPresent()) {
+            faceEntity(entityId);
+        }
+    }
+
+    private Map<String, Object> faceAt(Vec3 point) {
+        meridian.api.session.ProxySession session = sessions.get()
+                .orElseThrow(() -> new IllegalStateException("no session yet"));
+        meridian.api.session.HeadlessClient client = HeadlessClientHandler.headlessOf(session);
+        if (client == null) {
+            throw new IllegalStateException("face turns a headless client; a game turns its own head");
+        }
+        Vec3 feet = player().position();
+        double dx = point.x() - feet.x();
+        double dy = point.y() - (feet.y() + EYE_HEIGHT);
+        double dz = point.z() - feet.z();
+        double len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (len < 1e-6) {
+            throw new IllegalArgumentException("that is where the eyes are");
+        }
+        // The inverse of the look vector (-sin yaw cos pitch, sin pitch, -cos yaw cos pitch).
+        float yaw = (float) Math.atan2(-dx / len, -dz / len);
+        float pitch = (float) Math.asin(dy / len);
+        meridian.protocol.packets.player.ClientMovement move = new meridian.protocol.packets.player.ClientMovement();
+        move.absolutePosition = new meridian.protocol.Position(feet.x(), feet.y(), feet.z());
+        move.bodyOrientation = new meridian.protocol.Direction(yaw, 0f, 0f);
+        move.lookOrientation = new meridian.protocol.Direction(yaw, pitch, 0f);
+        client.sendAsClient(move);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("yaw", yaw);
+        out.put("pitch", pitch);
+        return out;
+    }
+
+    /** The entities core sees within {@code range} of the player, nearest first. */
+    private Object entities(double range) {
+        EntityTracker tracker = entityTracker();
+        Vec3 me = player().position();
+        List<Map<String, Object>> out = new java.util.ArrayList<>();
+        for (int id : tracker.trackedEntities()) {
+            Optional<Vec3> at = tracker.positionOf(id);
+            if (at.isEmpty() || tracker.localEntityId().orElse(Integer.MIN_VALUE) == id) {
+                continue;
+            }
+            double d = Math.sqrt(sq(at.get().x() - me.x()) + sq(at.get().y() - me.y()) + sq(at.get().z() - me.z()));
+            if (d > range) {
+                continue;
+            }
+            out.add(entity(id, d));
+        }
+        out.sort(java.util.Comparator.comparingDouble(m -> (Double) m.get("distance")));
+        return out;
+    }
+
+    private Map<String, Object> entity(int id, double distance) {
+        EntityTracker tracker = entityTracker();
+        Map<String, Object> e = new LinkedHashMap<>();
+        e.put("id", id);
+        e.put("distance", Math.round(distance * 100) / 100.0);
+        tracker.entityModelAssetId(id).ifPresent(m -> e.put("model", m));
+        tracker.nameplateOf(id).ifPresent(n -> e.put("name", n));
+        if (tracker.isPlayer(id)) {
+            e.put("player", true);
+        }
+        tracker.positionOf(id).ifPresent(p -> e.put("position", p));
+        if (tracker instanceof EntityTrackerImpl impl && !impl.interactionsOf(id).isEmpty()) {
+            e.put("interactions", impl.interactionsOf(id));
+        }
+        return e;
+    }
+
+    /** When the action has played out: the entity as core now sees it, or that it is gone. */
+    private CompletableFuture<Map<String, Object>> afterEntity(CompletableFuture<Void> action, int id) {
+        return action.thenCompose(v -> CompletableFuture.supplyAsync(() -> null,
+                CompletableFuture.delayedExecutor(300, java.util.concurrent.TimeUnit.MILLISECONDS)))
+                .thenApply(v -> {
+                    Map<String, Object> out = new LinkedHashMap<>();
+                    out.put("done", true);
+                    Optional<Vec3> at = entityTracker().positionOf(id);
+                    out.put("entity", at.isPresent() ? entity(id, distanceTo(at.get())) : Map.of("id", id, "gone", true));
+                    return out;
+                });
+    }
+
+    private double distanceTo(Vec3 p) {
+        Vec3 me = player().position();
+        return Math.sqrt(sq(p.x() - me.x()) + sq(p.y() - me.y()) + sq(p.z() - me.z()));
+    }
+
+    private static double sq(double v) {
+        return v * v;
+    }
+
+    private EntityTracker entityTracker() {
+        return ctx.services().get(EntityTracker.class)
+                .orElseThrow(() -> new IllegalStateException("no EntityTracker service"));
+    }
+
+    /** A root interaction's operation list as the forging VM sees it, one line an operation. */
+    private Object chain(int rootId) {
+        if (interactions() instanceof meridian.core.impl.interaction.InteractionControlImpl impl) {
+            return List.of(impl.describeRoot(rootId).split("\n"));
+        }
+        return "no forging VM here";
+    }
+
+    private Object stats() {
+        PlayerState state = ctx.services().get(PlayerState.class).orElse(null);
+        return state == null ? Map.of() : new java.util.TreeMap<>(state.stats());
+    }
+
+    private Object inventory() {
+        PlayerState state = ctx.services().get(PlayerState.class).orElse(null);
+        return state == null ? Map.of() : state.inventories();
+    }
+
+    // ------------------------------------------------------------------
+
+    private World world() {
+        return ctx.services().get(World.class).orElseThrow(() -> new IllegalStateException("no World service"));
+    }
+
+    private Player player() {
+        return world().player().orElseThrow(() -> new IllegalStateException("no player yet"));
+    }
+
+    private InteractionControl interactions() {
+        return ctx.services().get(InteractionControl.class)
+                .orElseThrow(() -> new IllegalStateException("no InteractionControl service"));
+    }
+
+    private static BlockPos at(List<String> args, int from) {
+        if (args.size() < from + 3) {
+            throw new IllegalArgumentException("needs x y z");
+        }
+        return new BlockPos((int) Math.floor(Double.parseDouble(args.get(from))),
+                (int) Math.floor(Double.parseDouble(args.get(from + 1))),
+                (int) Math.floor(Double.parseDouble(args.get(from + 2))));
+    }
+
+    private static Face face(String name) {
+        return Face.valueOf(name.toUpperCase(Locale.ROOT));
+    }
+}

@@ -16,8 +16,16 @@ import meridian.protocol.BlockRotation;
 import meridian.protocol.BlockType;
 import meridian.protocol.BreakBlockInteraction;
 import meridian.protocol.ChainingInteraction;
+import meridian.protocol.ChangeStateInteraction;
 import meridian.protocol.ChargingInteraction;
 import meridian.protocol.ConditionInteraction;
+import meridian.protocol.ApplyEffectInteraction;
+import meridian.protocol.ChangeStatInteraction;
+import meridian.protocol.ClearEntityEffectInteraction;
+import meridian.protocol.StatsConditionInteraction;
+import meridian.protocol.DamageEntityInteraction;
+import meridian.protocol.EffectConditionInteraction;
+import meridian.protocol.DragPlaceBlockInteraction;
 import meridian.protocol.GameMode;
 import meridian.protocol.Interaction;
 import meridian.protocol.InteractionState;
@@ -26,8 +34,12 @@ import meridian.protocol.InteractionType;
 import meridian.protocol.MovementStates;
 import meridian.protocol.ParallelInteraction;
 import meridian.protocol.PlaceBlockInteraction;
+import meridian.protocol.PlaceModeSelectInteraction;
 import meridian.protocol.ReplaceInteraction;
 import meridian.protocol.SelectInteraction;
+import meridian.protocol.SelectedHitEntity;
+import meridian.protocol.Position;
+import meridian.protocol.Direction;
 import meridian.protocol.SimpleBlockInteraction;
 import meridian.protocol.SimpleInteraction;
 import meridian.protocol.UseBlockInteraction;
@@ -49,7 +61,9 @@ import org.slf4j.LoggerFactory;
  *
  * <p><b>Ported node logic.</b>
  * <ul>
- *   <li>{@code UseEntityInteraction} — fails (no entity target).</li>
+ *   <li>{@code UseEntityInteraction} — fails unless the action is aimed at an entity whose
+ *       own interactions hold a root for the chain's type; on success the walk enters that
+ *       root and returns here when it completes.</li>
  *   <li>{@code SimpleBlockInteraction} (base of the block family) — fails when the
  *       target block is air / missing / out-of-chunk ({@code targetBlockType} is
  *       {@code null}); the whole family inherits this base check.</li>
@@ -81,6 +95,18 @@ final class InteractionSimulator {
     interface RootResolver {
         /** The compiled replacement root, or {@code null} if unavailable. */
         CompiledInteraction resolve(int rootId);
+
+        /** The combo step a {@code ChainingInteraction} is to take - the first, unless told otherwise. */
+        default int chainingIndex(ChainingInteraction node, int interactionId) {
+            return 0;
+        }
+    }
+
+    /** The combo step for a chaining op: the resolver's pick, kept within the op's branches. */
+    private static int chainingStep(FlatOp.Node node, RootResolver resolver) {
+        int step = resolver == null ? 0
+                : resolver.chainingIndex((ChainingInteraction) node.interaction(), node.interactionId());
+        return step >= 0 && step < node.labels().length ? step : 0;
     }
 
     /** A saved walk position — where a {@code UseBlockInteraction} call returns to. */
@@ -91,6 +117,7 @@ final class InteractionSimulator {
     /** Simulates {@code root} under {@code ctx} into the executed operations. */
     static List<InteractionSyncData> simulate(CompiledInteraction root, InteractionContext ctx,
                                               RootResolver resolver) {
+        ctx = ctx.withEffects(ctx.effects().copy()); // this walk's own, to apply and clear on
         List<InteractionSyncData> executed = new ArrayList<>();
         CompiledInteraction compiled = root;
         Set<Integer> visitedRoots = new HashSet<>();
@@ -121,12 +148,15 @@ final class InteractionSimulator {
             InteractionState state = evaluateState(node.interaction(), ctx);
             executed.add(syncDataFor(node, counter, compiled.rootId(), state, ctx));
 
-            // ReplaceInteraction.tick0 runs context.execute(nextRoot) on success —
-            // the chain continues from operation 0 of the replacement root.
+            // ReplaceInteraction.tick0 runs context.execute(nextRoot) on success - the
+            // server's pushRoot: a call. The replacement root runs from its operation 0, then
+            // the chain returns here and goes on with the next operation.
             if (node.interaction() instanceof ReplaceInteraction replace
                     && state != InteractionState.Failed) {
                 CompiledInteraction next = switchRoot(replace, compiled, ctx, resolver, visitedRoots);
                 if (next != null) {
+                    executed.get(executed.size() - 1).enteredRootInteraction = next.rootId();
+                    returnStack.push(new Frame(compiled, counter + 1));
                     compiled = next;
                     counter = 0;
                     continue;
@@ -148,11 +178,25 @@ final class InteractionSimulator {
                 // block-interaction root unresolvable — fall through
             }
 
-            // ChainingInteraction picks a branch; the proxy picks branch 0
-            // (the server trusts the client's chainingIndex).
+            // UseEntityInteraction runs the target entity's own root for this type the same way.
+            if (node.interaction() instanceof UseEntityInteraction
+                    && state != InteractionState.Failed) {
+                CompiledInteraction entityRoot = enterEntityRoot(ctx, resolver, visitedRoots);
+                if (entityRoot != null) {
+                    executed.get(executed.size() - 1).enteredRootInteraction = entityRoot.rootId();
+                    returnStack.push(new Frame(compiled, counter + 1));
+                    compiled = entityRoot;
+                    counter = 0;
+                    continue;
+                }
+            }
+
+            // ChainingInteraction takes the branch the client names - the combo's next step.
             if (node.interaction() instanceof ChainingInteraction
                     && state != InteractionState.Failed && node.labels().length > 0) {
-                counter = node.labels()[0].index;
+                int combo = chainingStep(node, resolver);
+                executed.get(executed.size() - 1).chainingIndex = combo;
+                counter = node.labels()[combo].index;
                 continue;
             }
 
@@ -168,6 +212,21 @@ final class InteractionSimulator {
                     counter = 0;
                     continue;
                 }
+            }
+
+            // PlaceModeSelectInteraction jumps to the branch of the creative place mode - Default,
+            // label 0: no mode is set here, and outside Creative the server always takes it.
+            if (node.interaction() instanceof PlaceModeSelectInteraction && node.labels().length > 0) {
+                counter = node.labels()[0].index;
+                continue;
+            }
+
+            // DamageEntityInteraction jumps to the branch of how the hit went.
+            if (node.interaction() instanceof DamageEntityInteraction && node.labels().length > 1) {
+                int label = damageLabel(state);
+                executed.get(executed.size() - 1).nextLabel = label;
+                counter = node.labels()[label].index;
+                continue;
             }
 
             if (state == InteractionState.Failed && node.labels().length > 0) {
@@ -194,6 +253,7 @@ final class InteractionSimulator {
     static TickedResult simulateTicked(CompiledInteraction root, InteractionContext ctx,
                                        RootResolver resolver,
                                        Map<Integer, Integer> selectHitBlock) {
+        ctx = ctx.withEffects(ctx.effects().copy()); // this walk's own, to apply and clear on
         List<Packet> packets = new ArrayList<>();
         List<Fork> forks = new ArrayList<>();
         CompiledInteraction compiled = root;
@@ -257,6 +317,11 @@ final class InteractionSimulator {
                 }
                 InteractionSyncData sd = syncDataFor(node, counter, compiled.rootId(), state, ctx);
                 sd.progress = opTime;
+                if (node.interaction() instanceof ChargingInteraction charging) {
+                    // Held: the client says so every tick (CHARGING_HELD), and on release how long
+                    // it was held - which the server checks against its own clock.
+                    sd.chargeValue = state == InteractionState.NotFinished ? CHARGING_HELD : lowestChargeKey(charging);
+                }
                 packet.add(sd);
 
                 if (state == InteractionState.NotFinished) {
@@ -281,6 +346,11 @@ final class InteractionSimulator {
                         }
                         return new TickedResult(packets, forks);
                     }
+                    // The server's pushRoot: a call into the replacement root, returning to
+                    // the operation after this one when it is done. The op says which root it
+                    // entered (context.execute sets enteredRootInteraction).
+                    sd.enteredRootInteraction = next.rootId();
+                    returnStack.push(new Frame(compiled, counter + 1));
                     compiled = next;
                     counter = 0;
                 } else if (node.interaction() instanceof UseBlockInteraction
@@ -296,11 +366,26 @@ final class InteractionSimulator {
                     } else {
                         counter++;
                     }
+                } else if (node.interaction() instanceof UseEntityInteraction
+                        && state != InteractionState.Failed) {
+                    // UseEntityInteraction.firstRun runs the target entity's own root for this
+                    // type - context.execute, a call that returns here.
+                    CompiledInteraction entityRoot = enterEntityRoot(ctx, resolver, visitedRoots);
+                    if (entityRoot != null) {
+                        sd.enteredRootInteraction = entityRoot.rootId();
+                        returnStack.push(new Frame(compiled, counter + 1));
+                        compiled = entityRoot;
+                        counter = 0;
+                    } else {
+                        counter++;
+                    }
                 } else if (node.interaction() instanceof ChainingInteraction
                         && state != InteractionState.Failed && node.labels().length > 0) {
-                    // ChainingInteraction picks a branch; the proxy picks
-                    // branch 0 (the server trusts the client's chainingIndex).
-                    counter = node.labels()[0].index;
+                    // ChainingInteraction takes the branch the client names -
+                    // the combo's next step, as the server counts it.
+                    int combo = chainingStep(node, resolver);
+                    sd.chainingIndex = combo;
+                    counter = node.labels()[combo].index;
                 } else if (node.interaction() instanceof ParallelInteraction parallel
                         && state != InteractionState.Failed
                         && parallel.next != null && parallel.next.length > 0) {
@@ -342,11 +427,36 @@ final class InteractionSimulator {
                         }
                     }
                     counter++;
-                } else if (node.interaction() instanceof ChargingInteraction
-                        && state == InteractionState.Finished && node.labels().length > 0) {
+                } else if (node.interaction() instanceof ChargingInteraction charging
+                        && state == InteractionState.Finished && node.labels().length > 0
+                        && charging.chargedNext != null && !charging.chargedNext.isEmpty()) {
                     // ChargingInteraction.jumpToChargeValue: a finished charge
                     // routes to a charge-tier label — the basic tier (label 0)
-                    // for a minimal hold.
+                    // for a minimal hold. Without tiers (a spear's block, a
+                    // WieldingInteraction) there is no jump: tick0 returns and the
+                    // walk goes on to the next operation.
+                    counter = node.labels()[0].index;
+                } else if (node.interaction() instanceof DragPlaceBlockInteraction drag
+                        && state != InteractionState.Failed) {
+                    // A placement gesture (0.8): the client commits blocks and predicts one
+                    // fork of forkInteractions per block, each placing its own. One click is
+                    // a gesture of one block - forkCounts says so, and the fork is ours to send
+                    // (the server forks on its side and takes our data for it).
+                    sd.forkCounts = java.util.Map.of(ctx.interactionType(), 1);
+                    if (drag.forkInteractions != Integer.MIN_VALUE) {
+                        forks.add(new Fork(flatIndex, 0, drag.forkInteractions, null));
+                    }
+                    counter++;
+                } else if (node.interaction() instanceof DamageEntityInteraction
+                        && node.labels().length > 1) {
+                    // Jumps to the branch of how the hit went, and says which (nextLabel).
+                    int label = damageLabel(state);
+                    sd.nextLabel = label;
+                    counter = node.labels()[label].index;
+                } else if (node.interaction() instanceof PlaceModeSelectInteraction
+                        && node.labels().length > 0) {
+                    // Jumps to its place mode's branch: Default (label 0) - no mode is set here,
+                    // and outside Creative the server always takes it.
                     counter = node.labels()[0].index;
                 } else if (state == InteractionState.Failed && node.labels().length > 0) {
                     counter = node.labels()[0].index;
@@ -380,8 +490,26 @@ final class InteractionSimulator {
         // tickInternal: NotFinished until the elapsed time reaches the runTime.
         InteractionState timed = opTime < node.runTime
                 ? InteractionState.NotFinished : InteractionState.Finished;
+        if (node instanceof ChargingInteraction charging) {
+            // The button is held until the charge reaches its tier, then let go: the server
+            // measures the hold from its first sight of this operation.
+            return opTime + HOLD_EPSILON < lowestChargeKey(charging)
+                    ? InteractionState.NotFinished : InteractionState.Finished;
+        }
         if (node instanceof UseEntityInteraction) {
-            return InteractionState.Failed;
+            return usesEntity(ctx) ? InteractionState.Finished : InteractionState.Failed;
+        }
+        if (node instanceof DamageEntityInteraction) {
+            return damages(ctx);
+        }
+        if (node instanceof EffectConditionInteraction condition) {
+            return effectsMatch(condition, ctx) ? timed : InteractionState.Failed;
+        }
+        if (node instanceof StatsConditionInteraction condition) {
+            return ctx.effects().stats().canAfford(condition) ? timed : InteractionState.Failed;
+        }
+        if (timed == InteractionState.Finished) {
+            changeEffects(node, ctx);
         }
         if (node instanceof SimpleBlockInteraction && ctx.targetBlockType() == null) {
             // SimpleBlockInteraction.simulateTick0 base check: the target block is
@@ -406,7 +534,33 @@ final class InteractionSimulator {
             // simulateTick0: NotFinished on the first run, Finished once confirmed.
             return opTime <= 0.0f ? InteractionState.NotFinished : InteractionState.Finished;
         }
+        if (node instanceof ChangeStateInteraction change) {
+            return changesState(change, ctx) ? InteractionState.Finished : InteractionState.Failed;
+        }
         return timed;
+    }
+
+    /**
+     * Whether a {@code ChangeStateInteraction} has a state to move the target block to - the
+     * server's {@code interactWithBlock}: the block's current state (its key among its family's
+     * {@code states}, else {@code default}) must be a key of {@code stateChanges}, and the new
+     * state one the block has. Anything else fails (a plain stone hit in Creative, for one).
+     */
+    private static boolean changesState(ChangeStateInteraction change, InteractionContext ctx) {
+        BlockType type = ctx.targetBlockType();
+        if (type == null || change.stateChanges == null || change.stateChanges.isEmpty()) {
+            return false;
+        }
+        String current = "default";
+        if (type.states != null) {
+            for (Map.Entry<String, Integer> e : type.states.entrySet()) {
+                if (e.getValue() != null && e.getValue() == ctx.targetBlockId()) {
+                    current = e.getKey();
+                }
+            }
+        }
+        String next = change.stateChanges.get(current);
+        return next != null && type.states != null && type.states.containsKey(next);
     }
 
     /** Whether {@code op} is a {@code ChargingInteraction} node. */
@@ -415,6 +569,11 @@ final class InteractionSimulator {
     }
 
     /** The lowest charge threshold of a {@code ChargingInteraction} — its first tier. */
+    /** {@code chargeValue} while the button is still held - the server's {@code CHARGING_HELD}. */
+    private static final float CHARGING_HELD = -1f;
+    /** Float slack when comparing the accumulated hold against a charge tier. */
+    private static final float HOLD_EPSILON = 1e-4f;
+
     private static float lowestChargeKey(ChargingInteraction charging) {
         if (charging.chargedNext == null || charging.chargedNext.isEmpty()) {
             return 0.0f;
@@ -482,6 +641,78 @@ final class InteractionSimulator {
     }
 
     /**
+     * Whether a {@code UseEntityInteraction} goes through - its {@code firstRun}: the action is
+     * aimed at an entity within reach, and that entity's {@code Interactions} hold a root for the
+     * chain's type.
+     */
+    private static boolean usesEntity(InteractionContext ctx) {
+        return ctx.entity() != null && ctx.entity().inReach()
+                && ctx.entity().rootFor(ctx.interactionType()) != null;
+    }
+
+    /**
+     * How a {@code DamageEntityInteraction} goes - its {@code tick0}: it fails without a target
+     * entity or out of the player's reach, and otherwise lands. Which landing it is (plain, blocked, from an angle, on a body
+     * part) the server works out from the fight itself; core walks the plain one.
+     */
+    private static InteractionState damages(InteractionContext ctx) {
+        return ctx.entity() != null && ctx.entity().inReach()
+                ? InteractionState.Finished : InteractionState.Failed;
+    }
+
+    /**
+     * {@code EffectConditionInteraction.firstRun}: fails when the entity it looks at lacks one of
+     * the effects ({@code All}) or has one ({@code None}). With no such entity it does not fail.
+     */
+    private static boolean effectsMatch(EffectConditionInteraction condition, InteractionContext ctx) {
+        java.util.Set<Integer> active = ctx.effects().of(condition.entityTarget);
+        if (active == null || condition.entityEffects == null) {
+            return true;
+        }
+        for (int effect : condition.entityEffects) {
+            boolean has = active.contains(effect);
+            if (condition.match == meridian.protocol.Match.None ? has : !has) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * What {@code ApplyEffectInteraction} / {@code ClearEntityEffectInteraction} do to the walk's
+     * effects, and {@code ChangeStatInteraction} to its stats.
+     */
+    private static void changeEffects(Interaction node, InteractionContext ctx) {
+        if (node instanceof ApplyEffectInteraction apply) {
+            java.util.Set<Integer> on = ctx.effects().of(apply.entityTarget);
+            if (on != null) {
+                on.add(apply.effectId);
+            }
+        } else if (node instanceof ClearEntityEffectInteraction clear) {
+            java.util.Set<Integer> on = ctx.effects().of(clear.entityTarget);
+            if (on != null) {
+                on.remove(clear.effectId);
+            }
+        } else if (node instanceof ChangeStatInteraction change) {
+            // The server's ChangeStatInteraction spends and gives on the acting entity's own stats.
+            ctx.effects().stats().change(change);
+        }
+    }
+
+    /** The branch a {@code DamageEntityInteraction} jumps to after {@code state}. */
+    private static int damageLabel(InteractionState state) {
+        return state == InteractionState.Failed
+                ? InteractionFlattener.DAMAGE_FAILED : InteractionFlattener.DAMAGE_SUCCESS;
+    }
+
+    /** The root a {@code UseEntityInteraction} runs: the target entity's own for this type. */
+    private static CompiledInteraction enterEntityRoot(InteractionContext ctx, RootResolver resolver,
+                                                       Set<Integer> visitedRoots) {
+        Integer rootId = ctx.entity() == null ? null : ctx.entity().rootFor(ctx.interactionType());
+        return rootId == null ? null : enterRoot(rootId, resolver, visitedRoots);
+    }
+
+    /**
      * Resolves and compiles {@code rootId} for the walk to enter — the server's
      * {@code context.execute(root)} / {@code pushRoot}. Guards against
      * re-entering a root already on the walk.
@@ -506,9 +737,18 @@ final class InteractionSimulator {
     /** Ported {@code simulateTick0} outcome for one node. */
     private static InteractionState evaluateState(Interaction node, InteractionContext ctx) {
         if (node instanceof UseEntityInteraction) {
-            // Forged chains never target an entity (data.entityId = -1).
-            return InteractionState.Failed;
+            return usesEntity(ctx) ? InteractionState.Finished : InteractionState.Failed;
         }
+        if (node instanceof DamageEntityInteraction) {
+            return damages(ctx);
+        }
+        if (node instanceof EffectConditionInteraction condition) {
+            return effectsMatch(condition, ctx) ? InteractionState.Finished : InteractionState.Failed;
+        }
+        if (node instanceof StatsConditionInteraction condition) {
+            return ctx.effects().stats().canAfford(condition) ? InteractionState.Finished : InteractionState.Failed;
+        }
+        changeEffects(node, ctx);
         if (node instanceof SimpleBlockInteraction && ctx.targetBlockType() == null) {
             // SimpleBlockInteraction.simulateTick0 base check: the target block is
             // air / missing / out-of-chunk (core resolves no BlockType). The whole
@@ -538,6 +778,9 @@ final class InteractionSimulator {
             // first run — the server must place the block and confirm it. The
             // op stays NotFinished until a continuation packet (see splitPackets).
             return InteractionState.NotFinished;
+        }
+        if (node instanceof ChangeStateInteraction change) {
+            return changesState(change, ctx) ? InteractionState.Finished : InteractionState.Failed;
         }
         return InteractionState.Finished;
     }
@@ -673,7 +916,10 @@ final class InteractionSimulator {
         }
         MovementStates m = ctx.movementStates();
         if (m == null) {
-            return true;
+            // No movement reported yet (a headless client that has only acknowledged its
+            // teleport): standing still - not crouching, not jumping, not running. Letting every
+            // movement condition pass took the crouch branch of a watering can.
+            m = new MovementStates();
         }
         if (c.jumping != null && c.jumping != m.jumping) {
             return false;
@@ -699,9 +945,21 @@ final class InteractionSimulator {
         data.state = state;
 
         if (node.interaction() instanceof ChainingInteraction) {
-            // The server reads this to pick the branch; the proxy always
-            // takes branch 0 (see the walk in simulate / simulateTicked).
+            // The server reads this to pick the branch; the walk sets the combo step it took.
             data.chainingIndex = 0;
+        }
+
+        EntityTarget entity = ctx.entity();
+        if (entity != null && node.interaction() instanceof SelectInteraction) {
+            // A player's SelectInteraction takes its entity hits from the client
+            // (ClientSourcedSelector): the entity it hit, and where both stood - the damage that
+            // forks off reads its angles and knockback from these.
+            data.hitEntities = new SelectedHitEntity[] {entity.hit()};
+            data.attackerPos = new Position(entity.attackerPos().x, entity.attackerPos().y, entity.attackerPos().z);
+            data.attackerRot = new Direction(entity.attackerRot().yaw, entity.attackerRot().pitch, entity.attackerRot().roll);
+        } else if (entity != null && node.interaction() instanceof UseEntityInteraction) {
+            // UseEntityInteraction finds its target by the id the client names.
+            data.entityId = entity.networkId();
         }
 
         if (node.interaction() instanceof ChargingInteraction charging) {

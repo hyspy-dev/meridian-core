@@ -107,6 +107,20 @@ public final class ItemRegistry {
      * to resolve a placed block's rotation mode when the interaction node carries
      * a generic {@code blockId = -1} ("place the held item's block").
      */
+    /**
+     * How far the player reaches with {@code itemId} in hand - the item's
+     * {@code InteractionConfiguration.useDistance} for the game mode, else the server's default
+     * (5 in Adventure, 6 in Creative). Empty hands use the default.
+     */
+    public float useDistance(String itemId, meridian.protocol.GameMode mode) {
+        ItemBase item = itemId == null || itemId.isEmpty() ? null : items.get(itemId);
+        if (item != null && item.interactionConfig != null && item.interactionConfig.useDistance != null) {
+            Float d = item.interactionConfig.useDistance.get(mode);
+            return d != null ? d : 1f;
+        }
+        return mode == meridian.protocol.GameMode.Creative ? 6f : 5f;
+    }
+
     public OptionalInt blockIdOf(String itemId) {
         if (itemId == null || itemId.isEmpty()) {
             return OptionalInt.empty();

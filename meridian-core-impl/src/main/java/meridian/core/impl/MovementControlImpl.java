@@ -3,6 +3,7 @@ package meridian.core.impl;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicInteger;
 import meridian.api.module.Scheduler;
+import meridian.api.session.HeadlessClient;
 import meridian.api.session.ProxySession;
 import meridian.protocol.Direction;
 import meridian.protocol.ModelTransform;
@@ -110,6 +111,16 @@ final class MovementControlImpl {
         ProxySession s = session;
         if (s == null) {
             log.warn("meridian-core: teleport requested but no client session yet — ignored");
+            return;
+        }
+        HeadlessClient bot = HeadlessClientHandler.headlessOf(s);
+        if (bot != null) {
+            // The same teleport for a headless client, with nothing in its way: no game whose view
+            // must move and no stream of old positions to outvote. The bot reports the target the
+            // way a client that walked there would. It does so as the client, through the
+            // client-to-server chain, so core's own pose follows it as well.
+            bot.sendAsClient(buildAbsolute(x, y, z));
+            log.info("meridian-core: headless {} - teleport -> ({}, {}, {})", bot.username(), x, y, z);
             return;
         }
         // Move the player's own view with ClientTeleport — but repeated over

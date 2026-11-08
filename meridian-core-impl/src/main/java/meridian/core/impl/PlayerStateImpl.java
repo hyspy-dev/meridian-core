@@ -26,7 +26,12 @@ final class PlayerStateImpl implements PlayerState {
      */
     private final EntityTrackerImpl tracker;
 
-    private final Map<String, Double> stats = new ConcurrentHashMap<>();
+    /** The stat catalog, by index - bounds, starting values, names. */
+    private final Map<Integer, meridian.protocol.EntityStatType> statTypes =
+            meridian.core.impl.interaction.StatSheet.newCatalog();
+    /** Our stats as the server keeps them: each change applied in turn. */
+    private final meridian.core.impl.interaction.StatSheet sheet =
+            new meridian.core.impl.interaction.StatSheet(statTypes);
     private final Map<String, Section> inventories = new ConcurrentHashMap<>();
     /** Stat id → name, from the server's catalog; a stat's number means nothing without it. */
     private final Map<Integer, String> statNames = new ConcurrentHashMap<>();
@@ -74,7 +79,19 @@ final class PlayerStateImpl implements PlayerState {
 
     @Override
     public Map<String, Double> stats() {
-        return Map.copyOf(stats);
+        Map<String, Double> out = new java.util.HashMap<>();
+        sheet.values().forEach((id, value) -> {
+            String named = statNames.get(id);
+            if (named != null) {
+                out.put(named, (double) value);
+            }
+        });
+        return Map.copyOf(out);
+    }
+
+    /** Our stats, live - what an interaction walk copies and tests. */
+    meridian.core.impl.interaction.StatSheet sheet() {
+        return sheet;
     }
 
     @Override
@@ -86,16 +103,30 @@ final class PlayerStateImpl implements PlayerState {
     // Ingest - from PlayerStateHandler, on the network threads
     // ------------------------------------------------------------------
 
-    void onStatTypes(Map<Integer, String> types) {
-        statNames.putAll(types);
+    void onStatTypes(meridian.protocol.packets.assets.UpdateEntityStatTypes update) {
+        if (update.types == null) {
+            return;
+        }
+        if (update.type == meridian.protocol.UpdateType.Init) {
+            statTypes.clear();
+            statNames.clear();
+        }
+        update.types.forEach((id, type) -> {
+            if (update.type == meridian.protocol.UpdateType.Remove) {
+                statTypes.remove(id);
+                statNames.remove(id);
+            } else if (type != null) {
+                statTypes.put(id, type);
+                if (type.id != null) {
+                    statNames.put(id, type.id);
+                }
+            }
+        });
     }
 
-    /** One stat of ours changed; the name comes from the catalog, the number from the server. */
-    void onStat(int statId, double value) {
-        String named = statNames.get(statId);
-        if (named != null) {
-            stats.put(named, value);
-        }
+    /** One change to a stat of ours - an amount to add, a value to set, a modifier - applied in turn. */
+    void onStat(int statId, meridian.protocol.EntityStatUpdate change) {
+        sheet.apply(statId, change);
     }
 
     /** The player announcing themselves as they connect: the one place the id is said outright. */
