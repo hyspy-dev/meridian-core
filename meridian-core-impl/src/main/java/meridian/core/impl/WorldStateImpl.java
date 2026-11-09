@@ -37,6 +37,9 @@ import org.slf4j.LoggerFactory;
  * full-rebuild packets (frozen UI, flickering world). Instead, every override
  * change marks its id dirty and schedules a single coalesced flush, so a whole
  * {@code refresh()} collapses into <em>one</em> {@code UpdateBlockTypes(AddOrUpdate)}.
+ * That one carries only the ids whose look actually changed: each dirty id's new view is
+ * measured against what the client holds ({@link #shown}), so a rule set again, or replaced by
+ * one that touches the same few types, sends those few - not the whole catalog.
  * The emit goes through {@link ProxySession#sendToClient}, which bypasses the
  * handler chain so the MONITOR observer never re-ingests it.
  *
@@ -57,6 +60,18 @@ public final class WorldStateImpl implements WorldState {
         return itemCategories;
     }
 
+    /**
+     * The item catalog has arrived or grown: a block's {@link BlockView#categories()} can read
+     * otherwise now, so every rule runs again. The server declares the block types before the
+     * items, so a rule that tells blocks apart by kind sees none at the load packet's rewrite,
+     * and would stay blind without this. What it changes goes out as one emit, of what changed.
+     */
+    void itemsArrived() {
+        if (!rules.isEmpty()) {
+            markAllDirty();
+        }
+    }
+
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
 
     /** How long override changes are gathered before a single emit. */
@@ -69,6 +84,12 @@ public final class WorldStateImpl implements WorldState {
     private final Map<String, UnaryOperator<BlockView>> rules =
             java.util.Collections.synchronizedMap(new java.util.LinkedHashMap<>());
     private final Set<Integer> dirty = ConcurrentHashMap.newKeySet();
+    /**
+     * What the client holds for an id where that is not the server's truth: the view it was last
+     * sent, by the load packet's rewrite or by an emit. An id absent here shows the truth. What a
+     * change is measured against, so only the ids that look different afterwards go out.
+     */
+    private final Map<Integer, BlockType> shown = new ConcurrentHashMap<>();
     private final AtomicBoolean flushScheduled = new AtomicBoolean(false);
     private volatile ProxySession session;
     private volatile int maxId;
@@ -165,7 +186,7 @@ public final class WorldStateImpl implements WorldState {
                 }
             }
         }
-        return "default";
+        return BlockView.DEFAULT_STATE;
     }
 
     /**
@@ -270,7 +291,26 @@ public final class WorldStateImpl implements WorldState {
         if (override != null) {
             view = override.apply(view);
         }
-        return ((BlockViewImpl) view).toBlockType();
+        BlockType seen = ((BlockViewImpl) view).toBlockType();
+        // A rule that rebuilt the type without changing how it looks has changed nothing.
+        return BlockViewImpl.sameLook(seen, truth) ? truth : seen;
+    }
+
+    /**
+     * The client has been given {@code seen} for {@code id} straight from the server's packet - the
+     * load rewrite - so that is what later changes are measured against.
+     */
+    void shownByServerPacket(int id, BlockType seen, BlockType truth) {
+        if (seen == null || seen == truth) {
+            shown.remove(id);
+        } else {
+            shown.put(id, seen);
+        }
+    }
+
+    /** The server took a type away; the client holds nothing of ours for it any more. */
+    void forgetShown(int id) {
+        shown.remove(id);
     }
 
     private void markAllDirty() {
@@ -314,7 +354,16 @@ public final class WorldStateImpl implements WorldState {
             BlockType truth = serverTruth.get(id);
             if (truth == null) continue;
             // Rules + the id's override; with neither this is server truth again.
-            changed.put(id, clientView(id, truth));
+            BlockType view = clientView(id, truth);
+            BlockType held = shown.get(id);
+            if (view == truth) {
+                if (held == null) continue;           // shows the truth, and stays so
+                shown.remove(id);
+            } else {
+                if (held != null && BlockViewImpl.sameLook(held, view)) continue;   // already so
+                shown.put(id, view);
+            }
+            changed.put(id, view);
         }
         if (changed.isEmpty()) return;
 

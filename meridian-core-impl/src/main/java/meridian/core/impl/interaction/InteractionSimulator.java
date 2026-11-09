@@ -332,14 +332,7 @@ final class InteractionSimulator {
         if (type == null || change.stateChanges == null || change.stateChanges.isEmpty()) {
             return false;
         }
-        String current = "default";
-        if (type.states != null) {
-            for (Map.Entry<String, Integer> e : type.states.entrySet()) {
-                if (e.getValue() != null && e.getValue() == ctx.targetBlockId()) {
-                    current = e.getKey();
-                }
-            }
-        }
+        String current = WorldStateImpl.stateNameForBlock(type, ctx.targetBlockId());
         String next = change.stateChanges.get(current);
         return next != null && type.states != null && type.states.containsKey(next);
     }

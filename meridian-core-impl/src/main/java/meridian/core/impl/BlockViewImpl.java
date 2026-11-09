@@ -76,6 +76,20 @@ final class BlockViewImpl implements BlockView {
     }
 
     @Override
+    public int family() {
+        // The server names the type a state was declared on under "default" (StateData.NULL_STATE_ID)
+        // in every state type's map; the declaring type itself carries no such entry.
+        Integer declared = blockType.states == null ? null : blockType.states.get(DEFAULT_STATE);
+        return declared != null && declared >= 0 ? declared : id;
+    }
+
+    @Override
+    public boolean sameBlock(int other) {
+        return other == id || other == family()
+                || blockType.states != null && blockType.states.containsValue(other);
+    }
+
+    @Override
     public boolean rotationMatters() {
         // A block that cannot be turned stays at zero; one the game turns at random (rocks,
         // grass) is the same block whichever way it faces.
@@ -181,8 +195,13 @@ final class BlockViewImpl implements BlockView {
     @Override
     public BlockView withLight(int radius, int red, int green, int blue) {
         BlockType copy = blockType.clone();
-        copy.light = new ColorLight((byte) radius, (byte) red, (byte) green, (byte) blue);
+        copy.light = new ColorLight((byte) radius, channel(red), channel(green), channel(blue));
         return new BlockViewImpl(id, copy, categoriesOf);
+    }
+
+    /** A light channel as the server keeps it: four bits, 0..15. */
+    private static byte channel(int value) {
+        return (byte) Math.clamp(value, 0, 15);
     }
 
     @Override
@@ -195,5 +214,57 @@ final class BlockViewImpl implements BlockView {
     /** The underlying (possibly transformed) protocol block type. */
     BlockType toBlockType() {
         return blockType;
+    }
+
+    /**
+     * Whether two views of one server type look the same to the client: equal in every field a
+     * {@code with*} here changes. Both must come from the same truth - a view is the truth cloned
+     * and then changed through these methods only, so the fields below are the only ones that can
+     * differ. A {@code with*} that touches another field has to be compared here too.
+     */
+    static boolean sameLook(BlockType a, BlockType b) {
+        if (a == b) {
+            return true;
+        }
+        if (a == null || b == null) {
+            return false;
+        }
+        return a.drawType == b.drawType
+                && a.material == b.material
+                && a.opacity == b.opacity
+                && a.requiresAlphaBlending == b.requiresAlphaBlending
+                && sameLight(a.light, b.light)
+                && sameFaces(a.cubeTextures, b.cubeTextures);
+    }
+
+    private static boolean sameLight(ColorLight a, ColorLight b) {
+        if (a == null || b == null) {
+            return a == b;
+        }
+        return a.radius == b.radius && a.red == b.red && a.green == b.green && a.blue == b.blue;
+    }
+
+    private static boolean sameFaces(BlockTextures[] a, BlockTextures[] b) {
+        if (a == null || b == null) {
+            return a == b;
+        }
+        if (a.length != b.length) {
+            return false;
+        }
+        for (int i = 0; i < a.length; i++) {
+            BlockTextures x = a[i], y = b[i];
+            if (x == null || y == null) {
+                if (x != y) {
+                    return false;
+                }
+                continue;
+            }
+            if (!java.util.Objects.equals(x.top, y.top) || !java.util.Objects.equals(x.bottom, y.bottom)
+                    || !java.util.Objects.equals(x.front, y.front) || !java.util.Objects.equals(x.back, y.back)
+                    || !java.util.Objects.equals(x.left, y.left) || !java.util.Objects.equals(x.right, y.right)) {
+                return false;
+            }
+        }
+        return true;
     }
 }

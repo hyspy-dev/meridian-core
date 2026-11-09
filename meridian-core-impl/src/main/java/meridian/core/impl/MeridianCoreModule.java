@@ -251,8 +251,9 @@ public class MeridianCoreModule implements ProxyModule {
                 .map(i -> i.categories == null ? java.util.List.<String>of()
                         : java.util.Arrays.stream(i.categories).filter(java.util.Objects::nonNull).toList())
                 .orElse(java.util.List.of()));
+        // The items come after the block types: rules that tell blocks apart by kind run again.
         ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
-                (direction, session) -> new ItemRegistryObserver(itemRegistry));
+                (direction, session) -> new ItemRegistryObserver(itemRegistry, worldState::itemsArrived));
 
         // InteractionControl: forges interaction chains via the registry + VM.
         // The observer runs at NORMAL in BOTH directions — it not only observes
@@ -310,7 +311,7 @@ public class MeridianCoreModule implements ProxyModule {
         // undo the other's work, since neither can see what the other put on the client.
         MarkerStoreImpl markerStore = new MarkerStoreImpl(ctx.getLogger());
         MapMarkersImpl mapMarkers = new MapMarkersImpl(ctx.getLogger(), markerStore,
-                ctx.scheduler(), chat, mapSession, sessionHolder);
+                ctx.scheduler(), chat, mapSession, sessionHolder, gameAssets);
         ctx.services().provide(MapMarkers.class, mapMarkers);
         // Early, ahead of the window that trims the same packet: the window decides whether an
         // update is worth forwarding by what is left in it, markers included.

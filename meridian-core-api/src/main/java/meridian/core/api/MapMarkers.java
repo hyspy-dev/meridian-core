@@ -42,6 +42,63 @@ import java.util.function.Predicate;
  */
 public interface MapMarkers {
 
+    /**
+     * The longest marker name the server takes ({@code UserMarkerValidator}): a {@link #create}
+     * with a longer one is refused - by silence, so it ends up local.
+     */
+    int NAME_LIMIT = 24;
+
+    /**
+     * The height the server pins every player-made marker at: a marker is asked for by {@code x}
+     * and {@code z} alone, and the server draws it at this {@code y}.
+     */
+    double HEIGHT = 100;
+
+    /**
+     * The marker pictures the game ships ({@code Common/UI/WorldMap/MapMarkers/}) that a marker of
+     * the player's own can carry - a marker's {@link Marker#icon} is a free string on the wire, so
+     * any of them is taken. {@link #iconImage} reads one.
+     */
+    enum Icon {
+        UserA("UserA.png"),
+        UserB("UserB.png"),
+        UserC("UserC.png"),
+        UserD("UserD.png"),
+        UserE("UserE.png"),
+        UserF("UserF.png"),
+        Campfire("Campfire.png"),
+        Coordinate("Coordinate.png"),
+        Death("Death.png"),
+        Home("Home.png"),
+        Player("Player.png"),
+        Portal("Portal.png"),
+        PortalInvasion("PortalInvasion.png"),
+        Prefab("Prefab.png"),
+        Spawn("Spawn.png"),
+        TempleGateway("Temple_Gateway.png"),
+        Warp("Warp.png");
+
+        private final String file;
+
+        Icon(String file) {
+            this.file = file;
+        }
+
+        /** The picture's file name, as a marker names it ({@code UserA.png}). */
+        public String file() {
+            return file;
+        }
+    }
+
+    /**
+     * The picture a marker's {@link Marker#icon} names, as PNG bytes - the player's own game's, or
+     * the one the game downloaded from this server for a server's own icon. Empty for a name that
+     * is no plain file name, for a picture the game does not have, and with no game at hand.
+     */
+    default Optional<byte[]> iconImage(String icon) {
+        return Optional.empty();
+    }
+
     /** Every marker known for the world the client is in, shown or not. */
     List<Marker> all();
 
