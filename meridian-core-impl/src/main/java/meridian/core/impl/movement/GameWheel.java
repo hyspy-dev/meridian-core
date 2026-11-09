@@ -202,10 +202,15 @@ final class GameWheel {
         mountedTo = m.mountedTo;
     }
 
-    /** Keys that move the player: a walk in any direction, a jump. */
+    /**
+     * Keys that move the player: a walk in any direction, a jump. {@code horizontalIdle} is the walk
+     * keys' alone; {@code idle} goes off in the air as well - falling, flying, on a ladder - with no
+     * key at all (the recording of 08.11.2026), and a game shown the body a little over the ground
+     * falls for a tick.
+     */
     private static boolean keys(ClientMovement m) {
         MovementStates st = m.movementStates;
-        return st != null && (!st.idle || !st.horizontalIdle || st.jumping);
+        return st != null && (!st.horizontalIdle || st.jumping);
     }
 
     /**
@@ -233,6 +238,8 @@ final class GameWheel {
                 if (keys(m)) {
                     // The player steers: the body is theirs from this report on, which starts where
                     // they were shown last - where the body is.
+                    log.info("meridian-core: the player pressed a key (walk: {}, jump: {})",
+                            !m.movementStates.horizontalIdle, m.movementStates.jumping);
                     lost(Movement.Release.PLAYER);
                     pose(m);
                     return pass;
