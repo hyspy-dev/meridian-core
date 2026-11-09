@@ -27,29 +27,9 @@ final class MapTileImpl implements MapTile {
         this.pixels = pixels;
     }
 
-    /** Rebuilds a tile from the RGB bytes written by {@link WorldMapStore}. */
     /** A tile from colours somebody else worked out - the repainted form of another tile. */
     static MapTileImpl fromPixels(int chunkX, int chunkZ, int size, int[] pixels) {
         return new MapTileImpl(chunkX, chunkZ, size, pixels);
-    }
-
-    static MapTileImpl fromRgb(int chunkX, int chunkZ, int size, byte[] rgb) {
-        int[] pixels = new int[size * size];
-        for (int i = 0; i < pixels.length; i++) {
-            pixels[i] = (rgb[i * 3] & 0xFF) << 16 | (rgb[i * 3 + 1] & 0xFF) << 8 | (rgb[i * 3 + 2] & 0xFF);
-        }
-        return new MapTileImpl(chunkX, chunkZ, size, pixels);
-    }
-
-    /** The tile's pixels as RGB triplets, the form {@link WorldMapStore} keeps on disk. */
-    byte[] toRgb() {
-        byte[] rgb = new byte[pixels.length * 3];
-        for (int i = 0; i < pixels.length; i++) {
-            rgb[i * 3] = (byte) (pixels[i] >> 16);
-            rgb[i * 3 + 1] = (byte) (pixels[i] >> 8);
-            rgb[i * 3 + 2] = (byte) pixels[i];
-        }
-        return rgb;
     }
 
     /** Decodes a wire image, or returns null when it carries nothing usable. */

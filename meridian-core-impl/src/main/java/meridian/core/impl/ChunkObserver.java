@@ -1,8 +1,6 @@
 package meridian.core.impl;
 
 import io.netty.channel.ChannelHandlerContext;
-import java.util.HashMap;
-import java.util.Map;
 import meridian.api.packet.Packet;
 import meridian.api.packet.PacketHandler;
 import meridian.api.session.ProxySession;
@@ -20,14 +18,16 @@ import meridian.protocol.packets.world.UnloadChunks;
  * S2C handler (registered EARLY) feeding {@link ChunkTracker} the world packets ({@code SetChunk},
  * {@code SetAbsentChunks}, {@code ServerSetBlock}, {@code ServerSetBlocks}, {@code UnloadChunk(s)},
  * {@code ClearChunks}), and the fluid layer ({@code SetFluids}, its edits {@code ServerSetFluid} /
- * {@code ServerSetFluids}, and the {@code UpdateFluids} catalog) so water and lava can be told
- * apart from air. Observe-only.
+ * {@code ServerSetFluids}), and core's one {@link FluidCatalog} the {@code UpdateFluids} that
+ * names them, so water and lava can be told apart from air. Observe-only.
  */
 final class ChunkObserver implements PacketHandler {
     private final ChunkTracker tracker;
+    private final FluidCatalog fluidCatalog;
 
-    ChunkObserver(ChunkTracker tracker) {
+    ChunkObserver(ChunkTracker tracker, FluidCatalog fluidCatalog) {
         this.tracker = tracker;
+        this.fluidCatalog = fluidCatalog;
     }
 
     @Override
@@ -49,25 +49,12 @@ final class ChunkObserver implements PacketHandler {
         } else if (packet instanceof meridian.protocol.packets.world.ServerSetFluids fluids) {
             tracker.onServerSetFluids(fluids);
         } else if (packet instanceof UpdateFluids catalog) {
-            tracker.onFluidCatalog(named(catalog));
+            fluidCatalog.update(catalog);
         } else if (packet instanceof UnloadChunk unload) {
             tracker.onUnloadChunk(unload);
         } else if (packet instanceof UnloadChunks unload) {
             tracker.onUnloadChunks(unload);
         }
         return Action.FORWARD;
-    }
-
-    /** The fluid catalog packet as an id -> name map, dropping any entry that carries neither. */
-    private static Map<Integer, String> named(UpdateFluids update) {
-        Map<Integer, String> out = new HashMap<>();
-        if (update.fluids != null) {
-            update.fluids.forEach((id, fluid) -> {
-                if (fluid != null && fluid.id != null) {
-                    out.put(id, fluid.id);
-                }
-            });
-        }
-        return out;
     }
 }

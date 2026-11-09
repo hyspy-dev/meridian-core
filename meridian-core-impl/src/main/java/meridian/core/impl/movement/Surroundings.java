@@ -3,13 +3,13 @@ package meridian.core.impl.movement;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import meridian.core.impl.FluidCatalog;
 import meridian.protocol.packets.setup.ClientFeature;
 import meridian.protocol.EntityEffect;
 import meridian.protocol.FlyMode;
 import meridian.protocol.Fluid;
 import meridian.protocol.FluidFX;
 import meridian.protocol.FluidFXMovementSettings;
-import meridian.protocol.GameMode;
 import meridian.protocol.Hitbox;
 import meridian.protocol.Model;
 import meridian.protocol.MovementEffects;
@@ -17,13 +17,13 @@ import meridian.protocol.MovementSettings;
 import meridian.protocol.UpdateType;
 import meridian.protocol.packets.assets.UpdateEntityEffects;
 import meridian.protocol.packets.assets.UpdateFluidFX;
-import meridian.protocol.packets.assets.UpdateFluids;
 
 /**
  * Everything the server tells the client that its movement depends on, besides the blocks: the
  * movement settings, the player's own body (its model's hitbox, eyes, crouch), how fluids move a
  * body ({@code FluidFX}), what effects do to movement, the features turned on (mantling, sliding,
- * rolling, split velocity), the game mode and whether flying is allowed or forced.
+ * rolling, split velocity) and whether flying is allowed or forced. The fluids themselves are core's
+ * one {@link FluidCatalog}'s.
  */
 final class Surroundings {
 
@@ -47,12 +47,15 @@ final class Surroundings {
 
     private volatile MovementSettings settings;
     private volatile BodyShape shape;
-    private volatile GameMode gameMode = GameMode.Adventure;
     private volatile boolean flyingSaved;
     private final Map<ClientFeature, Boolean> features = new ConcurrentHashMap<>();
-    private final Map<Integer, Fluid> fluids = new ConcurrentHashMap<>();
+    private final FluidCatalog fluids;
     private final Map<Integer, FluidFX> fluidFx = new ConcurrentHashMap<>();
     private final Map<Integer, EntityEffect> effects = new ConcurrentHashMap<>();
+
+    Surroundings(FluidCatalog fluids) {
+        this.fluids = fluids;
+    }
 
     // ------------------------------------------------------------------
     // Fed by the server
@@ -74,12 +77,6 @@ final class Surroundings {
                 m.eyeHeight * scale, m.crouchOffset * scale);
     }
 
-    void gameMode(GameMode mode) {
-        if (mode != null) {
-            gameMode = mode;
-        }
-    }
-
     void flyingSaved(boolean flying) {
         flyingSaved = flying;
     }
@@ -88,10 +85,6 @@ final class Surroundings {
         if (update != null) {
             features.putAll(update);
         }
-    }
-
-    void fluids(UpdateFluids u) {
-        merge(fluids, u.type, u.fluids);
     }
 
     void fluidFx(UpdateFluidFX u) {
@@ -142,10 +135,6 @@ final class Surroundings {
         return features.getOrDefault(f, false);
     }
 
-    GameMode gameMode() {
-        return gameMode;
-    }
-
     boolean flyingSaved() {
         return flyingSaved;
     }
@@ -158,7 +147,7 @@ final class Surroundings {
 
     /** What the fluid with this id does, or {@code null} for one that does not move a body (fire). */
     FluidMotion fluid(int id) {
-        Fluid f = fluids.get(id);
+        Fluid f = fluids.fluid(id);
         if (f == null) {
             return null;
         }
@@ -173,7 +162,7 @@ final class Surroundings {
 
     /** A fluid's highest level, for its surface (1 when unknown). */
     int maxLevel(int id) {
-        Fluid f = fluids.get(id);
+        Fluid f = fluids.fluid(id);
         return f == null ? 1 : Math.max(1, f.maxFluidLevel);
     }
 

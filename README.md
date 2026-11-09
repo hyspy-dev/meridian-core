@@ -92,6 +92,10 @@ nobody is providing them.
   follow-cam, entity POV) via the same packets Hytale's own server commands use.
   Backs [meridian-camera-tweaks](../meridian-camera-tweaks).
 - **`DebugRender`** - boxes and lines in the world.
+- **`ClientSpoof`** - what the client is shown of itself (a held game mode, flight, full stamina,
+  a hidden death) and what the server is told of its movement (the flying / swimming flags, no
+  fall speed). Core applies it inside its own rewriters after reading the truth, so every other
+  service keeps the server's values. Backs [meridian-client-control](../meridian-client-control).
 
 **Acting**
 

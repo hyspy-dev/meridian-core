@@ -49,6 +49,12 @@ final class PlayerStateImpl implements PlayerState {
     /** Where the server last put us: a spawn, a teleport, a world change. */
     private volatile Vec3 position = new Vec3(0, 0, 0);
     private volatile Vec3 rotation = new Vec3(0, 0, 0);
+    /**
+     * The game mode the server has the player in ({@code SetGameMode}), or {@code null} before it
+     * said - core's one record of it: what an interaction's {@code requiredGameMode} is tested
+     * against, and what a client held in another mode is given back.
+     */
+    private volatile meridian.protocol.GameMode gameMode;
 
     PlayerStateImpl(EntityTrackerImpl tracker) {
         this.tracker = tracker;
@@ -94,6 +100,31 @@ final class PlayerStateImpl implements PlayerState {
         return sheet;
     }
 
+    /** The index of the stat the server's catalog names so ({@code Health}, {@code Stamina}), if any. */
+    java.util.OptionalInt statIndex(String name) {
+        for (Map.Entry<Integer, String> e : statNames.entrySet()) {
+            if (e.getValue().equals(name)) {
+                return java.util.OptionalInt.of(e.getKey());
+            }
+        }
+        return java.util.OptionalInt.empty();
+    }
+
+    /** The catalog's stat type at an index, or {@code null}. */
+    meridian.protocol.EntityStatType statType(int index) {
+        return statTypes.get(index);
+    }
+
+    /** The server's game mode for the player, or {@code null} before it has said. */
+    meridian.protocol.GameMode gameMode() {
+        return gameMode;
+    }
+
+    /** The player's own entity id - the entity tracker's, learned from {@code SetClientId}. */
+    java.util.OptionalInt localId() {
+        return tracker == null ? java.util.OptionalInt.empty() : tracker.localEntityId();
+    }
+
     @Override
     public Map<String, Section> inventories() {
         return Map.copyOf(inventories);
@@ -135,6 +166,12 @@ final class PlayerStateImpl implements PlayerState {
             told = id;
         }
         onName(username);
+    }
+
+    void onGameMode(meridian.protocol.GameMode mode) {
+        if (mode != null) {
+            gameMode = mode;
+        }
     }
 
     void onName(String text) {

@@ -75,8 +75,12 @@ public final class ChunkTracker {
      * {@link ChunkDecoder.Fluids}), only for sections where some level is not nought.
      */
     private final Map<SectionKey, byte[]> fluidLevels = new ConcurrentHashMap<>();
-    /** Fluid id &rarr; name (Water, Lava, ...), from the fluid catalog. */
-    private final Map<Integer, String> fluidNames = new ConcurrentHashMap<>();
+    /** Fluid id &rarr; name (Water, Lava, ...): core's one fluid catalog. */
+    private final FluidCatalog fluidCatalog;
+
+    public ChunkTracker(FluidCatalog fluidCatalog) {
+        this.fluidCatalog = fluidCatalog;
+    }
 
     /** Block index within a 32³ section — {@code (y&31)<<10 | (z&31)<<5 | (x&31)}. */
     private static int indexBlock(int x, int y, int z) {
@@ -428,11 +432,6 @@ public final class ChunkTracker {
         }
     }
 
-    /** Fluid id &rarr; name, as this connection numbered them. Merged; the catalog only grows. */
-    void onFluidCatalog(Map<Integer, String> named) {
-        fluidNames.putAll(named);
-    }
-
     void onUnloadChunk(UnloadChunk packet) {
         unloadColumn(packet.chunkX, packet.chunkZ);
     }
@@ -528,20 +527,13 @@ public final class ChunkTracker {
         if (id <= 0) {
             return null;
         }
-        return new meridian.core.api.FluidCell(id, fluidNames.getOrDefault(id, "Fluid"),
+        return new meridian.core.api.FluidCell(id, fluidName(id),
                 ChunkDecoder.levelOf(fluidLevels.get(key), index));
     }
 
     /** The id of a fluid by name, or {@code -1} when the catalog has no such fluid. */
     public int fluidIdByName(String name) {
-        if (name != null) {
-            for (Map.Entry<Integer, String> e : fluidNames.entrySet()) {
-                if (name.equals(e.getValue())) {
-                    return e.getKey();
-                }
-            }
-        }
-        return -1;
+        return fluidCatalog.idByName(name);
     }
 
     /**
@@ -560,7 +552,13 @@ public final class ChunkTracker {
         if (id <= 0) {
             return null;
         }
-        return fluidNames.getOrDefault(id, "Fluid");
+        return fluidName(id);
+    }
+
+    /** A fluid id's name, or {@code "Fluid"} for one the catalog has not named yet. */
+    private String fluidName(int id) {
+        String name = fluidCatalog.name(id);
+        return name != null ? name : "Fluid";
     }
 
     /** Number of sections currently mirrored. */

@@ -23,12 +23,10 @@ import meridian.protocol.ModelUpdate;
 import meridian.protocol.packets.assets.UpdateBlockHitboxes;
 import meridian.protocol.packets.assets.UpdateEntityEffects;
 import meridian.protocol.packets.assets.UpdateFluidFX;
-import meridian.protocol.packets.assets.UpdateFluids;
 import meridian.protocol.packets.entities.ChangeVelocity;
 import meridian.protocol.packets.entities.EntityUpdates;
 import meridian.protocol.packets.player.ClientMovement;
 import meridian.protocol.packets.player.ClientTeleport;
-import meridian.protocol.packets.player.SetGameMode;
 import meridian.protocol.packets.player.SetMovementStates;
 import meridian.protocol.packets.player.UpdateMovementSettings;
 import meridian.protocol.packets.setup.UpdateFeatures;
@@ -38,15 +36,15 @@ import meridian.protocol.packets.world.ServerSetBlocks;
 /**
  * {@link Movement}: what the ground allows ({@link Terrain}), the body's physics ({@link Physics})
  * and the body that lives by it ({@link Body}), for a headless session. Hears everything the client
- * moves by: the server's block shapes, movement settings, the player's model, fluids, effects,
- * features, game mode, pushes and teleports; and on the client side, positions the body did not
- * send itself.
+ * moves by: the server's block shapes, movement settings, the player's model, how fluids move a
+ * body (the fluids themselves are core's one catalog), effects, features, pushes and teleports;
+ * and on the client side, positions the body did not send itself.
  */
 public final class MovementImpl implements Movement {
 
     private final Terrain terrain;
     private final BlockHitboxes hitboxes;
-    private final Surroundings around = new Surroundings();
+    private final Surroundings around;
     private final Physics physics;
     private final BodySettings reach;
     private final Body body;
@@ -55,9 +53,10 @@ public final class MovementImpl implements Movement {
     private final Supplier<OptionalInt> localId;
     private final IntFunction<Set<Integer>> effectsOf;
 
-    public MovementImpl(Terrain terrain, BlockHitboxes hitboxes, Scheduler scheduler,
-                        Supplier<HeadlessClient> client, Supplier<Vec3> trackedFeet,
+    public MovementImpl(Terrain terrain, BlockHitboxes hitboxes, meridian.core.impl.FluidCatalog fluids,
+                        Scheduler scheduler, Supplier<HeadlessClient> client, Supplier<Vec3> trackedFeet,
                         Supplier<OptionalInt> localId, IntFunction<Set<Integer>> effectsOf) {
+        this.around = new Surroundings(fluids);
         this.terrain = terrain;
         this.hitboxes = hitboxes;
         this.client = client;
@@ -78,7 +77,15 @@ public final class MovementImpl implements Movement {
         return active == null || active.isEmpty() ? null : around.effects(active);
     }
 
-    /** The server's side: block shapes, settings, the model, fluids, effects, features, pushes, teleports. */
+    /**
+     * The movement settings the server last sent, as it sent them, or {@code null} before it has:
+     * read at EARLY, so a rewrite on the way to the client (a spoofed flight) is not in them.
+     */
+    public meridian.protocol.MovementSettings serverSettings() {
+        return around.settings();
+    }
+
+    /** The server's side: block shapes, settings, the model, fluid FX, effects, features, pushes, teleports. */
     public PacketHandler observer() {
         return new PacketHandler() {
             @Override
@@ -92,16 +99,12 @@ public final class MovementImpl implements Movement {
                     body.teleported(teleport.resetVelocity);
                 } else if (packet instanceof ChangeVelocity push) {
                     body.push(push.x, push.y, push.z, push.changeType, push.config);
-                } else if (packet instanceof UpdateFluids fluids) {
-                    around.fluids(fluids);
                 } else if (packet instanceof UpdateFluidFX fx) {
                     around.fluidFx(fx);
                 } else if (packet instanceof UpdateEntityEffects effects) {
                     around.effects(effects);
                 } else if (packet instanceof UpdateFeatures features) {
                     around.features(features.features);
-                } else if (packet instanceof SetGameMode mode) {
-                    around.gameMode(mode.gameMode);
                 } else if (packet instanceof SetMovementStates states && states.movementStates != null) {
                     around.flyingSaved(states.movementStates.flying);
                     body.setFlying(states.movementStates.flying);

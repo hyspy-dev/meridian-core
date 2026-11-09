@@ -20,7 +20,7 @@ import meridian.protocol.packets.entities.EntityUpdates;
 import meridian.protocol.packets.inventory.SetActiveSlot;
 import meridian.protocol.packets.inventory.UpdatePlayerInventory;
 import meridian.protocol.packets.connection.Connect;
-import meridian.protocol.packets.player.SetClientId;
+import meridian.protocol.packets.player.SetGameMode;
 
 /**
  * Feeds {@link PlayerStateImpl} everything the server says about the player themselves.
@@ -33,6 +33,11 @@ import meridian.protocol.packets.player.SetClientId;
  * client where the client is going, so the transforms seen here are the ones it does send - a
  * spawn, a teleport, a world change - and the running position comes from the movement the client
  * sends out, which {@link PlayerStateImpl} reads from the entity tracker.
+ *
+ * <p>Server-to-client it reads at EARLY: the truth, before anything rewrites it on the way to the
+ * client ({@link ClientSpoofHandler} raises the bars a spoofed client is shown, at NORMAL). Which
+ * entity is ours is the entity tracker's to say. Client-to-server it reads at MONITOR, what
+ * actually went out.
  */
 final class PlayerStateHandler implements PacketHandler {
 
@@ -47,7 +52,6 @@ final class PlayerStateHandler implements PacketHandler {
     private static final String RUNE_BAG = "RuneBag";
 
     private final PlayerStateImpl state;
-    private int localId = Integer.MIN_VALUE;
 
     PlayerStateHandler(PlayerStateImpl state) {
         this.state = state;
@@ -55,8 +59,8 @@ final class PlayerStateHandler implements PacketHandler {
 
     @Override
     public Action handleS2C(ChannelHandlerContext ctx, Packet packet, ProxySession session) {
-        if (packet instanceof SetClientId id) {
-            localId = id.clientId;
+        if (packet instanceof SetGameMode mode) {
+            state.onGameMode(mode.gameMode);
         } else if (packet instanceof UpdateEntityStatTypes types) {
             state.onStatTypes(types);
         } else if (packet instanceof UpdatePlayerInventory inventory) {
@@ -109,9 +113,11 @@ final class PlayerStateHandler implements PacketHandler {
 
     /** Only the entity the server said is ours has anything to say about the player. */
     private void ours(EntityUpdates updates) {
-        if (updates.updates == null || localId == Integer.MIN_VALUE) {
+        java.util.OptionalInt me = state.localId();
+        if (updates.updates == null || me.isEmpty()) {
             return;
         }
+        int localId = me.getAsInt();
         for (var update : updates.updates) {
             if (update == null || update.networkId != localId || update.updates == null) {
                 continue;

@@ -31,7 +31,8 @@ final class WorldChunksImpl implements WorldChunks {
     private final WorldStateImpl worldState;
     private final List<Listener> listeners = new CopyOnWriteArrayList<>();
 
-    private final Map<Integer, String> fluids = new ConcurrentHashMap<>();
+    /** Fluid names: core's one catalog, which only grows. */
+    private final FluidCatalog fluids;
     private final Map<Integer, String> environments = new ConcurrentHashMap<>();
 
     /**
@@ -52,8 +53,9 @@ final class WorldChunksImpl implements WorldChunks {
     private volatile Map<Integer, String> blocks;
     private volatile int blocksBuiltFrom = -1;
 
-    WorldChunksImpl(WorldStateImpl worldState) {
+    WorldChunksImpl(WorldStateImpl worldState, FluidCatalog fluids) {
         this.worldState = worldState;
+        this.fluids = fluids;
     }
 
     // ------------------------------------------------------------------
@@ -109,7 +111,7 @@ final class WorldChunksImpl implements WorldChunks {
 
     @Override
     public Map<Integer, String> fluidNames() {
-        return Map.copyOf(fluids);
+        return fluids.names();
     }
 
     @Override
@@ -182,10 +184,6 @@ final class WorldChunksImpl implements WorldChunks {
         // arrive with the rest of the assets, before the first join - clearing them on a world
         // change emptied them for good, and every fluid then went to disk named "Unknown".
         fanOut(l -> l.enterWorld(id));
-    }
-
-    void onFluidCatalog(Map<Integer, String> named) {
-        fluids.putAll(named);
     }
 
     void onEnvironmentCatalog(Map<Integer, String> named) {

@@ -32,7 +32,8 @@ final class CoreCommands {
             + "use|plant|water <x y z> | hit|dig <x y z> [times] | break <x y z> [maxSwings] | place <x y z> [face] [orient] | "
             + "entities [range] [players] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | dodge | assets | asset <path> | "
             + "movement | body | stand <x y z> | move <walk|jump|mantle|drop|leap|swim|climb|fly> <x y z> [walk|run|sprint] | "
-            + "predict <kind> <x y z> [gait] [trace] | hold <forward> <strafe> <yaw> [jump] [crouch] [sprint] [walk] [fly] | hold off | halt";
+            + "predict <kind> <x y z> [gait] [trace] | hold <forward> <strafe> <yaw> [jump] [crouch] [sprint] [walk] [fly] | hold off | halt | "
+            + "spoof [gamemode <creative|adventure|off> | flight|stamina|death|dropflying|swimming|nofall <on|off>]";
 
     private final ModuleContext ctx;
     private final SessionHolder sessions;
@@ -68,6 +69,7 @@ final class CoreCommands {
             case "look" -> CompletableFuture.completedFuture(look());
             case "inv" -> CompletableFuture.completedFuture(inventory());
             case "stats" -> CompletableFuture.completedFuture(stats());
+            case "spoof" -> CompletableFuture.completedFuture(spoof(args));
             case "assets" -> CompletableFuture.completedFuture(assets());
             case "movement" -> CompletableFuture.completedFuture(movement());
             case "stand" -> CompletableFuture.completedFuture(stand(at(args, 1)));
@@ -584,6 +586,49 @@ final class CoreCommands {
     private Object stats() {
         PlayerState state = ctx.services().get(PlayerState.class).orElse(null);
         return state == null ? Map.of() : new java.util.TreeMap<>(state.stats());
+    }
+
+    /**
+     * {@code spoof} answers what is spoofed; {@code spoof gamemode creative|adventure|off} holds the
+     * client's game mode or lets go; {@code spoof <what> on|off} switches one of the others.
+     */
+    private Object spoof(List<String> args) {
+        meridian.core.api.ClientSpoof spoof = ctx.services().get(meridian.core.api.ClientSpoof.class)
+                .orElseThrow(() -> new IllegalStateException("no ClientSpoof service"));
+        if (args.size() >= 3) {
+            String what = args.get(1).toLowerCase(Locale.ROOT);
+            String value = args.get(2).toLowerCase(Locale.ROOT);
+            boolean on = value.equals("on");
+            if (!on && !value.equals("off") && !what.equals("gamemode")) {
+                throw new IllegalArgumentException("spoof " + what + " on|off");
+            }
+            switch (what) {
+                case "gamemode" -> spoof.holdGameMode(value.equals("off") ? null
+                        : meridian.core.api.ClientSpoof.GameMode.valueOf(value.toUpperCase(Locale.ROOT)));
+                case "flight" -> spoof.setFlight(on);
+                case "stamina" -> spoof.setFullStamina(on);
+                case "death" -> spoof.setIgnoreDeath(on);
+                case "dropflying" -> spoof.setDropFlying(on);
+                case "swimming" -> spoof.setAddSwimming(on);
+                case "nofall" -> spoof.setNoFall(on);
+                default -> throw new IllegalArgumentException("spoof: gamemode|flight|stamina|death|dropflying|swimming|nofall");
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        java.util.OptionalInt self = entityTracker().localEntityId();
+        if (self.isPresent()) {
+            out.put("self", self.getAsInt());   // the player's entity id, for reading the traffic
+        }
+        out.put("gamemode", spoof.heldGameMode().map(Enum::name).orElse("off"));
+        out.put("serverGamemode", spoof.serverGameMode().map(Enum::name).orElse("?"));
+        out.put("flight", spoof.flight());
+        out.put("stamina", spoof.fullStamina());
+        out.put("death", spoof.ignoreDeath());
+        out.put("deathHidden", spoof.deathHidden());
+        out.put("dropflying", spoof.dropFlying());
+        out.put("swimming", spoof.addSwimming());
+        out.put("nofall", spoof.noFall());
+        return out;
     }
 
     private Object inventory() {

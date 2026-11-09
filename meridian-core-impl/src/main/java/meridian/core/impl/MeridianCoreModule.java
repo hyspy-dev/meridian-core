@@ -14,6 +14,7 @@ import meridian.core.api.Pages;
 import meridian.core.api.CameraControl;
 import meridian.core.api.Chat;
 import meridian.core.api.ChunkView;
+import meridian.core.api.ClientSpoof;
 import meridian.core.api.Containers;
 import meridian.core.api.PlayerState;
 import meridian.core.api.MapMarkers;
@@ -162,13 +163,27 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.services().provide(CameraControl.class, cameraControl);
         ctx.services().provide(DebugRender.class, debugRender);
 
+        // PlayerState: the player as the server keeps them - where, how, and carrying what.
+        // Who they are comes from the token they log in with, which is what the server goes by.
+        PlayerStateImpl playerState = new PlayerStateImpl(entityTracker);
+
+        // ClientSpoof: what a module wants the client shown, and the server told of its movement.
+        // Applied by core's own rewriters (movement below, ClientSpoofHandler further down) after
+        // the truth is read, so no service of core's ever sees the spoof. The server's movement
+        // settings are core movement's, built further down.
+        meridian.core.impl.movement.MovementImpl[] movementRef = new meridian.core.impl.movement.MovementImpl[1];
+        ClientSpoofImpl clientSpoof = new ClientSpoofImpl(sessionHolder, entityTracker, playerState,
+                () -> movementRef[0] == null ? null : movementRef[0].serverSettings());
+        ctx.services().provide(ClientSpoof.class, clientSpoof);
+
         // S2C: learn the local id, track entity transforms, capture the session.
         ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
                 (direction, session) -> new ServerObserver(entityTracker, cameraControl, debugRender));
-        // C2S: track the player's pose, forge movement when armed, and
-        // (optionally) auto-grant the freecam key.
+        // C2S: track the player's pose, forge movement when armed - the position, the spoofed
+        // flags - and (optionally) auto-grant the freecam key.
         ctx.registerHandler(Direction.C2S, HandlerPosition.NORMAL,
-                (direction, session) -> new ClientObserver(entityTracker, cameraControl, debugRender, movementControl));
+                (direction, session) -> new ClientObserver(entityTracker, cameraControl, debugRender,
+                        movementControl, clientSpoof));
 
         // --- Interaction-chain forging foundation ----------------------------
         // InteractionRegistry: server's interaction catalog (UpdateRootInteractions
@@ -189,9 +204,11 @@ public class MeridianCoreModule implements ProxyModule {
         // rewrite sections in flight. Sitting downstream of either one costs the mirror the
         // truth: at MONITOR it never saw an unload while chunks were held, so nothing was ever
         // let go of and a session grew by 128 KB a section until the heap was gone.
-        ChunkTracker chunkTracker = new ChunkTracker();
+        // The fluid catalog is read here once, for the mirror, the raw feed and the body alike.
+        FluidCatalog fluidCatalog = new FluidCatalog();
+        ChunkTracker chunkTracker = new ChunkTracker(fluidCatalog);
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
-                (direction, session) -> new ChunkObserver(chunkTracker));
+                (direction, session) -> new ChunkObserver(chunkTracker, fluidCatalog));
 
         // A headless session - no game behind it - needs the game's side of the conversation
         // answered: assets, ready, pings, teleports. Early, so what another handler drops is still
@@ -205,11 +222,12 @@ public class MeridianCoreModule implements ProxyModule {
         meridian.core.impl.movement.Terrain terrain =
                 new meridian.core.impl.movement.Terrain(chunkTracker, worldState, blockHitboxes);
         meridian.core.impl.movement.MovementImpl movement = new meridian.core.impl.movement.MovementImpl(
-                terrain, blockHitboxes, ctx.scheduler(),
+                terrain, blockHitboxes, fluidCatalog, ctx.scheduler(),
                 () -> sessionHolder.get().map(HeadlessClientHandler::headlessOf).orElse(null),
                 () -> entityTracker.localPosition().orElse(null),
                 entityTracker::localEntityId, entityTracker::effectsOf);
         ctx.services().provide(meridian.core.api.Movement.class, movement);
+        movementRef[0] = movement;
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY, (direction, session) -> movement.observer());
         // Last on the client side: what actually goes out - a teleport's answer, core's own teleport.
         ctx.registerHandler(Direction.C2S, HandlerPosition.MONITOR, (direction, session) -> movement.clientObserver());
@@ -229,17 +247,22 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.registerHandler(Direction.BOTH, HandlerPosition.MONITOR,
                 (direction, session) -> new ContainerHandler(containers));
 
-        // PlayerState: the player as the server keeps them - where, how, and carrying what.
-        // Who they are comes from the token they log in with, which is what the server goes by.
-        PlayerStateImpl playerState = new PlayerStateImpl(entityTracker);
+        // The server's word on the player is read EARLY, before anything rewrites it on the way
+        // to the client; what the client sends, at MONITOR - what actually went out.
         ctx.services().provide(PlayerState.class, playerState);
-        ctx.registerHandler(Direction.BOTH, HandlerPosition.MONITOR,
+        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
                 (direction, session) -> new PlayerStateHandler(playerState));
+        ctx.registerHandler(Direction.C2S, HandlerPosition.MONITOR,
+                (direction, session) -> new PlayerStateHandler(playerState));
+        // What the client is shown: after the pages handler, which still hears the server's death
+        // window when the spoof keeps it from the client.
+        ctx.registerHandler(Direction.S2C, HandlerPosition.NORMAL,
+                (direction, session) -> new ClientSpoofHandler(clientSpoof));
 
         // WorldChunks: the raw feed, for modules that want the world itself rather than an answer
         // about it. EARLY, so a module dropping one of these packets on its way to the client
         // cannot cost a subscriber the event.
-        WorldChunksImpl worldChunks = new WorldChunksImpl(worldState);
+        WorldChunksImpl worldChunks = new WorldChunksImpl(worldState, fluidCatalog);
         ctx.services().provide(WorldChunks.class, worldChunks);
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
                 (direction, session) -> new WorldChunksHandler(worldChunks));
@@ -285,6 +308,11 @@ public class MeridianCoreModule implements ProxyModule {
                     @Override
                     public meridian.core.impl.interaction.StatSheet selfStats() {
                         return playerState.sheet();
+                    }
+
+                    @Override
+                    public meridian.protocol.GameMode selfGameMode() {
+                        return playerState.gameMode();
                     }
                 }, movement::eyeHeight);
         ctx.services().provide(InteractionControl.class, interactionControl);
@@ -394,7 +422,7 @@ public class MeridianCoreModule implements ProxyModule {
 
         ctx.getLogger().info("meridian-core ready (WorldState, EntityTracker, CameraControl, "
                 + "InteractionRegistry, InventoryTracker, ChunkTracker, ItemRegistry, "
-                + "InteractionControl, World, MapMarkers, Waypoints, Chat, SelectionBus)");
+                + "InteractionControl, World, MapMarkers, Waypoints, Chat, SelectionBus, ClientSpoof)");
     }
 
     /** Writes the map, never letting a storage problem take the session down with it. */

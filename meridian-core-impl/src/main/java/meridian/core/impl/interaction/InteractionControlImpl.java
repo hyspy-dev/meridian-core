@@ -122,8 +122,6 @@ public final class InteractionControlImpl implements InteractionControl {
     private volatile BlockPosition targetBlock;
     /** The player's last observed movement state — what {@code ConditionInteraction} tests. */
     private volatile MovementStates movementStates;
-    /** The player's last observed game mode — what {@code ConditionInteraction.requiredGameMode} tests. */
-    private volatile GameMode gameMode;
     /** Player's last observed look yaw (radians) — drives FacingPlayer placement. */
     private volatile float lookYaw;
     private volatile boolean haveLook;
@@ -287,13 +285,6 @@ public final class InteractionControlImpl implements InteractionControl {
     void onMovementStates(MovementStates states) {
         if (states != null) {
             this.movementStates = states;
-        }
-    }
-
-    /** Tracks the player's game mode — {@code ConditionInteraction.requiredGameMode}'s input. */
-    void onGameMode(GameMode mode) {
-        if (mode != null) {
-            this.gameMode = mode;
         }
     }
 
@@ -673,7 +664,7 @@ public final class InteractionControlImpl implements InteractionControl {
             }
         }
         MovementStates movement = movementStates;
-        GameMode mode = gameMode;
+        GameMode mode = entities.selfGameMode();
         Map<String, Integer> vars = items.varsFor(itemId);
         // Placement rotation is filled in by buildFromVm (it knows the placed
         // block id) via withBlockRotation; null here means "default for now".
@@ -892,7 +883,8 @@ public final class InteractionControlImpl implements InteractionControl {
         if (target == null) {
             return null;
         }
-        GameMode mode = gameMode != null ? gameMode : GameMode.Adventure;
+        GameMode own = entities.selfGameMode();
+        GameMode mode = own != null ? own : GameMode.Adventure;
         double reach = items.useDistance(inventory.itemInHandId(), mode);
         if (mode == GameMode.Creative) {
             reach = Math.max(reach, CREATIVE_REACH);

@@ -15,6 +15,14 @@ public interface EntityLookup {
     StatSheet selfStats();
 
     /**
+     * The game mode the server has the player in - what {@code ConditionInteraction.requiredGameMode}
+     * tests and the reach goes by - or {@code null} before it has said.
+     */
+    default meridian.protocol.GameMode selfGameMode() {
+        return null;
+    }
+
+    /**
      * The player entity's own interaction roots ({@code Interactions} component) by type - what
      * the server looks at before the held item (a dodge lives here). Empty when it has none.
      */
