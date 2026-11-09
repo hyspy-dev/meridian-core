@@ -31,12 +31,31 @@ public final class GameAssetsImpl implements GameAssets {
 
     private final CompletableFuture<Optional<GameInstallation>> installation;
     /** Client file name → sha256, as this connection's server announced it. */
-    private final Map<String, String> announced = new ConcurrentHashMap<>();
+    private final Map<String, String> announced;
     private final java.util.Set<String> missingReported = ConcurrentHashMap.newKeySet();
+    private final Executor executor;
 
     /** Starts finding the installation now, on {@code executor}; reads wait for it. */
     public GameAssetsImpl(Optional<Path> game, Optional<Path> user, Executor executor) {
-        this.installation = CompletableFuture.supplyAsync(() -> GameInstallation.find(game, user), executor);
+        this(CompletableFuture.supplyAsync(() -> GameInstallation.find(game, user), executor),
+                new ConcurrentHashMap<>(), executor);
+    }
+
+    private GameAssetsImpl(CompletableFuture<Optional<GameInstallation>> installation,
+                           Map<String, String> announced, Executor executor) {
+        this.installation = installation;
+        this.announced = announced;
+        this.executor = executor;
+    }
+
+    @Override
+    public GameAssets at(Path where) {
+        if (where == null) {
+            return this;
+        }
+        // The same connection's server files, over the installation that was named.
+        return new GameAssetsImpl(CompletableFuture.supplyAsync(() -> GameInstallation.at(where), executor),
+                announced, executor);
     }
 
     /** What this connection's server said it has: {@code WorldSettings.requiredAssets}. */

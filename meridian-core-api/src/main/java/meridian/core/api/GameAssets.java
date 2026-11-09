@@ -61,4 +61,20 @@ public interface GameAssets {
 
     /** Where {@link #read} would take {@code path} from. */
     Source source(String path);
+
+    /**
+     * The game's files from an installation named by hand - a module's "where the game is" setting -
+     * in place of the one core found. {@code where} may be a build's game folder, its {@code
+     * Assets.zip}, a build folder ({@code .../install/<build>}), a folder of builds ({@code
+     * .../install}) or the Hytale folder above it. Of the builds there, the one that speaks this
+     * proxy's protocol is taken (the newest, if several); when none does, the newest there all the
+     * same, with a warning in the log - the person named it, and the protocol only picks among what
+     * they named. Nothing is {@link #available()} when the path holds no build. The server's own
+     * client files are this connection's, as here.
+     *
+     * <p>Opened once per path for the process; this view is the caller's to keep.
+     */
+    default GameAssets at(Path where) {
+        return this;
+    }
 }

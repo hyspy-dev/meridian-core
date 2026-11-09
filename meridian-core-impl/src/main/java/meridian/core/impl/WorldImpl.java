@@ -69,7 +69,7 @@ public final class WorldImpl implements World {
     /** The type of a block id, or {@code null} for air, the unknown, or a type not yet sent. */
     private BlockView view(int id) {
         BlockType blockType = id > 0 ? worldState.blockTypeById(id) : null;
-        return blockType == null ? null : new BlockViewImpl(id, blockType, worldState.itemCategories());
+        return blockType == null ? null : new BlockViewImpl(id, blockType, worldState.itemCategories(), worldState.flips());
     }
 
     @Override

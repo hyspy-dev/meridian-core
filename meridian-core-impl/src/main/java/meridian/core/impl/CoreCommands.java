@@ -35,7 +35,9 @@ final class CoreCommands {
             + "predict <kind> <x y z> [gait] [trace] | hold <forward> <strafe> <yaw> [jump] [crouch] [sprint] [walk] [fly] | hold off | halt | "
             + "spoof [gamemode <creative|adventure|off> | flight|stamina|death|dropflying|swimming|nofall <on|off>] | "
             + "rotation <index> [rotate <x|y|z> [quarters] | mirror <x|y|z>] | matches <x y z> <name|id> [rotation] | "
-            + "glow <name-contains> [r g b] | glow off";
+            + "glow <name-contains> [r g b] | glow off | flip <block name> | "
+            + "prefab capture <x0 y0 z0> <x1 y1 z1> <file> | prefab read <file> | "
+            + "prefab turned <file> [rotate <x|y|z> [quarters] | flip <x|y|z>]...";
 
     private final ModuleContext ctx;
     private final SessionHolder sessions;
@@ -71,6 +73,8 @@ final class CoreCommands {
             case "rotation" -> CompletableFuture.completedFuture(rotation(args));
             case "matches" -> CompletableFuture.completedFuture(matches(args));
             case "glow" -> CompletableFuture.completedFuture(glow(args));
+            case "flip" -> CompletableFuture.completedFuture(flip(args));
+            case "prefab" -> CompletableFuture.completedFuture(prefab(args));
             case "look" -> CompletableFuture.completedFuture(look());
             case "inv" -> CompletableFuture.completedFuture(inventory());
             case "stats" -> CompletableFuture.completedFuture(stats());
@@ -677,6 +681,119 @@ final class CoreCommands {
     }
 
     // ------------------------------------------------------------------
+
+    /** A block type's flip type, as core read it from the game's files ({@code BlockView.flip}). */
+    private Map<String, Object> flip(List<String> args) {
+        if (args.size() < 2) {
+            throw new IllegalArgumentException("flip <block name>");
+        }
+        meridian.core.api.WorldState ws = ctx.services().get(meridian.core.api.WorldState.class)
+                .orElseThrow(() -> new IllegalStateException("no WorldState"));
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("name", args.get(1));
+        java.util.OptionalInt id = ws.blockId(args.get(1));
+        out.put("id", id.isPresent() ? id.getAsInt() : -1);
+        for (meridian.core.api.BlockView t : ws.allBlockTypes()) {
+            if (id.isPresent() && t.id() == id.getAsInt()) {
+                out.put("flip", t.flip().name());
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Core's {@link meridian.core.api.Prefabs}: a box captured and written, a file read back, and a
+     * file resolved and turned as core's {@link meridian.core.api.Clipboard} turns it - each block by
+     * name, so it can be laid beside what the server pastes.
+     */
+    private Map<String, Object> prefab(List<String> args) {
+        meridian.core.api.Prefabs prefabs = ctx.services().get(meridian.core.api.Prefabs.class)
+                .orElseThrow(() -> new IllegalStateException("no Prefabs"));
+        if (args.size() < 3) {
+            throw new IllegalArgumentException("prefab capture|read|turned ...");
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        try {
+            switch (args.get(1).toLowerCase(Locale.ROOT)) {
+                case "capture" -> {
+                    if (args.size() < 9) {
+                        throw new IllegalArgumentException("prefab capture <x0 y0 z0> <x1 y1 z1> <file>");
+                    }
+                    meridian.core.api.Prefabs.Prefab p = prefabs.capture(at(args, 2), at(args, 5));
+                    java.nio.file.Path file = java.nio.file.Path.of(args.get(8));
+                    prefabs.write(file, p);
+                    out.put("file", file.toAbsolutePath().toString());
+                    out.put("blocks", cells(p));
+                    out.put("fluids", p.fluids().size());
+                }
+                case "read" -> {
+                    meridian.core.api.Prefabs.Prefab p = prefabs.read(java.nio.file.Path.of(args.get(2)));
+                    out.put("anchor", List.of(p.anchorX(), p.anchorY(), p.anchorZ()));
+                    out.put("blocks", cells(p));
+                    out.put("fluids", p.fluids().size());
+                }
+                case "turned" -> {
+                    meridian.core.api.Prefabs.Resolved r = prefabs.resolve(prefabs.read(java.nio.file.Path.of(args.get(2))));
+                    meridian.core.api.Clipboard c = r.clipboard();
+                    meridian.core.api.WorldState ws = ctx.services().get(meridian.core.api.WorldState.class).orElseThrow();
+                    Map<Integer, meridian.core.api.BlockView> types = new java.util.HashMap<>();
+                    for (meridian.core.api.BlockView t : ws.allBlockTypes()) {
+                        types.put(t.id(), t);
+                    }
+                    for (int i = 3; i < args.size(); ) {
+                        String op = args.get(i).toLowerCase(Locale.ROOT);
+                        int axis = axisOf(args.get(i + 1));
+                        if (op.equals("rotate")) {
+                            int quarters = 1;
+                            if (i + 2 < args.size() && args.get(i + 2).matches("-?\\d+")) {
+                                quarters = Integer.parseInt(args.get(i + 2));
+                                i++;
+                            }
+                            c = c.turned(axis, quarters);
+                        } else if (op.equals("flip")) {
+                            c = c.flipped(axis, id -> {
+                                meridian.core.api.BlockView t = types.get(id);
+                                return t == null ? null : t.flip();
+                            });
+                        } else {
+                            throw new IllegalArgumentException("rotate or flip, not " + op);
+                        }
+                        i += 2;
+                    }
+                    List<List<Object>> blocks = new java.util.ArrayList<>();
+                    for (meridian.core.api.PastePreview.Change ch : c.blocks()) {
+                        meridian.core.api.BlockView t = types.get(ch.blockId());
+                        blocks.add(List.of(ch.dx(), ch.dy(), ch.dz(), t == null ? String.valueOf(ch.blockId()) : t.name(),
+                                ch.rotation()));
+                    }
+                    out.put("blocks", blocks);
+                    out.put("empty", r.empty());
+                    out.put("unknown", r.unknown());
+                }
+                default -> throw new IllegalArgumentException("prefab capture|read|turned");
+            }
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException(e.toString(), e);
+        }
+        return out;
+    }
+
+    private static List<List<Object>> cells(meridian.core.api.Prefabs.Prefab p) {
+        List<List<Object>> out = new java.util.ArrayList<>();
+        for (meridian.core.api.Prefabs.Cell c : p.blocks()) {
+            out.add(List.of(c.x(), c.y(), c.z(), c.name(), c.rotation(), c.filler()));
+        }
+        return out;
+    }
+
+    private static int axisOf(String word) {
+        return switch (word.toLowerCase(Locale.ROOT)) {
+            case "x" -> meridian.core.api.Rotation.X;
+            case "y" -> meridian.core.api.Rotation.Y;
+            case "z" -> meridian.core.api.Rotation.Z;
+            default -> throw new IllegalArgumentException("axis x, y or z");
+        };
+    }
 
     /** What core's {@link meridian.core.api.Rotation} makes of an orientation number, and of turning it. */
     private static Map<String, Object> rotation(List<String> args) {

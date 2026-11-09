@@ -109,6 +109,9 @@ public class MeridianCoreModule implements ProxyModule {
         meridian.core.impl.assets.GameAssetsImpl gameAssets =
                 new meridian.core.impl.assets.GameAssetsImpl(gameDir, userDir, ctx.offloadExecutor());
         ctx.services().provide(meridian.core.api.GameAssets.class, gameAssets);
+        // The one block property the server never sends - how a block folds a mirror - read from
+        // the same files, in the background, once per installation.
+        worldState.flips(meridian.core.impl.assets.BlockFlips.lookup(gameAssets, ctx.offloadExecutor()));
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
                 (direction, session) -> new meridian.core.impl.assets.GameAssetsObserver(gameAssets));
         // Files that must simply be there: announced to the client with the server's own
@@ -263,6 +266,7 @@ public class MeridianCoreModule implements ProxyModule {
         // about it. EARLY, so a module dropping one of these packets on its way to the client
         // cannot cost a subscriber the event.
         WorldChunksImpl worldChunks = new WorldChunksImpl(worldState, fluidCatalog);
+        worldChunks.scheduler(ctx.scheduler());
         ctx.services().provide(WorldChunks.class, worldChunks);
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
                 (direction, session) -> new WorldChunksHandler(worldChunks));
@@ -385,6 +389,8 @@ public class MeridianCoreModule implements ProxyModule {
         // --- PastePreview: the game's ghost-block overlay, forged for one client ----
         // Both-line packets on the Default channel, so this is offered on every line.
         ctx.services().provide(PastePreview.class, new PastePreviewImpl(sessionHolder));
+        // The server's prefab files, and the world taken into one - no packets, only the format.
+        ctx.services().provide(meridian.core.api.Prefabs.class, new PrefabsImpl(world, worldState));
 
         // --- 0.6+ only: features whose packets an older protocol does not carry ------
         // Everything in this block references packets absent from the 0.5.9 line. On that line
@@ -396,7 +402,7 @@ public class MeridianCoreModule implements ProxyModule {
                 (direction, session) -> new NoClipHandler(noClip));
 
         BuilderSelectionImpl builderSelection = new BuilderSelectionImpl(sessionHolder, itemRegistry, inventoryTracker,
-                playerState::rotation);
+                playerState::rotation, worldState, pages, ctx.offloadExecutor());
         ctx.services().provide(BuilderSelection.class, builderSelection);
         ctx.registerHandler(Direction.S2C, HandlerPosition.NORMAL,
                 (direction, session) -> new BuilderSelectionHandler(builderSelection));
