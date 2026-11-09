@@ -8,6 +8,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalDouble;
+import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
@@ -21,6 +23,7 @@ import meridian.core.api.InteractionControl;
 import meridian.core.api.Player;
 import meridian.core.api.Vec3;
 import meridian.core.api.World;
+import meridian.core.impl.movement.Terrain;
 import meridian.protocol.BlockType;
 
 /**
@@ -29,21 +32,24 @@ import meridian.protocol.BlockType;
  * <p>Blocks come from {@link ChunkTracker} (live ids) resolved through
  * {@link WorldStateImpl} (the type catalog); actions are forged through
  * {@link InteractionControl}. A Layer-2 module queries blocks and acts on them,
- * writing its own scan / decision logic.
+ * writing its own scan / decision logic. Where the player's body can stand, fit or land is
+ * {@link Terrain}'s, the same rules core's own movement goes by.
  */
 public final class WorldImpl implements World {
     private final ChunkTracker chunks;
     private final WorldStateImpl worldState;
+    private final Terrain terrain;
     private final InteractionControl interactions;
     private final Scheduler scheduler;
     private final PlayerImpl player;
 
-    public WorldImpl(ChunkTracker chunks, WorldStateImpl worldState,
+    public WorldImpl(ChunkTracker chunks, WorldStateImpl worldState, Terrain terrain,
                      EntityTrackerImpl entities, InventoryTracker inventory,
                      InteractionControl interactions, MovementControlImpl movement,
                      Scheduler scheduler, DoubleSupplier eyeHeight) {
         this.chunks = chunks;
         this.worldState = worldState;
+        this.terrain = terrain;
         this.interactions = interactions;
         this.scheduler = scheduler;
         this.player = new PlayerImpl(entities, inventory, interactions, movement, eyeHeight);
@@ -171,6 +177,63 @@ public final class WorldImpl implements World {
             done.complete(Optional.empty());
         }
         return done;
+    }
+
+    @Override
+    public OptionalDouble standAt(BlockPos cell) {
+        Objects.requireNonNull(cell, "cell");
+        return terrain.standAt(cell.x(), cell.y(), cell.z());
+    }
+
+    @Override
+    public boolean fits(Vec3 feet, double height) {
+        Objects.requireNonNull(feet, "feet");
+        return terrain.fits(feet.x(), feet.y(), feet.z(), height);
+    }
+
+    @Override
+    public boolean hurtsAt(Vec3 feet) {
+        Objects.requireNonNull(feet, "feet");
+        return terrain.hurts(feet.x(), feet.y(), feet.z());
+    }
+
+    @Override
+    public OptionalInt surfaceAt(int x, int z) {
+        return terrain.surfaceAt(x, z);
+    }
+
+    @Override
+    public CompletableFuture<OptionalInt> awaitSurface(int x, int z, Duration timeout) {
+        CompletableFuture<OptionalInt> done = new CompletableFuture<>();
+        // Watched before the first look, so a section arriving between the two is not missed.
+        ChunkTracker.CellWatch watch = chunks.watchColumn(x, z, () -> {
+            if (done.isDone()) {
+                return;
+            }
+            OptionalInt y = terrain.surfaceAt(x, z);
+            if (y.isPresent()) {
+                later(() -> done.complete(y));
+            }
+        });
+        done.whenComplete((v, e) -> watch.close());
+        OptionalInt now = terrain.surfaceAt(x, z);
+        if (now.isPresent()) {
+            done.complete(now);
+            return done;
+        }
+        Duration wait = timeout == null || timeout.isNegative() ? Duration.ZERO : timeout;
+        try {
+            ScheduledFuture<?> timer = scheduler.schedule(() -> done.complete(OptionalInt.empty()), wait);
+            done.whenComplete((v, e) -> timer.cancel(false));
+        } catch (RejectedExecutionException shutDown) {
+            done.complete(OptionalInt.empty());
+        }
+        return done;
+    }
+
+    @Override
+    public Optional<Vec3> safeSpotNear(int x, int y, int z, int radius) {
+        return terrain.safeSpotNear(x, y, z, radius);
     }
 
     /** Runs on the scheduler, or here when it is shut down (the module torn down). */

@@ -63,6 +63,8 @@ public final class MovementImpl implements Movement {
         this.trackedFeet = trackedFeet;
         this.localId = localId;
         this.effectsOf = effectsOf;
+        // The ground rules stand the player's body as its model has it, a game's player too.
+        terrain.body(around::shape);
         this.physics = new Physics(terrain, around);
         this.reach = new BodySettings(physics);
         this.body = new Body(scheduler, physics, client, this::effects);
@@ -223,16 +225,19 @@ public final class MovementImpl implements Movement {
     }
 
     @Override
+    @Deprecated
     public OptionalDouble standAt(BlockPos cell) {
         return terrain.standAt(cell.x(), cell.y(), cell.z());
     }
 
     @Override
+    @Deprecated
     public boolean fits(Vec3 feet, double height) {
         return terrain.fits(feet.x(), feet.y(), feet.z(), height);
     }
 
     @Override
+    @Deprecated
     public boolean known(BlockPos cell) {
         return terrain.known(cell.x(), cell.y(), cell.z());
     }

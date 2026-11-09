@@ -2,10 +2,14 @@ package meridian.core.impl.movement;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.OptionalInt;
+import java.util.function.Supplier;
 import meridian.core.api.Block;
 import meridian.core.api.BlockPos;
 import meridian.core.api.FluidCell;
+import meridian.core.api.Vec3;
 import meridian.core.impl.ChunkTracker;
 import meridian.core.impl.WorldStateImpl;
 import meridian.protocol.BlockMaterial;
@@ -23,23 +27,43 @@ import meridian.protocol.BlockType;
  * its cell - a fence's up into the one above - so the cell below a body is looked at too.
  *
  * <p>Where core has not been sent the world, nothing fits: a body never plans into the unknown.
+ *
+ * <p>The ground rules a teleport lands by live here too - the {@linkplain #surfaceAt surface} of a
+ * column and the {@linkplain #safeSpotNear safe spot} near a point - so that a game's player, whose
+ * body core does not move, has them as well as a headless one.
  */
 public final class Terrain {
 
-    /** Half the player's default width and depth (the hitbox is 0.65 across), for planning. */
-    static final double HALF = 0.325;
-    /** The player's default height, for planning. */
-    static final double HEIGHT = 1.85;
     private static final double EPS = 1e-3;
+    /** The heights a column is looked over for its surface or a spot to stand: the world's, and some. */
+    static final int COLUMN_TOP = 400;
+    static final int COLUMN_BOTTOM = -64;
+    /**
+     * How much of the column above a surface has to be known for it to be the surface: a section's
+     * height. Sections arrive whole, so a surface with a known section over it is not the cut-off
+     * top of a hill whose next section is still on its way.
+     */
+    private static final int KNOWN_ABOVE = 32;
 
     private final ChunkTracker chunks;
     private final WorldStateImpl world;
     private final BlockHitboxes hitboxes;
+    /** The player's body, from its model ({@link Surroundings#shape}), once movement is wired. */
+    private volatile Supplier<Surroundings.BodyShape> body = () -> Surroundings.DEFAULT_SHAPE;
 
     public Terrain(ChunkTracker chunks, WorldStateImpl world, BlockHitboxes hitboxes) {
         this.chunks = chunks;
         this.world = world;
         this.hitboxes = hitboxes;
+    }
+
+    /** Where the player's body comes from: the model the server sent for it. */
+    void body(Supplier<Surroundings.BodyShape> shape) {
+        this.body = shape;
+    }
+
+    private Surroundings.BodyShape shape() {
+        return body.get();
     }
 
     /** Whether core knows the blocks at a cell ({@link ChunkTracker#known}). */
@@ -96,7 +120,8 @@ public final class Terrain {
      * tall, hits no solid box - and stands only where core knows the world.
      */
     public boolean fits(double cx, double feet, double cz, double height) {
-        return fits(cx, feet, cz, HALF, HALF, height);
+        Surroundings.BodyShape s = shape();
+        return fits(cx, feet, cz, s.halfX(), s.halfZ(), height);
     }
 
     boolean fits(double cx, double feet, double cz, double hx, double hz, double height) {
@@ -129,7 +154,8 @@ public final class Terrain {
      * Where the feet are when the body stands centred in cell {@code (x, y, z)}: on the highest
      * floor under the body whose top is within the cell's height ({@code [y, y+1)}: a full block
      * under it, a slab in it), with room for the whole body above and no fluid at the head.
-     * Empty when there is no such floor, no room, or core does not know the place.
+     * Empty when there is no such floor, no room, or core does not know the place. The body is the
+     * player's, as its model has it.
      */
     public OptionalDouble standAt(int x, int y, int z) {
         double cx = x + 0.5;
@@ -137,7 +163,8 @@ public final class Terrain {
         if (!known(x, y - 1, z) || !known(x, y, z)) {
             return OptionalDouble.empty();
         }
-        double floor = floorTop(cx, cz, HALF, HALF, y - EPS, y + 1 - EPS);
+        Surroundings.BodyShape s = shape();
+        double floor = floorTop(cx, cz, s.halfX(), s.halfZ(), y - EPS, y + 1 - EPS);
         if (Double.isNaN(floor)) {
             return OptionalDouble.empty();
         }
@@ -147,7 +174,145 @@ public final class Terrain {
         if (burns(x, feetCell, z) || chunks.fluidCellAt(x, feetCell + 1, z) != null) {
             return OptionalDouble.empty();
         }
-        return fits(cx, floor, cz, HEIGHT) ? OptionalDouble.of(floor) : OptionalDouble.empty();
+        return fits(cx, floor, cz, s.halfX(), s.halfZ(), s.height()) ? OptionalDouble.of(floor) : OptionalDouble.empty();
+    }
+
+    // ------------------------------------------------------------------
+    // Landing: the surface of a column, a safe spot near a point, harm
+    // ------------------------------------------------------------------
+
+    /** Whether everything of a cell is known: its blocks and its fluids. */
+    private boolean cellKnown(int x, int y, int z) {
+        return chunks.known(x, y, z) && chunks.fluidsKnown(x, y, z);
+    }
+
+    /**
+     * The height to stand at on top of a column: over the highest cell holding a block that is not
+     * air, or a fluid - one above a block, two above a fluid, so a drop onto a pond clears its
+     * surface. A canopy over the ground is the top, as it is from the sky.
+     *
+     * <p>Empty while it cannot be told: nothing of the column known, or the cells over the highest
+     * block found not known for a section's height - what has not come yet may still be the ground
+     * above it.
+     */
+    public OptionalInt surfaceAt(int x, int z) {
+        if (!chunks.columnKnown(x, z)) {
+            return OptionalInt.empty();
+        }
+        int unknown = Integer.MAX_VALUE;    // the lowest cell not known, of those passed
+        for (int y = COLUMN_TOP; y >= COLUMN_BOTTOM; y--) {
+            if (!cellKnown(x, y, z)) {
+                unknown = y;
+                continue;
+            }
+            boolean fluid = chunks.fluidCellAt(x, y, z) != null;
+            if (fluid || chunks.blockIdAt(x, y, z) > 0) {
+                if (unknown <= y + KNOWN_ABOVE) {
+                    return OptionalInt.empty();
+                }
+                return OptionalInt.of(fluid ? y + 2 : y + 1);
+            }
+        }
+        return OptionalInt.empty();
+    }
+
+    /**
+     * The nearest place to stand around {@code (px, py, pz)}, searched in square rings out to
+     * {@code radius}: ring nought is the column itself, so a straight drop wins when there is one.
+     * In each column the ground is looked for straight down from {@code py} first, then up; of a
+     * ring's columns the nearest to the point wins, the height counting too.
+     *
+     * <p>A place to stand is solid ground, known, with nothing burning in it, and above it as many
+     * cells as the body is tall clear of solid blocks and of any fluid - not in water, not in lava.
+     *
+     * @return the feet there (the middle of the column, on top of the ground), or empty when no
+     *         column within {@code radius} has such a place that core knows of
+     */
+    public Optional<Vec3> safeSpotNear(int px, int py, int pz, int radius) {
+        int room = Math.max(1, (int) Math.ceil(shape().height() - EPS));
+        for (int r = 0; r <= radius; r++) {
+            Vec3 best = null;
+            double bestAway = Double.MAX_VALUE;
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != r) {
+                        continue;           // only the new ring, not the ones already searched
+                    }
+                    int x = px + dx;
+                    int z = pz + dz;
+                    int y = safeStandY(x, z, py, room);
+                    if (y == Integer.MIN_VALUE) {
+                        continue;
+                    }
+                    double away = dx * dx + dz * dz + (y - py) * (double) (y - py);
+                    if (away < bestAway) {
+                        bestAway = away;
+                        best = new Vec3(x + 0.5, y, z + 0.5);
+                    }
+                }
+            }
+            if (best != null) {
+                return Optional.of(best);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** The feet's height on the nearest safe ground in a column, below {@code fromY} first; MIN_VALUE for none. */
+    private int safeStandY(int x, int z, int fromY, int room) {
+        for (int y = Math.min(COLUMN_TOP, fromY); y >= COLUMN_BOTTOM; y--) {
+            if (standable(x, y, z, room)) {
+                return y + 1;
+            }
+        }
+        for (int y = Math.max(COLUMN_BOTTOM, fromY + 1); y <= COLUMN_TOP; y++) {
+            if (standable(x, y, z, room)) {
+                return y + 1;
+            }
+        }
+        return Integer.MIN_VALUE;
+    }
+
+    /** Whether {@code (x, y, z)} is safe ground with {@code room} clear cells above it. */
+    private boolean standable(int x, int y, int z, int room) {
+        if (chunks.blockIdAt(x, y, z) <= 0) {
+            return false;                   // air, or nothing known: no ground
+        }
+        Placed ground = blockAt(x, y, z);
+        if (ground == null || ground.type().material != BlockMaterial.Solid || !chunks.fluidsKnown(x, y, z)
+                || burns(x, y, z)) {
+            return false;
+        }
+        for (int i = 1; i <= room; i++) {
+            if (!clear(x, y + i, z)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Whether a cell is known to be out of the body's way: nothing solid, no fluid. */
+    private boolean clear(int x, int y, int z) {
+        if (!cellKnown(x, y, z)) {
+            return false;
+        }
+        Placed b = blockAt(x, y, z);
+        return (b == null || b.type().material != BlockMaterial.Solid) && chunks.fluidCellAt(x, y, z) == null;
+    }
+
+    /**
+     * Whether a body with its feet at {@code feet} is in something that hurts - lava, fire and their
+     * kin - in a cell of its column from the feet up to its head.
+     */
+    public boolean hurts(double x, double feet, double z) {
+        int cx = floor(x);
+        int cz = floor(z);
+        for (int y = floor(feet); y <= floor(feet + shape().height() - EPS); y++) {
+            if (burns(cx, y, cz)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** The highest solid top under a footprint within [lo, hi), or NaN. */

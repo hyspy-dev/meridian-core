@@ -129,7 +129,7 @@ final class Surroundings {
     }
 
     /** {@code Server/Models/Human/Player.json} - only until the server sends the player's model. */
-    private static final BodyShape DEFAULT_SHAPE = new BodyShape(0.65, 0.65, 1.85, 1.6, -0.4);
+    static final BodyShape DEFAULT_SHAPE = new BodyShape(0.65, 0.65, 1.85, 1.6, -0.4);
 
     boolean feature(ClientFeature f) {
         return features.getOrDefault(f, false);

@@ -161,6 +161,19 @@ public interface EntityTracker {
     }
 
     /**
+     * The box the server collides entity {@code entityId} by, where it stands now: its model's
+     * hitbox as the server sent it, sized by the entity's own scale the way the server sizes it,
+     * around its {@linkplain #positionOf position} (the feet). Standing - a crouch or a seat lowers
+     * the real box, which the server does not say.
+     *
+     * <p>Empty until the server has sent the entity's model with a hitbox, and for a model that has
+     * none. A core too old to tell answers empty.
+     */
+    default Optional<Box> boundsOf(int entityId) {
+        return Optional.empty();
+    }
+
+    /**
      * Network id of the entity the local player is looking at — the tracked
      * entity whose direction from the player is within {@code maxAngleDeg} of
      * the look vector and no farther than {@code maxRange} blocks. The closest
