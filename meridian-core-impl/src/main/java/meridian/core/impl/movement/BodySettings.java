@@ -109,7 +109,7 @@ final class BodySettings {
         double[] wish = {v, 0};
         double x = 0;
         for (int i = 0; i < 600; i++) {
-            Physics.airHorizontal(h, wish, p);
+            Physics.airAlong(h, v, p);
             vy = physics.fall(vy, p, 1);
             y += vy * Physics.DT;
             x += h[0] * Physics.DT;

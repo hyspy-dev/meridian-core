@@ -260,7 +260,7 @@ public final class MovementImpl implements Movement {
         }
         return new State(new Vec3(s.x, s.y, s.z), new Vec3(s.totalX(), s.totalY(), s.totalZ()), s.yaw, s.pitch,
                 s.onGround, s.inFluid, s.swimming, s.climbing, s.flying, s.crouching, s.sprinting, s.sliding, s.rolling,
-                s.mantling, s.ledge != null && s.pullTime < 0);
+                s.mantling, false);
     }
 
     @Override

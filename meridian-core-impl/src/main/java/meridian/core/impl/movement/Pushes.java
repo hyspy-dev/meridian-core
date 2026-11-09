@@ -25,11 +25,19 @@ final class Pushes {
         final VelocityConfig config;
 
         Push(double x, double y, double z, VelocityConfig config) {
+            this(x, y, z, y > 0, config);
+        }
+
+        private Push(double x, double y, double z, boolean startedUp, VelocityConfig config) {
             this.x = x;
             this.y = y;
             this.z = z;
-            this.startedUp = y > 0;
+            this.startedUp = startedUp;
             this.config = config;
+        }
+
+        Push copy() {
+            return new Push(x, y, z, startedUp, config);
         }
     }
 
@@ -44,12 +52,12 @@ final class Pushes {
     }
 
     /**
-     * One client tick of dying away. {@code ground}: the ground's resistance applies - on the
-     * ground, or when gravity does not (swimming, climbing, flying, pulling up), when y dies away
-     * too.
+     * One client tick of dying away. The ground's resistance applies unless the body was falling
+     * the tick before (recorded: the ground's on the take-off tick, the air's on the landing one),
+     * and when gravity does not (swimming, climbing, flying, pulling up), when y dies away too.
      */
-    void decay(boolean onGround, boolean affectedByGravity) {
-        boolean ground = onGround || !affectedByGravity;
+    void decay(boolean wasFalling, boolean affectedByGravity) {
+        boolean ground = !wasFalling || !affectedByGravity;
         for (Push p : carried) {
             VelocityConfig c = p.config;
             float min = ground ? c.groundResistance : c.airResistance;

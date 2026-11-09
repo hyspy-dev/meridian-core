@@ -87,7 +87,7 @@ final class Pilot {
         }
         if (better) {
             sinceBetter = 0;
-        } else if (++sinceBetter > STUCK_TICKS && s.ledge == null) {
+        } else if (++sinceBetter > STUCK_TICKS && !s.mantling) {
             return done(MoveResult.Status.BLOCKED, s);
         }
         // A move that needed the ground and landed somewhere else is over.
@@ -105,7 +105,9 @@ final class Pilot {
             case JUMP -> jump(s, yaw, flat, dy, sprint, walk);
             case LEAP -> leap(s, yaw, flat, sprint || gait == Gait.RUN);
             case MANTLE -> mantle(s, yaw, flat, dy);
-            case SWIM -> new Controls(flat > 0.3 ? 1 : 0, 0, yaw, 0, dy > 0.3, dy < -0.3, false, false, false);
+            case SWIM -> s.onGround && !s.inFluid
+                    ? new Controls(forward(s, flat), 0, yaw, 0, false, false, false, false, false)
+                    : new Controls(flat > 0.3 ? 1 : 0, 0, yaw, 0, dy > 0.3, dy < -0.3, false, false, false);
             case CLIMB -> climb(s, yaw, flat, dy);
             case FLY -> new Controls(flat > 0.3 ? Math.min(1, flat) : 0, 0, yaw, 0, dy > 0.25, dy < -0.25, sprint, false,
                     true);
@@ -116,9 +118,10 @@ final class Pilot {
         double near = through ? PASS : ARRIVE;
         return switch (move.kind()) {
             case FLY -> dist < (through ? 0.6 : 0.35);
-            case SWIM -> dist < 0.6 || (s.onGround && flat < near && Math.abs(dy) < 0.6);
+            // In the water near is enough; out of it, onto a bank, the body has to have come down.
+            case SWIM -> (s.inFluid && !s.onGround && dist < 0.6) || (s.onGround && flat < near && Math.abs(dy) < 0.6);
             case CLIMB -> flat < Math.max(near, 0.2) && Math.abs(dy) < 0.3 && (s.onGround || s.climbing);
-            case MANTLE -> s.ledge == null && s.onGround && flat < near && Math.abs(dy) < 0.3
+            case MANTLE -> !s.mantling && s.onGround && flat < near && Math.abs(dy) < 0.3
                     && (through || Math.hypot(s.vx, s.vz) < 0.4);
             default -> s.onGround && flat < near && Math.abs(dy) < 0.6
                     && (through || Math.hypot(s.vx, s.vz) < 0.4);
@@ -126,10 +129,10 @@ final class Pilot {
     }
 
     /**
-     * How much forward this tick to stop on the point. On the ground, with the keys let go, the
-     * speed dies by the walk's blend {@code b} a tick, so a body at speed v slides
-     * v·dt·(1−b)/b more: the speed it may have at distance d is d·b/((1−b)·dt). Each tick the
-     * forward key is pressed - or the back one - so that the next tick's speed is that.
+     * Forward, or not, or back, this tick, to stop on the point - the way a player does it. With
+     * the key in, the speed goes to v' = 0.82·v + 0.18·S (S the asked-for speed one ramp step on);
+     * let go, it dies by the ground's drag d, carrying v·dt·d/(1−d) more. Press while even a press
+     * now stops short of the point; tap back when letting go would carry past it.
      */
     private double forward(BodyState s, double flat) {
         if (through) {
@@ -139,19 +142,27 @@ final class Pilot {
             return airForward(s, flat);
         }
         meridian.protocol.MovementSettings p = physics.surroundings().settings();
-        double b = physics.groundBlend(s);
+        double d = physics.groundDrag(s);
         Vec3 to = move.to();
         double ux = flat > 1e-6 ? (to.x() - s.x) / flat : 0;
         double uz = flat > 1e-6 ? (to.z() - s.z) / flat : 0;
         double v = s.vx * ux + s.vz * uz;
-        double full = p == null ? 5.5 : p.baseSpeed * (move.gait() == Gait.WALK ? p.forwardWalkSpeedMultiplier
+        double base = p == null ? 5.5 : p.baseSpeed;
+        double acc = p == null ? 0.1 : p.acceleration;
+        double full = p == null ? 5.5 : base * (move.gait() == Gait.WALK ? p.forwardWalkSpeedMultiplier
                 : p.forwardRunSpeedMultiplier * (move.gait() == Gait.SPRINT ? p.forwardSprintSpeedMultiplier : 1));
-        double ahead = Math.max(0, flat - v * Physics.DT);
-        double allowed = ahead * b / ((1 - b) * Physics.DT);
-        double target = Math.min(full, allowed);
-        double wish = v + (target - v) / b;
-        double f = wish / Math.max(full, 1e-6);
-        return f < -1 ? -1 : f > 1 ? 1 : f;
+        double keep = Tuning.KEY_KEEP;
+        double next = Math.min(full, s.ramp + acc * full * full / base);
+        double pressed = keep * v + Math.min((1 - keep) * next, Math.max(0, full - keep * v));
+        double carryPressed = pressed * Physics.DT / (1 - d);
+        double carryLetGo = v * d * Physics.DT / (1 - d);
+        if (carryPressed <= flat + 0.01) {
+            return 1;
+        }
+        if (carryLetGo > flat + 0.08) {
+            return -1;
+        }
+        return 0;
     }
 
     /**
@@ -202,29 +213,30 @@ final class Pilot {
     }
 
     private Controls mantle(BodyState s, float yaw, double flat, double dy) {
-        if (s.ledge != null) {
-            // Hanging: pull up.
-            return new Controls(1, 0, yaw, 0, false, false, false, false, false);
+        if (s.mantling) {
+            // Pulled up: held still for a second.
+            return new Controls(0, 0, yaw, 0, false, false, false, false, false);
         }
         if (leftGround && s.onGround && Math.abs(move.to().y() - s.y) < 0.3) {
             // Up: onto the point.
             return new Controls(forward(s, flat), 0, yaw, 0, false, false, false, false, false);
         }
+        // Jump at the wall and keep moving into it: the hands take the ledge as the head passes it.
         boolean press = s.onGround && flat < 1.2;
-        // In the air the jump stays held: that is what takes the ledge.
-        return new Controls(1, 0, yaw, 0, press || !s.onGround, false, false, false, false);
+        boolean hold = !s.onGround && s.vy > 0;
+        return new Controls(1, 0, yaw, 0, press || hold, false, false, false, false);
     }
 
     private Controls climb(BodyState s, float yaw, double flat, double dy) {
         if (s.climbing || dy > 0.3 || dy < -0.3) {
+            // Facing the climbable, forward climbs up and back climbs down; at the top forward
+            // carries on over the edge. Jump would let go.
             boolean up = dy > 0.15;
             boolean down = dy < -0.15;
-            // Facing the climbable, forward climbs up; back climbs down. At the height, forward
-            // steps off toward the point.
             double f = up ? 1 : down ? -1 : (flat > 0.1 ? 1 : 0);
-            return new Controls(f, 0, yaw, 0, up && !s.climbing, down && s.onGround ? false : false, false, false, false);
+            return new Controls(f, 0, yaw, 0, false, false, false, false, false);
         }
-        return new Controls(flat > 0.1 ? 1 : 0, 0, yaw, 0, false, false, false, false, false);
+        return new Controls(flat > 0.1 ? forward(s, flat) : 0, 0, yaw, 0, false, false, false, false, false);
     }
 
     private Controls done(MoveResult.Status status, BodyState s) {

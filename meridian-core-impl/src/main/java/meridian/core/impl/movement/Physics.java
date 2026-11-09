@@ -3,20 +3,20 @@ package meridian.core.impl.movement;
 import java.util.List;
 import meridian.core.api.Movement.Controls;
 import meridian.protocol.BlockMovementSettings;
-import meridian.protocol.packets.setup.ClientFeature;
 import meridian.protocol.FlyMode;
 import meridian.protocol.MovementEffects;
 import meridian.protocol.MovementSettings;
+import meridian.protocol.packets.setup.ClientFeature;
 
 /**
  * One client tick of the player's body: the keys and the look in, the body moved, as the client
- * moves it. Gravity, drag in the air, pushes and how they die away, and fall speed are the server's
- * copies of the client's ({@code PhysicsMath}, {@code MotionControllerBase}); how the keys turn into
- * speed, steps, climbing, swimming and ledges is the client's alone and goes by the settings it is
- * sent and {@link Tuning}.
+ * moves it. Every law here is fitted to a recording of the real client (08.11.2026) on top of the
+ * numbers the server sends ({@code MovementSettings}, the blocks', the fluids'), and gravity and
+ * how pushes die away are the server's own copies of the client's ({@code PhysicsMath},
+ * {@code MotionControllerBase}). What only the client knows is in {@link Tuning}.
  *
  * <p>Pure: a state and controls in, the state changed. The live body and a prediction run the same
- * code.
+ * code. The laws are decided from where the body is at the start of the tick.
  */
 final class Physics {
 
@@ -26,6 +26,8 @@ final class Physics {
     /** Air density as the server takes it ({@code PhysicsMath.AIR_DENSITY}). */
     private static final double AIR_DENSITY = 0.001225;
     private static final double EPS = 1e-6;
+    /** A block's drag when it sets none ({@code BlockMovementSettings} default). */
+    static final double DEFAULT_DRAG = 0.82;
 
     private final Terrain terrain;
     private final Collider collider;
@@ -48,7 +50,11 @@ final class Physics {
     /** What the ground and the blocks about the body are doing to it this tick. */
     record Place(BlockMovementSettings ground, double speedMul, double jumpMul, double terminalMul,
                  boolean climbable, double climbUpMul, double climbDownMul, double climbLateralMul,
+                 double climbNx, double climbNz, double climbTop,
                  Surroundings.FluidMotion fluid, double fluidDepth, boolean bouncy, double bounce) {}
+
+    /** The keys' wish this tick: the unit direction in the world and the cap of the speed they ask for. */
+    private record Wish(double dx, double dz, double cap, boolean keys) {}
 
     // ------------------------------------------------------------------
     // The tick
@@ -67,12 +73,39 @@ final class Physics {
         MovementEffects me = effects == null ? null : effects.movement();
         s.yaw = c.yaw();
         s.pitch = c.pitch();
-
         Controls k = restrict(c, me);
         Place place = sense(s, shape);
+        double feet0 = s.y;
+        double vy0 = s.totalY();
+        boolean ground0 = s.onGround;
 
-        // --- what the body is doing -------------------------------------------
+        // --- the keys ------------------------------------------------------------
+        double tf = clamp(k.forward(), -1, 1);
+        double ts = clamp(k.strafe(), -1, 1);
+        s.keyF = approach(s.keyF, tf, Tuning.KEY_STEP);
+        s.keyS = approach(s.keyS, ts, Tuning.KEY_STEP);
+        // Let go of every key, the speed stops being asked for at once; the axes still ease out.
+        boolean keys = Math.abs(tf) > EPS || Math.abs(ts) > EPS;
+
+        // --- pulled up onto a ledge: still for a second ----------------------------
+        if (s.mantleTicks > 0) {
+            s.mantleTicks--;
+            s.vx = s.vy = s.vz = 0;
+            s.mvx = s.mvy = s.mvz = 0;
+            s.mantling = true;
+            s.onGround = false;
+            if (s.mantleTicks == 0) {
+                s.mantling = false;
+                s.onGround = true;
+                s.groundTicks = 1;
+            }
+            states(s, k, keys);
+            return true;
+        }
+
+        // --- what the body is doing ------------------------------------------------
         FlyMode fly = around.flyMode();
+        boolean wasFlying = s.flying;
         if (fly == FlyMode.Forced) {
             s.flying = true;
         } else if (fly == FlyMode.Disabled) {
@@ -80,9 +113,15 @@ final class Physics {
         } else if (k.fly() != s.flying) {
             s.flying = k.fly();
         }
-        boolean wantCrouch = k.crouch() && !s.flying && !s.swimming;
+        if (s.flying && !wasFlying) {
+            s.flyRest = s.vy;
+        }
+        boolean wantCrouch = k.crouch() && !s.flying;
         double fullHeight = shape.height();
         double crouchHeight = shape.height() + shape.crouchOffset();
+        // A slide starts on the crouch key's press, not on the crouching state coming back (a roll's end).
+        boolean wasCrouching = s.crouchHeld;
+        s.crouchHeld = wantCrouch;
         if (s.crouching && !wantCrouch && !roomFor(s, shape, fullHeight)) {
             s.forcedCrouching = true;
         } else {
@@ -95,7 +134,8 @@ final class Physics {
         double height = s.crouching || s.sliding || s.rolling ? crouchHeight : fullHeight;
 
         s.inFluid = place.fluid() != null && place.fluidDepth() > EPS;
-        s.swimming = !s.flying && place.fluid() != null && place.fluidDepth() >= Tuning.SWIM_DEPTH * fullHeight;
+        s.wasSwimming = s.swimming;
+        s.swimming = !s.flying && place.fluid() != null && place.fluidDepth() >= Tuning.SWIM_DEPTH;
 
         boolean pressedJump = k.jump() && !s.jumpHeld;
         s.jumpHeld = k.jump();
@@ -105,46 +145,80 @@ final class Physics {
             s.jumpBuffer = Math.max(0, s.jumpBuffer - DT);
         }
 
-        if (s.ledge != null) {
-            hang(s, k, p, shape, fullHeight);
-            finish(s, p, place, shape, fullHeight);
-            return true;
+        // Climbing: it starts against a climbable from the ground with forward, or in the air; it
+        // goes on while the climbable is held; back onto the floor ends it.
+        s.wasClimbing = s.climbing;
+        boolean canClimb = place.climbable() && !s.flying && !s.swimming;
+        if (s.wasClimbing) {
+            s.climbing = canClimb && !(ground0 && k.forward() < 0);
+        } else {
+            s.climbing = canClimb && (!ground0 || k.forward() > 0);
+        }
+        if (s.climbing) {
+            s.climbNx = place.climbNx();
+            s.climbNz = place.climbNz();
         }
 
-        boolean wantsClimb = place.climbable() && !s.flying && !s.swimming
-                && (!s.onGround || k.forward() > 0 || k.jump());
-        s.climbing = wantsClimb;
+        // --- the wish ------------------------------------------------------------------
+        boolean sprintKey = keys && k.sprint() && tf > 0 && !s.crouching && !s.swimming && !s.flying;
+        if (sprintKey) {
+            s.sprintTicks = s.sprintTicks < 0 ? 0 : s.sprintTicks + 1;
+            s.sprintOutTicks = -1;
+        } else if (s.sprintTicks >= 0) {
+            s.sprintOutTicks = 1;
+            s.sprintTicks = -1;
+        } else if (s.sprintOutTicks >= 0) {
+            s.sprintOutTicks = s.sprintOutTicks + 1 > Tuning.SPRINT_EASE_TICKS ? -1 : s.sprintOutTicks + 1;
+        }
+        s.sprinting = sprintKey;
+        Wish ground = wish(s, k, p, place, effects, keys, false);
+        Wish airWish = wish(s, k, p, place, effects, keys, true);
+        if (keys) {
+            turnBody(s);
+        }
 
-        // --- the wished velocity ----------------------------------------------
-        double[] wish = wish(s, k, p, place, effects);
-        double wishSpeed = Math.hypot(wish[0], wish[1]);
-
-        if (s.flying) {
-            fly(s, k, p, wish);
+        // --- the ways of moving ----------------------------------------------------------
+        if (s.wasClimbing && !s.climbing && !ground0 && !s.jumping) {
+            // Off the top (or the side) of a climbable: one tick at the climb's own velocity,
+            // straight into it and no gravity, which takes the body over the edge.
+            s.vx = s.climbNx * p.baseSpeed;
+            s.vz = s.climbNz * p.baseSpeed;
+            s.vy = 0;
+        } else if (s.flying) {
+            fly(s, k, p, airWish);
         } else if (s.climbing) {
             climb(s, k, p, place);
         } else if (s.swimming) {
-            swim(s, k, p, place, wish);
-        } else if (s.onGround) {
-            ground(s, k, p, place, wish, wishSpeed, shape);
+            swim(s, k, p, place, ground);
+        } else if (ground0) {
+            ground(s, k, p, place, ground, airWish, wasCrouching);
         } else {
-            air(s, k, p, place, wish);
+            air(s, k, p, place, airWish, vy0);
         }
 
-        // --- moving it through the blocks --------------------------------------
+        // --- moving it through the blocks ------------------------------------------------
         expel(s, shape, height);
+        s.mvx = s.totalX();
+        s.mvy = s.totalY();
+        s.mvz = s.totalZ();
+        if (s.climbing) {
+            reportClimb(s, k, p);
+        }
         double vyBefore = s.totalY();
         double[] box = box(s, shape, height);
         double dx = s.totalX() * DT;
         double dy = s.totalY() * DT;
         double dz = s.totalZ() * DT;
-        List<double[]> boxes = collider.boxesAround(box, dx, dy + (s.onGround ? -0.05 : 0), dz);
+        List<double[]> boxes = collider.boxesAround(box, dx, dy + (ground0 ? -0.05 : 0), dz);
         double[] start = box.clone();
         Collider.Moved m = Collider.move(box, dx, dy, dz, boxes);
-        if (m.horizontal() && s.onGround && !s.flying) {
-            Collider.Moved stepped = stepUp(start, dx, dy, dz, place, shape, height, s);
-            if (stepped != null) {
-                m = stepped;
+        boolean stepped = false;
+        if (m.horizontal() && !s.flying && !s.climbing) {
+            double most = ground0 ? Tuning.STEP_HEIGHT : Tuning.AIR_STEP_HEIGHT;
+            Collider.Moved up = stepUp(start, dx, dy, dz, shape, height, s, most);
+            if (up != null) {
+                stepped = true;
+                m = up;
                 System.arraycopy(start, 0, box, 0, 6);
                 box[1] += m.dy();
                 box[4] += m.dy();
@@ -152,61 +226,77 @@ final class Physics {
                 box[3] += m.dx();
                 box[2] += m.dz();
                 box[5] += m.dz();
-            } else {
-                autoJump(s, k, p, start, dx, dz, boxes, place);
+                if (ground0 && m.dy() > Tuning.SLOW_STEP_ABOVE) {
+                    // A whole block: the step costs speed for a while (AutoJumpObstacleSpeedLoss).
+                    boolean sprint = s.sprinting;
+                    s.slowMultiplier = 1 - (sprint ? p.autoJumpObstacleSprintSpeedLoss : p.autoJumpObstacleSpeedLoss);
+                    double secs = sprint ? p.autoJumpObstacleSprintEffectDuration : p.autoJumpObstacleEffectDuration;
+                    s.slowTicks = (int) Math.round(secs / DT);
+                }
             }
         }
-        s.x = (box[0] + box[3]) / 2;
+        double cx = (box[0] + box[3]) / 2;
+        double cz = (box[2] + box[5]) / 2;
+        if (!stepped && m.horizontal() && !ground0 && !s.flying && !s.climbing && !s.swimming
+                && s.keyF > 0 && around.feature(ClientFeature.Mantling)
+                && mantle(s, shape, fullHeight, m, feet0, dx, dz, cx, cz)) {
+            states(s, k, keys);
+            return true;
+        }
+        s.x = cx;
         s.y = box[1];
-        s.z = (box[2] + box[5]) / 2;
+        s.z = cz;
 
+        // A wall stops the body's own velocity; a push with a config carries on dying away by its
+        // own resistance (recorded: a thrust against a wall kept decaying 4.21, 3.96, 3.72...).
         if (m.hitX()) {
             s.vx = 0;
-            for (Pushes.Push q : s.pushes.carried) {
-                q.x = 0;
-            }
         }
         if (m.hitZ()) {
             s.vz = 0;
-            for (Pushes.Push q : s.pushes.carried) {
-                q.z = 0;
-            }
         }
-        boolean wasOnGround = s.onGround;
-        // The body's own vertical speed as it came down: a push's lift is spent once that has
-        // eaten it (MotionControllerWalk: canClear = push.y + own.y <= 0).
         double ownVyDown = s.vy;
-        if (m.landed(dy)) {
-            land(s, k, p, place, vyBefore);
-        } else if (m.ceiling(dy)) {
+        boolean landed = m.landed(dy);
+        if (m.ceiling(dy)) {
             s.vy = Math.min(0, s.vy);
             for (Pushes.Push q : s.pushes.carried) {
                 q.y = Math.min(0, q.y);
             }
         }
-        // Still on the ground: a floor right under the feet.
-        s.onGround = m.landed(dy) || (dy <= EPS && floorUnder(s, shape, height));
-        if (s.onGround && !wasOnGround && !m.landed(dy)) {
-            land(s, k, p, place, vyBefore);
+        s.onGround = landed || (dy <= EPS && floorUnder(s, shape, height)) || (stepped && ground0);
+        if (s.onGround && !ground0) {
+            land(s, k, p, place, vyBefore, ground);
         }
         if (s.onGround) {
-            s.airTime = 0;
+            if (ground0) {
+                s.groundTicks++;
+            }
+            s.airTicks = 0;
             s.pushes.landed(Math.min(ownVyDown, s.vy));
             if (s.vy < 0) {
                 s.vy = 0;
             }
         } else {
-            s.airTime += DT;
+            if (ground0) {
+                s.airTicks = 0;
+                s.takeoffY = feet0;
+                s.airKeyTicks = keys ? -1 : 0;
+                if (!s.jumping) {
+                    s.jumped = false;
+                    s.airMul = 1;
+                }
+            }
+            s.airTicks++;
+            s.groundTicks = 0;
         }
-
-        // Mantling: in the air, moving into a wall whose top the hands reach.
-        if (!s.onGround && !s.flying && !s.climbing && !s.swimming && k.forward() > 0
-                && (k.jump() || !Tuning.MANTLE_NEEDS_JUMP) && s.totalY() <= Tuning.MANTLE_GRAB_MAX_VY
-                && around.feature(ClientFeature.Mantling)) {
-            grab(s, shape, fullHeight);
+        if (s.slowTicks > 0 && --s.slowTicks == 0) {
+            s.slowMultiplier = 1;
         }
-
-        finish(s, p, place, shape, fullHeight);
+        flags(s, vy0, ground0, shape);
+        states(s, k, keys);
+        boolean affectedByGravity = !(s.flying || s.inFluid || s.swimming || s.climbing || s.mantling);
+        s.pushes.decay(s.wasFalling, affectedByGravity);
+        s.wasFalling = s.falling;
         return true;
     }
 
@@ -247,6 +337,7 @@ final class Physics {
         terminal *= in.terminalMul();
         Terrain.Wet wet = terrain.wet(s.x, s.y, s.z, hx, hz, shape.height(), around);
         return new Place(ground, speed, jump, terminal, in.climbable(), in.climbUp(), in.climbDown(), in.climbLateral(),
+                in.climbNx(), in.climbNz(), in.climbTop(),
                 wet == null ? null : wet.motion(), wet == null ? 0 : wet.depth(), bouncy, bounce);
     }
 
@@ -290,43 +381,60 @@ final class Physics {
         return d > -0.01 + 1e-9;
     }
 
+    /** How far the ground is under the feet, up to {@code most}; {@code most} when there is none that near. */
+    private double groundBelow(BodyState s, Surroundings.BodyShape shape, double most) {
+        double top = terrain.floorTop(s.x, s.z, shape.halfX(), shape.halfZ(), s.y - most, s.y + 1e-3);
+        return Double.isNaN(top) ? most : s.y - top;
+    }
+
     static double[] box(BodyState s, Surroundings.BodyShape shape, double height) {
         return new double[] {s.x - shape.halfX(), s.y, s.z - shape.halfZ(), s.x + shape.halfX(), s.y + height,
                 s.z + shape.halfZ()};
     }
 
     // ------------------------------------------------------------------
-    // Input
+    // The keys
     // ------------------------------------------------------------------
 
-    /** The horizontal velocity the keys ask for, in the world. */
-    private double[] wish(BodyState s, Controls k, MovementSettings p, Place place,
-                          Surroundings.EffectMotion effects) {
-        double f = clamp(k.forward(), -1, 1);
-        double st = clamp(k.strafe(), -1, 1);
+    /**
+     * The keys' wish: the direction of the key axes, turned into the world by the look - a
+     * diagonal at 45° - and the cap of the speed they ask for: the base speed times the gait's
+     * multiplier for the direction (on the ground the forward or back one whenever the forward axis
+     * is in, else the side one; in the air the side one whenever the side axis is in), the
+     * sprint's eased in, times the ground's, the fluid's, the effects' and a step's slow-down.
+     */
+    private Wish wish(BodyState s, Controls k, MovementSettings p, Place place, Surroundings.EffectMotion effects,
+                      boolean keys, boolean air) {
+        double f = s.keyF;
+        double st = s.keyS;
         double len = Math.hypot(f, st);
-        if (len > 1) {
-            f /= len;
-            st /= len;
+        if (!keys || len < EPS) {
+            return new Wish(0, 0, 0, false);
         }
-        boolean sprint = k.sprint() && f > 0 && !s.crouching && !s.swimming;
-        s.sprinting = sprint && len > EPS;
-        s.walking = !sprint && k.walk() && len > EPS;
-        s.running = len > EPS && !s.walking && !s.crouching;
+        double lf = f / len;
+        double ls = st / len;
         double fm;
+        double bm;
         double sm;
         if (s.crouching) {
-            fm = f >= 0 ? p.forwardCrouchSpeedMultiplier : p.backwardCrouchSpeedMultiplier;
+            fm = p.forwardCrouchSpeedMultiplier;
+            bm = p.backwardCrouchSpeedMultiplier;
             sm = p.strafeCrouchSpeedMultiplier;
-        } else if (k.walk() && !sprint) {
-            fm = f >= 0 ? p.forwardWalkSpeedMultiplier : p.backwardWalkSpeedMultiplier;
+        } else if (k.walk() && !s.sprinting) {
+            fm = p.forwardWalkSpeedMultiplier;
+            bm = p.backwardWalkSpeedMultiplier;
             sm = p.strafeWalkSpeedMultiplier;
         } else {
-            fm = f >= 0 ? p.forwardRunSpeedMultiplier : p.backwardRunSpeedMultiplier;
+            fm = p.forwardRunSpeedMultiplier;
+            bm = p.backwardRunSpeedMultiplier;
             sm = p.strafeRunSpeedMultiplier;
-            if (sprint) {
-                fm *= p.forwardSprintSpeedMultiplier;
-            }
+            fm *= 1 + (p.forwardSprintSpeedMultiplier - 1) * sprintEase(s);
+        }
+        double m;
+        if (air) {
+            m = Math.abs(st) > EPS ? sm : f > 0 ? fm : bm;
+        } else {
+            m = Math.abs(f) > EPS ? (f > 0 ? fm : bm) : sm;
         }
         double mul = place.speedMul() * s.slowMultiplier;
         if (s.inFluid && place.fluid() != null && place.fluid().horizontalMultiplier() > 0) {
@@ -342,131 +450,271 @@ final class Physics {
             mul = Math.min(mul, p.maxSpeedMultiplier);
         }
         mul = Math.max(mul, p.minSpeedMultiplier);
-        double base = s.flying ? p.horizontalFlySpeed : p.baseSpeed;
-        double lf = f * fm * base * mul;
-        double ls = st * sm * base * mul;
         double sin = Math.sin(s.yaw);
         double cos = Math.cos(s.yaw);
         // yaw 0 faces -z; right is +x.
-        return new double[] {-sin * lf + cos * ls, -cos * lf - sin * ls};
+        double dx = -sin * lf + cos * ls;
+        double dz = -cos * lf - sin * ls;
+        return new Wish(dx, dz, p.baseSpeed * m * mul, true);
+    }
+
+    /** How far the sprint's speed is in: a cubic ease over six ticks, in and out. */
+    private static double sprintEase(BodyState s) {
+        int n = Tuning.SPRINT_EASE_TICKS;
+        if (s.sprintTicks >= 0) {
+            double e = Math.min(1.0, (double) s.sprintTicks / n);
+            return e * e * e;
+        }
+        if (s.sprintOutTicks >= 0) {
+            double e = Math.max(0.0, (double) (n - s.sprintOutTicks) / n);
+            return e * e * e;
+        }
+        return 0;
+    }
+
+    /**
+     * The body turns toward its movement: to the look, or 45° off it for a side key (back and a
+     * side key the other way), at most {@code BODY_TURN} a tick.
+     */
+    private static void turnBody(BodyState s) {
+        double off = 0;
+        if (Math.abs(s.keyS) > EPS) {
+            double side = Math.signum(s.keyS);
+            off = (s.keyF < -EPS ? side : -side) * Tuning.BODY_OFFSET;
+        }
+        double target = s.yaw + off;
+        double d = Math.IEEEremainder(target - s.bodyYaw, 2 * Math.PI);
+        double turn = Math.max(-Tuning.BODY_TURN, Math.min(Tuning.BODY_TURN, d));
+        s.bodyYaw = (float) (s.bodyYaw + turn);
+    }
+
+    /** The asked-for speed one tick on: toward the cap by acceleration·W²/base, never past it. */
+    private static double rampUp(BodyState s, MovementSettings p, double cap) {
+        double step = Math.max(p.acceleration, 1e-3) * cap * cap / Math.max(p.baseSpeed, EPS);
+        return Math.min(cap, s.ramp + step);
+    }
+
+    /**
+     * The ground's law with keys in: the velocity keeps {@code KEY_KEEP} and gains 0.18 of the
+     * asked-for speed along the keys' direction - but never past the cap along it, the asked-for
+     * speed keeping what it really gave.
+     */
+    private static void keyed(BodyState s, Wish w, double asked) {
+        double keep = Tuning.KEY_KEEP;
+        double gain = 1 - keep;
+        double along = keep * (s.vx * w.dx() + s.vz * w.dz());
+        if (along >= w.cap()) {
+            s.vx *= keep;
+            s.vz *= keep;
+            return;
+        }
+        double add = Math.min(gain * asked, w.cap() - along);
+        s.vx = keep * s.vx + add * w.dx();
+        s.vz = keep * s.vz + add * w.dz();
+        s.ramp = add / gain;
     }
 
     // ------------------------------------------------------------------
     // The ways of moving
     // ------------------------------------------------------------------
 
-    private void ground(BodyState s, Controls k, MovementSettings p, Place place, double[] wish, double wishSpeed,
-                        Surroundings.BodyShape shape) {
-        double friction = place.ground() == null ? Tuning.DEFAULT_FRICTION : place.ground().friction;
-        double blend = Tuning.groundBlend(p.acceleration, friction);
+    /**
+     * On the ground. With keys: the asked-for speed rises and the velocity follows it
+     * ({@link #keyed}); let go, the velocity dies by the ground's drag (0.82 on stone, 0.99 on ice).
+     * Gravity works here too and the floor takes it back (the client reports −0.533 standing). A
+     * crouch at a sprint's speed slides; a jump, once the body has had a tick on the ground, leaves
+     * at jumpForce less that tick's gravity and moves by the air's law on its own tick.
+     */
+    private void ground(BodyState s, Controls k, MovementSettings p, Place place, Wish w, Wish airWish,
+                        boolean wasCrouching) {
+        double drag = groundDrag(place);
         double speed = Math.hypot(s.vx, s.vz);
-
-        // Sliding: a crouch at a run's speed carries on, slowing, until it is spent.
-        if (s.sliding) {
-            if (!k.crouch() || speed < p.slideExitSpeed) {
-                s.sliding = false;
-            } else {
-                s.vx -= s.vx * blend * Tuning.SLIDE_FRICTION_SHARE;
-                s.vz -= s.vz * blend * Tuning.SLIDE_FRICTION_SHARE;
-            }
-        } else if (k.crouch() && speed >= p.minSlideEntrySpeed && around.feature(ClientFeature.CrouchSlide)) {
-            s.sliding = true;
-        }
-        if (s.rolling) {
-            s.rollTime -= DT;
-            if (s.rollTime <= 0) {
-                s.rolling = false;
-                double v = Math.hypot(s.vx, s.vz);
-                if (v > EPS) {
-                    double to = p.rollExitSpeedModifier * (Tuning.ROLL_SPEEDS_ABSOLUTE ? 1 : p.baseSpeed);
-                    s.vx *= Math.min(1, to / v);
-                    s.vz *= Math.min(1, to / v);
-                }
-            }
-        }
-        if (!s.sliding && !s.rolling) {
-            s.vx += (wish[0] - s.vx) * blend;
-            s.vz += (wish[1] - s.vz) * blend;
-        }
-        if (s.slowTime > 0) {
-            s.slowTime -= DT;
-            if (s.slowTime <= 0) {
-                s.slowMultiplier = 1;
-            }
-        }
-        s.vy = 0;
         if (place.bouncy() && place.bounce() > 0) {
             s.vy = place.bounce();
-            s.onGround = false;
             s.jumping = false;
             return;
         }
-        if (s.jumpBuffer > 0 && !s.rolling) {
-            s.vy = p.jumpForce * place.jumpMul();
+        boolean canJump = s.groundTicks >= 1 && s.rollTicks < 0;
+        if (s.jumpBuffer > 0 && canJump) {
+            // The jump's own tick already falls, and already moves by the air's law.
+            s.airMul = s.groundTicks == 1 ? 1.025 : 1.0;
+            s.vy = fall(p.jumpForce * place.jumpMul(), p, place.terminalMul());
             s.jumpBuffer = 0;
             s.jumping = true;
-            s.onGround = false;
+            s.jumped = true;
             s.sliding = false;
+            s.slideTicks = -1;
+            s.airKeyTicks = -1;
+            double[] v = {s.vx, s.vz};
+            double cap = airWish.cap() * s.airMul;
+            airHorizontal(v, airWish, cap, cap, p);
+            s.vx = v[0];
+            s.vz = v[1];
+            return;
         }
+        // A slide: crouch pressed at a sprint's speed.
+        if (s.slideTicks < 0 && s.crouching && !wasCrouching && speed >= p.minSlideEntrySpeed
+                && around.feature(ClientFeature.CrouchSlide)) {
+            s.slideTicks = 0;
+            s.slideStart = Math.max(s.ramp, speed);
+            s.sliding = true;
+        }
+        if (s.rollTicks >= 0) {
+            roll(s, p);
+        } else if (s.slideTicks >= 0) {
+            slide(s, w);
+        } else if (w.keys()) {
+            s.ramp = rampUp(s, p, w.cap());
+            keyed(s, w, s.ramp);
+        } else {
+            s.ramp = 0;
+            s.vx *= drag;
+            s.vz *= drag;
+        }
+        s.vy = fall(0, p, place.terminalMul());
     }
 
-    private void air(BodyState s, Controls k, MovementSettings p, Place place, double[] wish) {
-        double[] v = {s.vx, s.vz};
-        airHorizontal(v, wish, p);
-        s.vx = v[0];
-        s.vz = v[1];
-
-        // A jump pressed just before landing waits for the ground; one pressed falling slowly is a
-        // jump still (JumpBufferMaxYVelocity).
-        s.vy = fall(s.vy, p, place.terminalMul());
-        if (s.vy > 0 && s.jumping && !k.jump()) {
-            // Letting go early ends the jump sooner (VariableJumpFallForce).
-            s.vy = Math.max(0, s.vy - p.variableJumpFallForce * DT);
+    /** A slide: the asked-for speed follows the slide's own curve, the direction the keys' (or the look's). */
+    private void slide(BodyState s, Wish w) {
+        int t = s.slideTicks++;
+        double[] curve = Tuning.SLIDE_CURVE;
+        double dx = w.keys() ? w.dx() : -Math.sin(s.yaw);
+        double dz = w.keys() ? w.dz() : -Math.cos(s.yaw);
+        if (t < curve.length) {
+            double asked = curve[t] * s.slideStart / curve[0];
+            s.vx = Tuning.KEY_KEEP * s.vx + (1 - Tuning.KEY_KEEP) * asked * dx;
+            s.vz = Tuning.KEY_KEEP * s.vz + (1 - Tuning.KEY_KEEP) * asked * dz;
+            s.ramp = asked;
+        } else {
+            if (t == curve.length) {
+                s.ramp = Tuning.SLIDE_AFTER;
+            }
+            if (w.keys()) {
+                keyed(s, w, s.ramp);
+            } else {
+                s.vx *= Tuning.KEY_KEEP;
+                s.vz *= Tuning.KEY_KEEP;
+            }
         }
-        if (s.vy <= 0) {
-            s.jumping = false;
+        if (t + 1 >= Tuning.SLIDE_FLAG_TICKS) {
+            s.sliding = false;
+            s.slideTicks = -1;
         }
     }
 
     /**
-     * The horizontal velocity {@code v} (x, z) one tick in the air toward {@code wish}: steered by
-     * the air's friction and control, then slowed by the air's drag over the speed range.
+     * A safety roll, for {@code ROLL_TICKS} ticks after the landing: v' = 0.82·v + 0.18·base·M·r
+     * along the way the body came, M easing from rollStartSpeedModifier to rollExitSpeedModifier
+     * on a cubic over the roll's time, r coming in by a third a tick.
      */
-    static void airHorizontal(double[] v, double[] wish, MovementSettings p) {
-        double speed = Math.hypot(v[0], v[1]);
-        double friction = Tuning.range(speed, p.airFrictionMinSpeed, p.airFrictionMaxSpeed, p.airFrictionMin,
-                p.airFrictionMax);
-        double control = Tuning.range(Math.hypot(wish[0], wish[1]), p.airControlMinSpeed, p.airControlMaxSpeed,
-                p.airControlMinMultiplier, p.airControlMaxMultiplier);
-        double ax = wish[0] * p.airSpeedMultiplier;
-        double az = wish[1] * p.airSpeedMultiplier;
-        if (Tuning.AIR_FRICTION_IS_BLEND) {
-            double blend = Tuning.clamp01(friction * Math.max(1, control));
-            // Air control steers; it does not speed the body past what it had or wished.
-            double nx = v[0] + (ax - v[0]) * blend;
-            double nz = v[1] + (az - v[1]) * blend;
-            double cap = Math.max(speed, Math.hypot(ax, az));
-            double nl = Math.hypot(nx, nz);
-            if (nl > cap && nl > EPS) {
-                nx *= cap / nl;
-                nz *= cap / nl;
-            }
-            v[0] = nx;
-            v[1] = nz;
+    private void roll(BodyState s, MovementSettings p) {
+        int n = ++s.rollTicks;
+        double span = Math.max(1, Math.round(p.rollTimeToComplete / DT));
+        double e = Math.max(0, 1 - n / span);
+        double mm = p.rollExitSpeedModifier + (p.rollStartSpeedModifier - p.rollExitSpeedModifier) * e * e * e;
+        double r = Math.min(1, Tuning.ROLL_RAMP * n);
+        double push = (1 - Tuning.KEY_KEEP) * p.baseSpeed * mm * r;
+        s.vx = Tuning.KEY_KEEP * s.vx + push * s.rollDirX;
+        s.vz = Tuning.KEY_KEEP * s.vz + push * s.rollDirZ;
+        if (n >= Tuning.ROLL_TICKS) {
+            s.rolling = false;
+            s.rollTicks = -1;
+            s.ramp = Math.hypot(s.vx, s.vz);
         }
-        double drag = Tuning.range(Math.hypot(v[0], v[1]), p.airDragMinSpeed, p.airDragMaxSpeed, p.airDragMin,
-                p.airDragMax);
-        v[0] *= drag;
-        v[1] *= drag;
     }
 
-    /** How much of the gap to the wished speed the ground under the body closes a tick. */
-    double groundBlend(BodyState s) {
-        MovementSettings p = around.settings();
+    /**
+     * In the air: the speed dies by the air's drag over its range; with keys in, it is pushed
+     * along the keys' direction - Quake's way: only the part along it is capped at the wished
+     * speed, by the air's friction (falling from 0.045 to 0.02 as the speed rises) times its
+     * control (1 + 3.13 at a standstill, nothing from 3 up). Keys that came in mid-air come in by
+     * the control. Gravity, and once jump is let go while rising, variableJumpFallForce more.
+     */
+    private void air(BodyState s, Controls k, MovementSettings p, Place place, Wish w, double vy0) {
+        if (s.wasSwimming && s.swimJumping && k.jump()) {
+            // Out of the water: the swim jump leaves as a jump.
+            s.vy = fall(p.jumpForce, p, place.terminalMul());
+            s.jumping = true;
+            s.jumped = true;
+        } else {
+            double vy = fall(s.vy, p, place.terminalMul());
+            if (s.jumping && !k.jump() && vy0 > 0) {
+                vy -= p.variableJumpFallForce * DT;
+            }
+            s.vy = vy;
+        }
+        double[] v = {s.vx, s.vz};
+        double cap = w.cap() * s.airMul;
+        double effective = cap;
+        if (w.keys()) {
+            if (s.airKeyTicks >= 0) {
+                if (s.airKeyTicks == 0) {
+                    s.airKeySpeed = Math.hypot(s.vx, s.vz);
+                }
+                s.airKeyTicks++;
+                double control = airControl(s.airKeySpeed, p);
+                effective = Math.min(cap, s.airKeyTicks * Math.max(p.acceleration, 1e-3) * cap * cap
+                        / Math.max(p.baseSpeed, EPS) * control);
+            }
+        } else if (s.airKeyTicks < 0) {
+            s.airKeyTicks = 0;
+        } else {
+            s.airKeyTicks = 0;
+        }
+        airHorizontal(v, w, cap, effective, p);
+        s.vx = v[0];
+        s.vz = v[1];
+        if (s.vy <= 0) {
+            s.swimJumping = false;
+        }
+    }
+
+    /** The air's control: 1 + airControlMaxMultiplier at a standstill down to 1 at airControlMaxSpeed. */
+    private static double airControl(double speed, MovementSettings p) {
+        return 1 + Tuning.range(speed, p.airControlMinSpeed, p.airControlMaxSpeed, p.airControlMaxMultiplier,
+                p.airControlMinMultiplier);
+    }
+
+    /** One tick of the air's horizontal law on {@code v} (x, z) - see {@link #air}. */
+    static void airHorizontal(double[] v, Wish w, double cap, double effective, MovementSettings p) {
+        double speed = Math.hypot(v[0], v[1]);
+        double drag = Tuning.range(speed, p.airDragMinSpeed, p.airDragMaxSpeed, p.airDragMin, p.airDragMax);
+        double friction = Tuning.range(speed, p.airFrictionMinSpeed, p.airFrictionMaxSpeed, p.airFrictionMax,
+                p.airFrictionMin);
+        double control = airControl(speed, p);
+        v[0] *= drag;
+        v[1] *= drag;
+        if (w != null && w.keys() && cap > EPS) {
+            double wished = cap * (p.airSpeedMultiplier > 0 ? p.airSpeedMultiplier : 1);
+            double along = v[0] * w.dx() + v[1] * w.dz();
+            double add = wished - along;
+            if (add > 0) {
+                double a = Math.min(friction * control * effective, add);
+                v[0] += a * w.dx();
+                v[1] += a * w.dz();
+            }
+        }
+    }
+
+    /** For {@link BodySettings}: the air's law along a straight line, keys held from take-off. */
+    static void airAlong(double[] v, double speed, MovementSettings p) {
+        airHorizontal(v, new Wish(1, 0, speed, true), speed, speed, p);
+    }
+
+    /** The share of its speed the body keeps a tick on the ground under it, with no keys ({@code BlockMovementSettings.drag}). */
+    double groundDrag(BodyState s) {
         Surroundings.BodyShape shape = around.shape();
         BlockMovementSettings g = terrain.groundSettings(s.x, s.y, s.z, shape.halfX(), shape.halfZ());
-        double friction = g == null ? Tuning.DEFAULT_FRICTION : g.friction;
-        return Math.max(1e-3, Tuning.groundBlend(p == null ? 0.1 : p.acceleration, friction));
+        return drag(g);
+    }
+
+    private static double groundDrag(Place place) {
+        return drag(place.ground());
+    }
+
+    private static double drag(BlockMovementSettings g) {
+        double d = g == null || g.drag <= 0 || g.drag >= 1 ? DEFAULT_DRAG : g.drag;
+        return Math.min(0.999, d);
     }
 
     /** Whether the ground ends within the next ticks' travel, straight ahead along {@code yaw}. */
@@ -500,47 +748,123 @@ final class Physics {
         return v;
     }
 
-    private void fly(BodyState s, Controls k, MovementSettings p, double[] wish) {
-        double up = k.jump() ? p.verticalFlySpeed : k.crouch() ? -p.verticalFlySpeed : 0;
-        s.vx += (wish[0] - s.vx) * Tuning.FLY_BLEND;
-        s.vz += (wish[1] - s.vz) * Tuning.FLY_BLEND;
-        s.vy += (up - s.vy) * Tuning.FLY_BLEND;
+    /**
+     * Flying: across, the velocity closes {@code FLY_BLEND} of the gap to the fly speed in the keys'
+     * direction - the same speed whichever way, no ramp; up and down are the fly speed at once plus
+     * what was left of the vertical speed, dying away by {@code FLY_REST_DECAY} a tick.
+     */
+    private void fly(BodyState s, Controls k, MovementSettings p, Wish w) {
+        double tx = w.keys() ? w.dx() * p.horizontalFlySpeed : 0;
+        double tz = w.keys() ? w.dz() * p.horizontalFlySpeed : 0;
+        s.vx += (tx - s.vx) * Tuning.FLY_BLEND;
+        s.vz += (tz - s.vz) * Tuning.FLY_BLEND;
+        double u = k.jump() ? 1 : k.crouch() ? -1 : 0;
+        s.flyRest *= Tuning.FLY_REST_DECAY;
+        if (Math.abs(s.flyRest) < 1e-4) {
+            s.flyRest = 0;
+        }
+        s.vy = u * p.verticalFlySpeed + s.flyRest;
         s.jumping = false;
+        s.ramp = 0;
     }
 
+    /**
+     * Climbing: the body moves by the climb's steps - up (forward) and down (back)
+     * {@code climbSpeed} a tick, up at a sprint {@code climbUpSprintSpeed}, sideways
+     * {@code climbSpeedLateral} with the side key coming in over two ticks; the first tick of a
+     * climb rises a step more. Jump lets go: straight off at 0.4·jumpForce, or 0.25·jumpForce off
+     * and as much to the side held, rising at jumpForce.
+     */
     private void climb(BodyState s, Controls k, MovementSettings p, Place place) {
         double perTick = Tuning.CLIMB_SPEED_PER_TICK;
+        double side = Math.signum(k.strafe());
+        s.climbSide = approach(s.climbSide, side, Tuning.KEY_STEP);
+        double rx = -s.climbNz;
+        double rz = s.climbNx;
+        if (k.jump()) {
+            double off = side == 0 ? Tuning.CLIMB_JUMP_OFF : Tuning.CLIMB_JUMP_SIDE;
+            s.vx = (-s.climbNx * off + rx * Tuning.CLIMB_JUMP_SIDE * Math.abs(side) * Math.signum(side)) * p.jumpForce;
+            s.vz = (-s.climbNz * off + rz * Tuning.CLIMB_JUMP_SIDE * Math.abs(side) * Math.signum(side)) * p.jumpForce;
+            s.vy = p.jumpForce * place.jumpMul();
+            s.climbing = false;
+            s.wasClimbing = false;
+            s.jumping = true;
+            s.jumped = true;
+            s.climbSide = 0;
+            return;
+        }
         double up = k.sprint() ? p.climbUpSprintSpeed : p.climbSpeed;
         double down = k.sprint() ? p.climbDownSprintSpeed : p.climbSpeed;
         double vertical = 0;
-        if (k.forward() > 0 || k.jump()) {
-            vertical = up * perTick * place.climbUpMul();
-        } else if (k.forward() < 0 || k.crouch()) {
-            vertical = -down * perTick * place.climbDownMul();
+        if (k.forward() > 0) {
+            vertical = up * place.climbUpMul();
+            if (!s.wasClimbing) {
+                vertical += p.climbSpeed;
+            }
+        } else if (k.forward() < 0) {
+            vertical = -down * place.climbDownMul();
         }
-        double lateral = k.strafe() * p.climbSpeedLateral * perTick * place.climbLateralMul();
-        double cos = Math.cos(s.yaw);
-        double sin = Math.sin(s.yaw);
-        s.vx = cos * lateral;
-        s.vz = -sin * lateral;
-        s.vy = vertical;
+        double lateral = s.climbSide * p.climbSpeedLateral * place.climbLateralMul();
+        s.vx = rx * lateral * perTick;
+        s.vz = rz * lateral * perTick;
+        s.vy = vertical * perTick;
         s.jumping = false;
+        if (s.climbNx != 0 || s.climbNz != 0) {
+            s.bodyYaw = (float) Math.atan2(-s.climbNx, -s.climbNz);
+        }
     }
 
-    private void swim(BodyState s, Controls k, MovementSettings p, Place place, double[] wish) {
+    /** What the client reports while climbing: the base speed into the climbable, turned 45° by a side key, none up or down. */
+    private static void reportClimb(BodyState s, Controls k, MovementSettings p) {
+        double speed = p.baseSpeed * (k.sprint() ? p.forwardSprintSpeedMultiplier : 1);
+        double ix = s.climbNx;
+        double iz = s.climbNz;
+        if (Math.abs(s.climbSide) > EPS) {
+            double w = s.climbSide;
+            double ax = ix - iz * w;
+            double az = iz + ix * w;
+            double l = Math.hypot(ax, az);
+            ix = ax / l;
+            iz = az / l;
+        }
+        s.mvx = ix * speed;
+        s.mvy = 0;
+        s.mvz = iz * speed;
+    }
+
+    /**
+     * Swimming: across as on the ground, at the fluid's speed; up and down the fluid's swim speeds
+     * at once; with neither, a body near the surface floats - a spring toward {@code FLOAT_DEPTH}
+     * under it, cut to nothing under 0.1 - and one going down sinks at the fluid's sink speed. With
+     * the eyes out of the water, jump lifts at swimJumpForce until the body is out.
+     */
+    private void swim(BodyState s, Controls k, MovementSettings p, Place place, Wish w) {
         Surroundings.FluidMotion f = place.fluid();
-        double target = k.jump() ? f.swimUp() : k.crouch() ? f.swimDown() : f.sink();
-        double friction = place.ground() == null ? Tuning.DEFAULT_FRICTION : Tuning.DEFAULT_FRICTION;
-        double blend = Tuning.groundBlend(p.acceleration, friction);
-        s.vx += (wish[0] - s.vx) * blend;
-        s.vz += (wish[1] - s.vz) * blend;
-        s.vy += (target - s.vy) * Tuning.SWIM_BLEND;
-        s.swimJumping = false;
-        // At the surface, a jump against a bank lifts the body out (SwimJumpForce).
-        if (k.jump() && place.fluidDepth() < 1.0 && s.jumpBuffer > 0) {
+        if (w.keys()) {
+            s.ramp = rampUp(s, p, w.cap());
+            keyed(s, w, s.ramp);
+        } else {
+            s.ramp = 0;
+            s.vx *= DEFAULT_DRAG;
+            s.vz *= DEFAULT_DRAG;
+        }
+        double depth = place.fluidDepth();
+        double eyes = around.shape().eyeHeight();
+        if (k.jump() && depth <= eyes + 1e-3) {
             s.vy = p.swimJumpForce;
             s.swimJumping = true;
-            s.jumpBuffer = 0;
+        } else if (k.jump()) {
+            s.vy = f.swimUp();
+        } else if (k.crouch()) {
+            s.vy = f.swimDown();
+        } else if (depth < Tuning.FLOAT_DEPTH) {
+            // The feet above the float line (surface − FLOAT_DEPTH): the spring takes them down to it.
+            double v = Tuning.FLOAT_SPRING * (depth - Tuning.FLOAT_DEPTH);
+            s.vy = Math.abs(v) < 0.1 ? 0 : v;
+        } else if (s.vy < 0) {
+            s.vy = f.sink();
+        } else {
+            s.vy = 0;
         }
         s.jumping = false;
     }
@@ -549,12 +873,15 @@ final class Physics {
     // Steps, landings, ledges
     // ------------------------------------------------------------------
 
-    /** A walk into a low rise takes it without a jump, when the block it would stand on allows. */
-    private Collider.Moved stepUp(double[] start, double dx, double dy, double dz, Place place,
-                                  Surroundings.BodyShape shape, double height, BodyState s) {
+    /**
+     * A move into a rise up to {@code most} takes it in the same tick at full speed, the feet put
+     * {@code STEP_LIFT} above its top - when the block stepped onto allows it.
+     */
+    private Collider.Moved stepUp(double[] start, double dx, double dy, double dz, Surroundings.BodyShape shape,
+                                  double height, BodyState s, double most) {
         double[] b = start.clone();
-        List<double[]> boxes = collider.boxesAround(b, dx, Tuning.STEP_HEIGHT, dz);
-        Collider.Moved up = Collider.move(b, 0, Tuning.STEP_HEIGHT, 0, boxes);
+        List<double[]> boxes = collider.boxesAround(b, dx, most + 0.01, dz);
+        Collider.Moved up = Collider.move(b, 0, most, 0, boxes);
         if (up.dy() < EPS) {
             return null;
         }
@@ -570,202 +897,141 @@ final class Physics {
                 shape.halfZ())) {
             return null;
         }
-        return new Collider.Moved(across.dx(), rise, across.dz(), across.hitX(), false, across.hitZ());
+        return new Collider.Moved(across.dx(), rise + Tuning.STEP_LIFT, across.dz(), across.hitX(), false,
+                across.hitZ());
     }
 
-    /** Walking into an obstacle a jump clears, the client jumps by itself, losing some speed. */
-    private void autoJump(BodyState s, Controls k, MovementSettings p, double[] start, double dx, double dz,
-                          List<double[]> boxes, Place place) {
-        if (s.jumping || s.crouching || Math.hypot(dx, dz) < EPS || p.autoJumpObstacleMaxAngle <= 0) {
-            return;
-        }
-        // How high the obstacle is: the body lifted until the move goes through.
-        double[] b = start.clone();
-        Collider.Moved up = Collider.move(b, 0, Tuning.AUTO_JUMP_HEIGHT, 0, boxes);
-        if (up.dy() < Tuning.AUTO_JUMP_HEIGHT - 1e-3) {
-            return;
-        }
-        Collider.Moved across = Collider.move(b, dx, 0, dz, boxes);
-        if (Math.hypot(across.dx(), across.dz()) < Math.hypot(dx, dz) * 0.5) {
-            return;
-        }
-        // Only head-on enough (AutoJumpObstacleMaxAngle between the move and the wall's normal).
-        double moveAngle = Math.toDegrees(Math.atan2(Math.abs(dz), Math.abs(dx)));
-        double offAxis = Math.min(moveAngle, 90 - moveAngle);
-        if (offAxis > p.autoJumpObstacleMaxAngle) {
-            return;
-        }
-        s.vy = p.jumpForce * place.jumpMul();
-        s.jumping = true;
-        s.onGround = false;
-        boolean sprint = s.sprinting;
-        s.slowMultiplier = sprint ? p.autoJumpObstacleSprintSpeedLoss : p.autoJumpObstacleSpeedLoss;
-        s.slowTime = sprint ? p.autoJumpObstacleSprintEffectDuration : p.autoJumpObstacleEffectDuration;
-        if (p.autoJumpDisableJumping) {
-            s.jumpBuffer = 0;
-        }
-    }
-
-    private void land(BodyState s, Controls k, MovementSettings p, Place place, double vyBefore) {
+    private void land(BodyState s, Controls k, MovementSettings p, Place place, double vyBefore, Wish w) {
         s.landingSpeed = Math.max(0, -vyBefore);
+        boolean fromAir = s.jumped || s.falling;
         s.vy = 0;
         s.jumping = false;
-        s.falling = false;
         s.swimJumping = false;
+        s.groundTicks = 0;
         if (!s.inFluid && around.feature(ClientFeature.SafetyRoll) && s.landingSpeed > p.minFallSpeedToEngageRoll
                 && s.landingSpeed <= p.maxFallSpeedToEngageRoll && (!Tuning.ROLL_NEEDS_CROUCH || k.crouch())) {
             s.rolling = true;
-            s.rollTime = p.rollTimeToComplete;
+            s.rollTicks = 0;
             double v = Math.hypot(s.vx, s.vz);
-            double to = p.rollStartSpeedModifier * (Tuning.ROLL_SPEEDS_ABSOLUTE ? 1 : p.baseSpeed);
-            if (v > EPS) {
-                s.vx *= to / v;
-                s.vz *= to / v;
+            if (v > 0.05) {
+                s.rollDirX = s.vx / v;
+                s.rollDirZ = s.vz / v;
             } else {
-                double sin = Math.sin(s.yaw);
-                double cos = Math.cos(s.yaw);
-                s.vx = -sin * to;
-                s.vz = -cos * to;
+                s.rollDirX = -Math.sin(s.bodyYaw);
+                s.rollDirZ = -Math.cos(s.bodyYaw);
             }
         }
-        if (p.fallEffectDuration > 0 && s.landingSpeed > p.minFallSpeedToEngageRoll && !s.rolling) {
-            s.slowMultiplier = 1 - p.fallMomentumLoss;
-            s.slowTime = p.fallEffectDuration;
+        if (fromAir && w.keys()) {
+            // The keys' speed starts again from a share of the cap after a landing.
+            s.ramp = Math.min(s.ramp, Tuning.LANDING_RAMP * w.cap());
         }
+        s.jumped = false;
     }
 
-    /** A wall in front whose top is in reach: the hands take the ledge. */
-    private void grab(BodyState s, Surroundings.BodyShape shape, double height) {
-        double fx = -Math.sin(s.yaw);
-        double fz = -Math.cos(s.yaw);
-        // The wall straight ahead along the nearer axis.
-        double nx;
-        double nz;
-        if (Math.abs(fx) > Math.abs(fz)) {
-            nx = -Math.signum(fx);
-            nz = 0;
+    /**
+     * A ledge: moving into a wall in the air whose top is above the head by no more than
+     * {@code MANTLE_OVER_HEAD}. The body is put on the top at once, {@code MANTLE_REACH} past where
+     * it met the wall, the coordinate along the wall kept, and is held still for
+     * {@code MANTLE_FREEZE_TICKS}. Returns whether it happened.
+     */
+    private boolean mantle(BodyState s, Surroundings.BodyShape shape, double height, Collider.Moved m, double feet0,
+                           double dx, double dz, double cx, double cz) {
+        double nx = 0;
+        double nz = 0;
+        if (m.hitX() && Math.abs(dx) > EPS) {
+            nx = Math.signum(dx);
+        } else if (m.hitZ() && Math.abs(dz) > EPS) {
+            nz = Math.signum(dz);
         } else {
-            nx = 0;
-            nz = -Math.signum(fz);
+            return false;
         }
-        double eyes = s.y + shape.eyeHeight();
-        Double top = terrain.ledgeTop(s.x, s.z, -nx, -nz, shape.halfX(), shape.halfZ(), s.y + Tuning.MANTLE_MIN_ABOVE_FEET,
-                eyes + Tuning.MANTLE_REACH_ABOVE_EYES, Tuning.MANTLE_WALL_DISTANCE, height);
+        double head = feet0 + height;
+        Double top = terrain.ledgeTop(cx, cz, nx, nz, shape.halfX(), shape.halfZ(), head + EPS,
+                head + Tuning.MANTLE_OVER_HEAD + EPS, 0.05, height);
         if (top == null) {
-            return;
+            return false;
         }
-        s.ledge = new BodyState.Ledge(top, nx, nz, s.x, top - shape.eyeHeight() + 0.1, s.z);
-        s.vx = 0;
-        s.vy = 0;
-        s.vz = 0;
+        double px = nx != 0 ? cx + nx * Tuning.MANTLE_REACH : s.x;
+        double pz = nz != 0 ? cz + nz * Tuning.MANTLE_REACH : s.z;
+        if (!terrain.fits(px, top, pz, shape.halfX(), shape.halfZ(), height)) {
+            return false;
+        }
+        s.x = px;
+        s.y = top;
+        s.z = pz;
+        s.vx = s.vy = s.vz = 0;
         s.pushes.clear();
         s.mantling = true;
-        s.pullTime = -1;
+        s.mantleTicks = Tuning.MANTLE_FREEZE_TICKS;
         s.jumping = false;
-    }
-
-    /** Hanging from a ledge: forward pulls up, sideways moves along it, back or crouch lets go. */
-    private void hang(BodyState s, Controls k, MovementSettings p, Surroundings.BodyShape shape, double height) {
-        BodyState.Ledge l = s.ledge;
-        s.mantling = true;
-        s.climbing = false;
+        s.falling = false;
         s.onGround = false;
-        if (s.pullTime >= 0) {
-            s.pullTime += DT;
-            double f = Math.min(1, s.pullTime / Tuning.MANTLE_UP_SECONDS);
-            double up = Math.min(1, f / 0.6);
-            double over = Math.max(0, (f - 0.6) / 0.4);
-            double reach = shape.halfX() + 0.05;
-            s.y = l.hangY() + (l.top() - l.hangY()) * up;
-            s.x = l.hangX() - l.nx() * reach * over;
-            s.z = l.hangZ() - l.nz() * reach * over;
-            if (f >= 1) {
-                s.ledge = null;
-                s.mantling = false;
-                s.pullTime = -1;
-                s.onGround = true;
-                s.y = l.top();
-            }
-            return;
-        }
-        if (k.forward() < 0 || k.crouch()) {
-            s.ledge = null;
-            s.mantling = false;
-            return;
-        }
-        if (k.forward() > 0 || k.jump()) {
-            if (terrain.standsOn(l.hangX() - l.nx() * (shape.halfX() + 0.05), l.top(),
-                    l.hangZ() - l.nz() * (shape.halfZ() + 0.05), shape.halfX(), shape.halfZ(), height)) {
-                s.pullTime = 0;
-                return;
-            }
-        }
-        // Along the ledge: the wall's tangent.
-        if (Math.abs(k.strafe()) > EPS) {
-            double tx = -l.nz();
-            double tz = l.nx();
-            double cos = Math.cos(s.yaw);
-            double sin = Math.sin(s.yaw);
-            double rx = cos;
-            double rz = -sin;
-            double sign = Math.signum((rx * tx + rz * tz) * k.strafe());
-            double d = Tuning.MANTLE_SHUFFLE_SPEED * DT * sign;
-            double nxp = l.hangX() + tx * d;
-            double nzp = l.hangZ() + tz * d;
-            Double top = terrain.ledgeTop(nxp, nzp, -l.nx(), -l.nz(), shape.halfX(), shape.halfZ(), l.top() - 0.3,
-                    l.top() + 0.3, Tuning.MANTLE_WALL_DISTANCE, height);
-            if (top != null && Math.abs(top - l.top()) < 1e-3) {
-                s.ledge = new BodyState.Ledge(l.top(), l.nx(), l.nz(), nxp, l.hangY(), nzp);
-                s.x = nxp;
-                s.z = nzp;
-                s.vx = tx * d / DT;
-                s.vz = tz * d / DT;
-            }
-        } else {
-            s.vx = 0;
-            s.vz = 0;
-        }
-        s.x = s.ledge.hangX();
-        s.y = s.ledge.hangY();
-        s.z = s.ledge.hangZ();
+        return true;
     }
 
-    /** The states that follow from the rest, and pushes dying away. */
-    private void finish(BodyState s, MovementSettings p, Place place, Surroundings.BodyShape shape, double height) {
-        s.falling = !s.onGround && !s.flying && !s.climbing && !s.swimming && !s.mantling && s.totalY() < 0;
-        boolean affectedByGravity = !(s.flying || s.inFluid || s.swimming || s.climbing || s.mantling);
-        s.pushes.decay(s.onGround, affectedByGravity);
-        // A push without a config dies away by the ground's drag, or the air's, as the body's own
-        // velocity does on the server's copy (MotionControllerBase: block drag / air drag).
-        if (s.kx != 0 || s.kz != 0) {
-            double k;
-            if (s.flying) {
-                k = 0;
-            } else if (s.onGround || s.swimming) {
-                k = place.ground() == null ? 0.82 : place.ground().drag;
-            } else {
-                k = Tuning.range(Math.hypot(s.kx, s.kz), p.airDragMinSpeed, p.airDragMaxSpeed, p.airDragMin,
-                        p.airDragMax);
+    /**
+     * The flags that come from the start of the tick (the client takes jumping and falling from the
+     * vertical speed it reports): jumping while a jump rises; falling once it is past its top, or,
+     * off a ledge, once the ground under the feet is more than a block down - a step down is not a
+     * fall - and from the start in the air after a push; fallingFar past the roll's top speed.
+     */
+    private void flags(BodyState s, double vy0, boolean ground0, Surroundings.BodyShape shape) {
+        MovementSettings p = around.settings();
+        double far = p == null || p.maxFallSpeedToEngageRoll <= 0 ? 31 : p.maxFallSpeedToEngageRoll;
+        if (s.onGround) {
+            // The landing tick still shows the fall; standing does not.
+            if (ground0) {
+                s.falling = false;
+                s.fallingFar = false;
             }
-            s.kx *= k;
-            s.kz *= k;
-            if (Math.abs(s.kx) <= 0.1 && Math.abs(s.kz) <= 0.1 && s.onGround) {
-                s.kx = 0;
-                s.kz = 0;
-            }
-            if (Math.abs(s.kx) < 1e-4) {
-                s.kx = 0;
-            }
-            if (Math.abs(s.kz) < 1e-4) {
-                s.kz = 0;
+            return;
+        }
+        if (s.flying || s.climbing || s.mantling) {
+            s.falling = false;
+            s.fallingFar = false;
+            return;
+        }
+        if (s.swimming) {
+            s.falling = vy0 < 0 && !s.crouching;
+            s.fallingFar = false;
+            return;
+        }
+        if (s.jumped) {
+            s.jumping = s.jumping && vy0 > 0;
+            s.falling = vy0 <= 0;
+        } else {
+            boolean pushed = !s.pushes.carried.isEmpty() || vy0 > 0;
+            boolean was = s.falling;
+            boolean deep = groundBelow(s, shape, 1.2) > 1.0;
+            s.falling = pushed || (vy0 < 0 && (was || deep));
+            if (s.falling && !was && !pushed) {
+                s.airMul = 0.975;
             }
         }
+        s.fallingFar = s.falling && -s.mvy > far;
+    }
+
+    /** The movement states the keys give (the client's: idle means no keys; running holds while crouching and sliding). */
+    private static void states(BodyState s, Controls k, boolean keys) {
+        boolean moving = keys || s.hadKeys;
+        s.noKeys = !moving;
+        s.walking = k.walk() && !s.sprinting;
+        s.running = moving && !s.walking && !s.flying && !s.climbing;
+        s.rolling = s.rollTicks >= 0;
+        if (s.rolling) {
+            s.crouching = true;
+        }
+        if (s.sliding) {
+            s.crouching = true;
+        }
+        s.hadKeys = keys;
     }
 
     /**
      * Takes in a push from the server ({@code ChangeVelocity}). One with a config is a channel of
-     * its own; one without goes into the body's velocity - a set replaces it, an add is scaled by
-     * the ground's friction and the body's {@code velocityResistance} ("client null-path parity").
+     * its own; one without goes into the body's own velocity - a set replaces it, an add is scaled
+     * across by the ground's friction and the body's {@code velocityResistance} (recorded: ×0.04356
+     * of 149.67), up and down as it is.
      */
     void push(BodyState s, float x, float y, float z, meridian.protocol.ChangeVelocityType type,
               meridian.protocol.VelocityConfig config) {
@@ -775,17 +1041,13 @@ final class Physics {
         if (config != null) {
             s.pushes.take(x, y, z, set, config);
         } else if (set) {
-            s.vx = 0;
-            s.vz = 0;
-            s.kx = x;
-            s.kz = z;
+            s.vx = x;
+            s.vz = z;
             s.vy = y;
         } else {
-            Place place = sense(s, around.shape());
-            double groundDrag = place.ground() == null ? 0.82 : place.ground().drag;
-            double scale = (1 - groundDrag) * resistance;
-            s.kx += x * scale;
-            s.kz += z * scale;
+            double scale = (1 - DEFAULT_DRAG) * resistance;
+            s.vx += x * scale;
+            s.vz += z * scale;
             s.vy += y;
         }
         if (s.totalY() > 0) {
@@ -794,10 +1056,11 @@ final class Physics {
                 s.vy = 0;
             }
         }
-        if (s.ledge != null) {
-            s.ledge = null;
-            s.mantling = false;
-        }
+    }
+
+    private static double approach(double v, double target, double step) {
+        double d = target - v;
+        return Math.abs(d) <= step ? target : v + Math.signum(d) * step;
     }
 
     private static double clamp(double v, double lo, double hi) {

@@ -130,11 +130,11 @@ public final class Body {
     synchronized void teleported(boolean resetVelocity) {
         if (state != null && resetVelocity) {
             state.vx = state.vy = state.vz = 0;
-            state.kx = state.kz = 0;
+            state.ramp = 0;
             state.pushes.clear();
         }
         if (state != null) {
-            state.ledge = null;
+            state.mantleTicks = 0;
             state.mantling = false;
             state.climbing = false;
         }
@@ -164,9 +164,15 @@ public final class Body {
         state.x = m.absolutePosition.x;
         state.y = m.absolutePosition.y;
         state.z = m.absolutePosition.z;
+        sentPos = new double[] {state.x, state.y, state.z};
         if (m.lookOrientation != null) {
             state.yaw = m.lookOrientation.yaw;
             state.pitch = m.lookOrientation.pitch;
+            sentLook = new float[] {state.yaw, state.pitch};
+        }
+        if (m.bodyOrientation != null) {
+            state.bodyYaw = m.bodyOrientation.yaw;
+            sentBody = state.bodyYaw;
         }
         if (m.teleportAck == null) {
             // A teleport core made: the move under way would steer from the old place.
@@ -211,6 +217,10 @@ public final class Body {
         stop();
         state = null;
         lastStates = null;
+        sentPos = null;
+        sentLook = null;
+        sentBody = null;
+        reportV = new double[] {0, 0, 0};
     }
 
     private Vec3 position() {
@@ -278,17 +288,9 @@ public final class Body {
             boolean moved = physics.step(state, controls, effects.get());
             boolean changed = moved && changed(before, state);
             MovementStates states = states(state, controls);
-            if (changed || !states.equals(lastStates)) {
+            if (moved) {
+                // The client reports every tick, standing still too.
                 send(c, states);
-                quiet = false;
-            } else if (current == null && queue.isEmpty() && held == null && state.onGround
-                    && state.pushes.carried.isEmpty() && state.kx == 0 && state.kz == 0) {
-                // At rest with nothing to do: sleep until something wakes the body.
-                quiet = true;
-            }
-            if (quiet) {
-                looping = false;
-                return;
             }
             ticks++;
             next = baseNanos + ticks * TICK_NANOS - System.nanoTime();
@@ -332,36 +334,68 @@ public final class Body {
                 || a.yaw != b.yaw || a.pitch != b.pitch;
     }
 
+    /**
+     * One tick's report, shaped as the client's (recorded 08.11.2026): a packet only when the
+     * position, the look, the body's facing or the movement states changed, each of those only
+     * when it did; the velocity always - the one the body moved with the tick before, before the
+     * blocks stopped any of it.
+     */
     private void send(HeadlessClient c, MovementStates states) {
-        ClientMovement m = new ClientMovement();
-        m.absolutePosition = new Position(state.x, state.y, state.z);
-        m.bodyOrientation = new Direction(state.yaw, 0f, 0f);
-        m.lookOrientation = new Direction(state.yaw, state.pitch, 0f);
-        m.velocity = new Vector3d(state.totalX(), state.totalY(), state.totalZ());
-        m.movementStates = states;
-        m.mountedTo = 0;
-        own.addLast(new double[] {state.x, state.y, state.z});
-        while (own.size() > 32) {
-            own.pollFirst();
+        double[] velocity = reportV;
+        reportV = new double[] {state.mvx, state.mvy, state.mvz};
+        boolean any = sentPos == null || sentPos[0] != state.x || sentPos[1] != state.y || sentPos[2] != state.z
+                || sentLook == null || sentLook[0] != state.yaw || sentLook[1] != state.pitch
+                || sentBody == null || sentBody != state.bodyYaw || !states.equals(lastStates);
+        if (!any) {
+            return;
         }
-        lastStates = states;
+        ClientMovement m = new ClientMovement();
+        if (sentPos == null || sentPos[0] != state.x || sentPos[1] != state.y || sentPos[2] != state.z) {
+            m.absolutePosition = new Position(state.x, state.y, state.z);
+            sentPos = new double[] {state.x, state.y, state.z};
+            own.addLast(sentPos.clone());
+            while (own.size() > 32) {
+                own.pollFirst();
+            }
+        }
+        if (sentLook == null || sentLook[0] != state.yaw || sentLook[1] != state.pitch) {
+            m.lookOrientation = new Direction(state.yaw, state.pitch, 0f);
+            sentLook = new float[] {state.yaw, state.pitch};
+        }
+        if (sentBody == null || sentBody != state.bodyYaw) {
+            m.bodyOrientation = new Direction(state.bodyYaw, 0f, 0f);
+            sentBody = state.bodyYaw;
+        }
+        m.velocity = new Vector3d(velocity[0], velocity[1], velocity[2]);
+        if (!states.equals(lastStates)) {
+            m.movementStates = states;
+            lastStates = states;
+        }
+        m.mountedTo = 0;
         c.sendAsClient(m);
     }
 
+    /** What was last told: so a field goes out only when it changed. */
+    private double[] sentPos;
+    private float[] sentLook;
+    private Float sentBody;
+    /** The velocity to report next tick: this tick's. */
+    private double[] reportV = {0, 0, 0};
+
     private static MovementStates states(BodyState s, Controls k) {
         MovementStates m = new MovementStates();
-        boolean horizontal = Math.hypot(s.totalX(), s.totalZ()) > 1e-3;
-        m.horizontalIdle = !horizontal;
-        m.idle = !horizontal && Math.abs(s.totalY()) < 1e-3;
+        // idle and horizontalIdle mean no movement keys, not a body at rest (recorded).
+        m.idle = s.noKeys;
+        m.horizontalIdle = s.noKeys;
         m.jumping = s.jumping;
         m.flying = s.flying;
-        m.walking = s.walking && s.onGround;
-        m.running = s.running && s.onGround && !s.sprinting;
+        m.walking = s.walking;
+        m.running = s.running;
         m.sprinting = s.sprinting;
         m.crouching = s.crouching;
         m.forcedCrouching = s.forcedCrouching;
         m.falling = s.falling;
-        m.fallingFar = s.falling && -s.totalY() > 21;
+        m.fallingFar = s.fallingFar;
         m.climbing = s.climbing;
         m.inFluid = s.inFluid;
         m.swimming = s.swimming;
@@ -409,7 +443,7 @@ public final class Body {
                             "%d.%d p=(%.3f %.3f %.3f) v=(%.2f %.2f %.2f) f=%.2f s=%.2f yaw=%.0f%s%s%s%s%s", i, n, s.x, s.y,
                             s.z, s.totalX(), s.totalY(), s.totalZ(), k.forward(), k.strafe(), Math.toDegrees(k.yaw()),
                             k.jump() ? " J" : "", s.onGround ? " G" : "", s.climbing ? " C" : "", s.swimming ? " W" : "",
-                            s.ledge != null ? " L" : ""));
+                            s.mantling ? " M" : ""));
                 }
                 n++;
             }

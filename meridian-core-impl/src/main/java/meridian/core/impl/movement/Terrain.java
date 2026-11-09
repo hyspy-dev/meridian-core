@@ -220,8 +220,12 @@ public final class Terrain {
     }
 
     /** What the blocks the body is in or holds on to do: webs slow it, ladders and vines are climbed. */
+    /**
+     * @param climbNx the way into the climbable, on the ground plane (one axis), and z
+     * @param climbTop the top of the climbable the body holds
+     */
     record Inside(double speedMul, double jumpMul, double terminalMul, boolean climbable, double climbUp,
-                  double climbDown, double climbLateral) {}
+                  double climbDown, double climbLateral, double climbNx, double climbNz, double climbTop) {}
 
     Inside inside(double x, double feet, double z, double hx, double hz, double height, double reach) {
         double speed = 1;
@@ -231,6 +235,9 @@ public final class Terrain {
         double up = 1;
         double down = 1;
         double lateral = 1;
+        double nx = 0;
+        double nz = 0;
+        double top = Double.NEGATIVE_INFINITY;
         double[] body = {x - hx, feet, z - hz, x + hx, feet + height, z + hz};
         double[] near = {x - hx - reach, feet, z - hz - reach, x + hx + reach, feet + height, z + hz + reach};
         List<double[]> boxes = new ArrayList<>();
@@ -264,11 +271,27 @@ public final class Terrain {
                             touching = true;
                         }
                     }
-                    if (m.isClimbable && touching) {
+                    // Held only with the body's middle over the climbable's own column (recorded: a
+                    // gap of 0.077 with the centre just outside did not climb).
+                    boolean column = (int) Math.floor(x) == b.x() && (int) Math.floor(z) == b.z();
+                    if (m.isClimbable && touching && column) {
                         climb = true;
                         up = positive(m.climbUpSpeedMultiplier);
                         down = positive(m.climbDownSpeedMultiplier);
                         lateral = positive(m.climbLateralSpeedMultiplier);
+                        double[] o = boxes.get(0);
+                        double ox = (o[0] + o[3]) / 2 - x;
+                        double oz = (o[2] + o[5]) / 2 - z;
+                        if (Math.abs(ox) >= Math.abs(oz)) {
+                            nx = Math.signum(ox);
+                            nz = 0;
+                        } else {
+                            nx = 0;
+                            nz = Math.signum(oz);
+                        }
+                        for (double[] q : boxes) {
+                            top = Math.max(top, q[4]);
+                        }
                     }
                     if (in && !solid) {
                         speed *= positive(m.horizontalSpeedMultiplier);
@@ -278,7 +301,7 @@ public final class Terrain {
                 }
             }
         }
-        return new Inside(speed, jump, terminal, climb, up, down, lateral);
+        return new Inside(speed, jump, terminal, climb, up, down, lateral, nx, nz, top);
     }
 
     private static double positive(float v) {
