@@ -5,7 +5,8 @@ import java.util.concurrent.CompletableFuture;
 
 /**
  * The player's body, moved the way the client moves it - for a session core plays the client of
- * (headless). A game moves its own player; there {@link #available()} is false.
+ * (headless), and for a game's player while core holds the body ({@link #take}): the game moves
+ * its own player otherwise.
  *
  * <p>The body is simulated as the client simulates it, a tick at a time at 60 Hz, all the time:
  * keys and the look in, gravity, the ground's friction, pushes from the server (knockback, launch
@@ -25,8 +26,69 @@ import java.util.concurrent.CompletableFuture;
  */
 public interface Movement {
 
-    /** Whether core moves this session's player (a headless one in a world, with its settings). */
+    /**
+     * Whether core can move this session's player: a headless one in a world, or a game's, whose
+     * body it then takes from the game ({@link #take}) - once the server has sent the movement
+     * settings.
+     */
     boolean available();
+
+    /**
+     * Whether core moves the player's body now: a headless one's all the time, a game's while core
+     * holds it ({@link #take}). Moves, held keys and turns of the head play only then.
+     */
+    default boolean driving() {
+        return available();
+    }
+
+    /**
+     * Takes the player's body from the game, to move it as a headless one is moved - for a module
+     * that takes the player somewhere itself. While core holds it, what the game reports of its
+     * movement does not reach the server, the body's reports do, and the game is shown where the
+     * body is every tick, looking where it looks: the player's mouse and keys do not steer.
+     *
+     * <p>The game gets the body back where it is on {@link Wheel#release}, and by itself the moment
+     * the player presses a key that moves them, the server teleports them, they die or they go to
+     * another world; the move under way then ends {@code INTERRUPTED}. There is one wheel: taking
+     * it while it is held hands out the same one. A headless session's body is core's anyway - its
+     * wheel is held until the session ends, and releasing it does nothing.
+     *
+     * @return the wheel; empty when the body cannot be taken - the game has not said where it is,
+     *         the server has not sent the movement settings, the player rides a mount - or core is
+     *         too old to take it
+     */
+    default java.util.Optional<Wheel> take() {
+        return java.util.Optional.empty();
+    }
+
+    /** Core's hold on the player's body ({@link #take}). */
+    interface Wheel {
+
+        /** Whether core still holds the body. */
+        boolean held();
+
+        /** Gives the body back to the game where it is now; nothing once it is back. */
+        void release();
+
+        /** Completes once the game has the body back, with why. */
+        CompletableFuture<Release> released();
+    }
+
+    /** Why the game got the player's body back. */
+    enum Release {
+        /** A module gave it back ({@link Wheel#release}). */
+        GIVEN_BACK,
+        /** The player pressed a key that moves them. */
+        PLAYER,
+        /** The server teleported the player. */
+        TELEPORT,
+        /** The player died. */
+        DEATH,
+        /** The player went to another world. */
+        WORLD,
+        /** The session ended. */
+        GONE
+    }
 
     /** The body and what it can do, from the server's movement settings. */
     Capabilities capabilities();
@@ -113,7 +175,7 @@ public interface Movement {
      */
     default CompletableFuture<Boolean> face(Vec3 point) {
         Vec3 feet = position();
-        if (point == null || feet == null || !available()) {
+        if (point == null || feet == null || !driving()) {
             return CompletableFuture.completedFuture(false);
         }
         double dx = point.x() - feet.x();

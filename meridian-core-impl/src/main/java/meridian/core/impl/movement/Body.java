@@ -6,7 +6,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Supplier;
 import meridian.api.module.Scheduler;
-import meridian.api.session.HeadlessClient;
 import meridian.core.api.Movement;
 import meridian.core.api.Movement.Controls;
 import meridian.core.api.Movement.MoveResult;
@@ -22,8 +21,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * The headless player's body, alive: simulated a client tick at a time, 60 a second, from the
- * moment the server places it until the session ends - with a move's pilot, held keys, or none -
+ * The player's body, alive while core moves it: simulated a client tick at a time, 60 a second -
+ * a headless player's from the moment the server places it until the session ends, a game's while
+ * core holds it ({@link Driver}) - with a move's pilot, held keys, or none -
  * and reported each tick it changes, the way the client reports it: a {@code ClientMovement} with
  * where the feet are, the body's and the look's yaw, the velocity and the movement states.
  *
@@ -39,7 +39,7 @@ public final class Body {
 
     private final Scheduler scheduler;
     private final Physics physics;
-    private final Supplier<HeadlessClient> client;
+    private final Supplier<Driver> driver;
     private final Supplier<Surroundings.EffectMotion> effects;
 
     private final ArrayDeque<Queued> queue = new ArrayDeque<>();
@@ -62,11 +62,26 @@ public final class Body {
     /** Turns of the head waiting for the tick that reports them ({@link #look}). */
     private final java.util.List<CompletableFuture<Boolean>> turns = new java.util.ArrayList<>();
 
-    Body(Scheduler scheduler, Physics physics, Supplier<HeadlessClient> client,
+    /**
+     * Who moves the body by core: where its reports go, and who is shown it. A headless client's
+     * reports go out as the client's; a game's go to the server while core holds its body, and the
+     * game is shown where the body is.
+     */
+    interface Driver {
+
+        /** One tick's report, to the server. */
+        void report(ClientMovement m);
+
+        /** The body after a tick (a game is shown it). Called under the body's lock: nothing blocking. */
+        default void ticked(BodyState s) {
+        }
+    }
+
+    Body(Scheduler scheduler, Physics physics, Supplier<Driver> driver,
          Supplier<Surroundings.EffectMotion> effects) {
         this.scheduler = scheduler;
         this.physics = physics;
-        this.client = client;
+        this.driver = driver;
         this.effects = effects;
     }
 
@@ -93,7 +108,7 @@ public final class Body {
 
     synchronized CompletableFuture<MoveResult> enqueue(Movement.Move move) {
         CompletableFuture<MoveResult> done = new CompletableFuture<>();
-        if (client.get() == null || state == null || physics.surroundings().settings() == null) {
+        if (driver.get() == null || state == null || physics.surroundings().settings() == null) {
             done.complete(new MoveResult(MoveResult.Status.NOT_AVAILABLE, position()));
             return done;
         }
@@ -112,7 +127,7 @@ public final class Body {
      * queued, no keys held. The next tick's report carries it; the future says whether it went.
      */
     synchronized CompletableFuture<Boolean> look(float yaw, float pitch) {
-        if (client.get() == null || state == null || physics.surroundings().settings() == null
+        if (driver.get() == null || state == null || physics.surroundings().settings() == null
                 || current != null || !queue.isEmpty() || held != null) {
             return CompletableFuture.completedFuture(false);
         }
@@ -222,6 +237,53 @@ public final class Body {
         wake();
     }
 
+    /**
+     * Core takes a game's body (a game's player, not a headless one): the body starts where the game
+     * last said it was, looking where it looked, standing still - and is core's from the next tick.
+     */
+    synchronized void takeOver(double x, double y, double z, float yaw, float pitch, float bodyYaw,
+                               boolean onGround, boolean flying) {
+        stop();
+        answerTurns(false);
+        state = new BodyState();
+        state.x = x;
+        state.y = y;
+        state.z = z;
+        state.yaw = yaw;
+        state.pitch = pitch;
+        state.bodyYaw = bodyYaw;
+        state.onGround = onGround;
+        state.flying = flying;
+        lastStates = null;
+        sentPos = null;
+        sentLook = null;
+        sentBody = null;
+        reportV = new double[] {0, 0, 0};
+        own.clear();
+        wake();
+    }
+
+    /**
+     * Core puts the body somewhere (its own teleport, for a game's body core holds): what is under
+     * way is over, and the next tick reports the body there.
+     */
+    synchronized void placeAt(double x, double y, double z) {
+        if (state == null) {
+            return;
+        }
+        state.x = x;
+        state.y = y;
+        state.z = z;
+        teleported(true);
+        quiet = false;
+        wake();
+    }
+
+    /** The game has its body back: what is under way is over, and the body is no longer core's. */
+    synchronized void letGo() {
+        reset();
+    }
+
     /** The server says whether the body flies ({@code SetMovementStates}). */
     synchronized void setFlying(boolean flying) {
         if (state != null) {
@@ -313,7 +375,7 @@ public final class Body {
     private void tickOnce() {
         long next;
         synchronized (this) {
-            HeadlessClient c = client.get();
+            Driver c = driver.get();
             if (c == null || state == null) {
                 reset();
                 looping = false;
@@ -331,6 +393,7 @@ public final class Body {
                 send(c, states);
             }
             answerTurns(moved && !steered);
+            c.ticked(state);
             ticks++;
             next = baseNanos + ticks * TICK_NANOS - System.nanoTime();
             if (next < -TICK_NANOS * 30) {
@@ -379,7 +442,7 @@ public final class Body {
      * when it did; the velocity always - the one the body moved with the tick before, before the
      * blocks stopped any of it.
      */
-    private void send(HeadlessClient c, MovementStates states) {
+    private void send(Driver c, MovementStates states) {
         double[] velocity = reportV;
         reportV = new double[] {state.mvx, state.mvy, state.mvz};
         boolean any = sentPos == null || sentPos[0] != state.x || sentPos[1] != state.y || sentPos[2] != state.z
@@ -411,7 +474,7 @@ public final class Body {
             lastStates = states;
         }
         m.mountedTo = 0;
-        c.sendAsClient(m);
+        c.report(m);
     }
 
     /** What was last told: so a field goes out only when it changed. */

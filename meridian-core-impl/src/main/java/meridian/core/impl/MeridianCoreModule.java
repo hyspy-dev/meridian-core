@@ -161,7 +161,10 @@ public class MeridianCoreModule implements ProxyModule {
         DebugRenderImpl debugRender = new DebugRenderImpl(entityTracker);
         // MovementControl: forges the player's own position by rewriting outgoing
         // ClientMovement (the server trusts absolute coords). Backs Player.teleport.
-        MovementControlImpl movementControl = new MovementControlImpl(ctx.scheduler());
+        // Whose every teleport the game is sent is - the server's or core's - so the game's
+        // acknowledgements of core's stop at the proxy (the server ends the connection on those).
+        meridian.core.impl.movement.ClientTeleports clientTeleports = new meridian.core.impl.movement.ClientTeleports();
+        MovementControlImpl movementControl = new MovementControlImpl(ctx.scheduler(), clientTeleports);
         ctx.services().provide(EntityTracker.class, entityTracker);
         ctx.services().provide(CameraControl.class, cameraControl);
         ctx.services().provide(DebugRender.class, debugRender);
@@ -228,12 +231,29 @@ public class MeridianCoreModule implements ProxyModule {
                 terrain, blockHitboxes, fluidCatalog, ctx.scheduler(),
                 () -> sessionHolder.get().map(HeadlessClientHandler::headlessOf).orElse(null),
                 () -> entityTracker.localPosition().orElse(null),
-                entityTracker::localEntityId, entityTracker::effectsOf);
+                entityTracker::localEntityId, entityTracker::effectsOf, clientTeleports);
         ctx.services().provide(meridian.core.api.Movement.class, movement);
         movementRef[0] = movement;
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY, (direction, session) -> movement.observer());
         // Last on the client side: what actually goes out - a teleport's answer, core's own teleport.
         ctx.registerHandler(Direction.C2S, HandlerPosition.MONITOR, (direction, session) -> movement.clientObserver());
+        // First on the client side: a game's movement, held back while core holds its body, before
+        // any observer takes the game's stale pose for the player's.
+        ctx.registerHandler(Direction.C2S, HandlerPosition.EARLY, (direction, session) -> movement.gameGate());
+        // Core's own teleport of a game's body core holds moves the body.
+        movementControl.heldBody(movement::teleportHeld);
+        // A death gives a game's body core holds back to the game: the server opens its death window.
+        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY, (direction, session) -> new meridian.api.packet.PacketHandler() {
+            @Override
+            public Action handleS2C(io.netty.channel.ChannelHandlerContext c, meridian.api.packet.Packet packet,
+                                    meridian.api.session.ProxySession s) {
+                if (packet instanceof meridian.protocol.packets.interface_.CustomPage page
+                        && ClientSpoofImpl.RESPAWN_PAGE_KEY.equals(page.key)) {
+                    movement.died();
+                }
+                return Action.FORWARD;
+            }
+        });
 
         // ChunkView: what the client is allowed to forget. Sits at NORMAL because it drops, and
         // downstream of the feed above, which has already seen the unload.
@@ -323,6 +343,13 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.services().provide(InteractionControl.class, interactionControl);
         // A forged ApplyForce pushes the headless body, as the client's own push would.
         interactionControl.forceBody(movement.forceBody());
+        // The reports of a game's body core moves skip the client-side chain: core's own observers of
+        // it hear them here, in the chain's order - the pose as it is, then the spoof, then the forges.
+        movement.gameObservers(m -> {
+            entityTracker.onClientMovement(m);
+            clientSpoof.rewrite(m);
+            interactionControl.ownMovement(m);
+        });
         ctx.registerHandler(Direction.BOTH, HandlerPosition.NORMAL,
                 (direction, session) -> interactionControl.newObserver());
 

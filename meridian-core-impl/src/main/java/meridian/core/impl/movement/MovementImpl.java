@@ -27,6 +27,7 @@ import meridian.protocol.packets.entities.ChangeVelocity;
 import meridian.protocol.packets.entities.EntityUpdates;
 import meridian.protocol.packets.player.ClientMovement;
 import meridian.protocol.packets.player.ClientTeleport;
+import meridian.protocol.packets.player.JoinWorld;
 import meridian.protocol.packets.player.SetMovementStates;
 import meridian.protocol.packets.player.UpdateMovementSettings;
 import meridian.protocol.packets.setup.UpdateFeatures;
@@ -35,7 +36,8 @@ import meridian.protocol.packets.world.ServerSetBlocks;
 
 /**
  * {@link Movement}: what the ground allows ({@link Terrain}), the body's physics ({@link Physics})
- * and the body that lives by it ({@link Body}), for a headless session. Hears everything the client
+ * and the body that lives by it ({@link Body}) - a headless session's, and a game's while core holds
+ * it ({@link GameWheel}). Hears everything the client
  * moves by: the server's block shapes, movement settings, the player's model, how fluids move a
  * body (the fluids themselves are core's one catalog), effects, features, pushes and teleports;
  * and on the client side, positions the body did not send itself.
@@ -48,14 +50,19 @@ public final class MovementImpl implements Movement {
     private final Physics physics;
     private final BodySettings reach;
     private final Body body;
+    private final GameWheel game;
     private final Supplier<HeadlessClient> client;
     private final Supplier<Vec3> trackedFeet;
     private final Supplier<OptionalInt> localId;
     private final IntFunction<Set<Integer>> effectsOf;
 
+    private final ClientTeleports teleports;
+
     public MovementImpl(Terrain terrain, BlockHitboxes hitboxes, meridian.core.impl.FluidCatalog fluids,
                         Scheduler scheduler, Supplier<HeadlessClient> client, Supplier<Vec3> trackedFeet,
-                        Supplier<OptionalInt> localId, IntFunction<Set<Integer>> effectsOf) {
+                        Supplier<OptionalInt> localId, IntFunction<Set<Integer>> effectsOf,
+                        ClientTeleports teleports) {
+        this.teleports = teleports;
         this.around = new Surroundings(fluids);
         this.terrain = terrain;
         this.hitboxes = hitboxes;
@@ -67,7 +74,59 @@ public final class MovementImpl implements Movement {
         terrain.body(around::shape);
         this.physics = new Physics(terrain, around);
         this.reach = new BodySettings(physics);
-        this.body = new Body(scheduler, physics, client, this::effects);
+        this.body = new Body(scheduler, physics, this::driver, this::effects);
+        this.game = new GameWheel(body, teleports);
+    }
+
+    /** Who moves the body now: a headless client, a game's body core holds, or nobody. */
+    private Body.Driver driver() {
+        HeadlessClient c = client.get();
+        if (c != null) {
+            return c::sendAsClient;
+        }
+        return game.driver();
+    }
+
+    /** A headless body is core's all along: its wheel is never given back. */
+    private final Movement.Wheel headlessWheel = new Movement.Wheel() {
+        private final CompletableFuture<Movement.Release> never = new CompletableFuture<>();
+
+        @Override
+        public boolean held() {
+            return client.get() != null;
+        }
+
+        @Override
+        public void release() {
+        }
+
+        @Override
+        public CompletableFuture<Movement.Release> released() {
+            return never;
+        }
+    };
+
+    /**
+     * EARLY, client side: a game's movement - read while the game has its body, held back while core
+     * does ({@link GameWheel}).
+     */
+    public PacketHandler gameGate() {
+        return game.gate();
+    }
+
+    /** What core's own observers of the client's movement make of the reports of a game's body core moves. */
+    public void gameObservers(java.util.function.Consumer<ClientMovement> observers) {
+        game.observers(observers);
+    }
+
+    /** Core's teleport of a game's player while core holds the body: the body goes there. */
+    public boolean teleportHeld(double x, double y, double z) {
+        return game.teleport(x, y, z);
+    }
+
+    /** The player died: a game's body core holds goes back to the game. */
+    public void died() {
+        game.lost(Movement.Release.DEATH);
     }
 
     private Surroundings.EffectMotion effects() {
@@ -98,7 +157,15 @@ public final class MovementImpl implements Movement {
                     around.settings(update.movementSettings);
                     body.nudge();
                 } else if (packet instanceof ClientTeleport teleport) {
+                    // The server's (core's own pass no handler): a game's body core holds goes back to
+                    // the game, which answers it.
+                    if (session.headless() == null) {
+                        teleports.server(teleport.teleportId);
+                    }
+                    game.lost(Movement.Release.TELEPORT);
                     body.teleported(teleport.resetVelocity);
+                } else if (packet instanceof JoinWorld) {
+                    game.lost(Movement.Release.WORLD);
                 } else if (packet instanceof ChangeVelocity push) {
                     body.push(push.x, push.y, push.z, push.changeType, push.config);
                 } else if (packet instanceof UpdateFluidFX fx) {
@@ -159,7 +226,7 @@ public final class MovementImpl implements Movement {
             @Override
             public void push(double x, double y, double z, meridian.protocol.ChangeVelocityType type,
                              meridian.protocol.VelocityConfig config) {
-                if (client.get() != null) {
+                if (driver() != null) {
                     body.push((float) x, (float) y, (float) z, type, config);
                 }
             }
@@ -207,7 +274,26 @@ public final class MovementImpl implements Movement {
 
     @Override
     public boolean available() {
-        return client.get() != null && body.placed() && around.settings() != null;
+        if (around.settings() == null) {
+            return false;
+        }
+        return client.get() != null ? body.placed() : game.canTake();
+    }
+
+    @Override
+    public boolean driving() {
+        return driver() != null && body.placed() && around.settings() != null;
+    }
+
+    @Override
+    public java.util.Optional<Movement.Wheel> take() {
+        if (around.settings() == null) {
+            return java.util.Optional.empty();
+        }
+        if (client.get() != null) {
+            return body.placed() ? java.util.Optional.of(headlessWheel) : java.util.Optional.empty();
+        }
+        return game.take();
     }
 
     @Override

@@ -281,6 +281,15 @@ public final class InteractionControlImpl implements InteractionControl {
         }
     }
 
+    /**
+     * A movement report that went to the server without passing the client-side chain (a game's
+     * body core moves): its states and its look, as {@link InteractionObserver} reads them.
+     */
+    public void ownMovement(meridian.protocol.packets.player.ClientMovement m) {
+        onMovementStates(m.movementStates);
+        onPlayerLook(m.lookOrientation);
+    }
+
     /** Tracks the player's movement state — {@code ConditionInteraction}'s input. */
     void onMovementStates(MovementStates states) {
         if (states != null) {
