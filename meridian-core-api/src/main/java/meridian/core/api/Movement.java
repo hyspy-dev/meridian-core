@@ -35,13 +35,27 @@ public interface Movement {
      * Where the player's feet are when it stands in cell {@code cell} - on the floor in it or
      * under it, with room for the whole body above - or empty when it cannot stand there: no
      * floor, no room, a fluid at the head, or a part of the world core has not been sent.
+     *
+     * @deprecated the ground is the same for every player, not only one core moves: use
+     *             {@link World#standAt}, which answers the same
      */
+    @Deprecated
     OptionalDouble standAt(BlockPos cell);
 
-    /** Whether the player's body, feet at {@code feet} and {@code height} tall, hits no block. */
+    /**
+     * Whether the player's body, feet at {@code feet} and {@code height} tall, hits no block.
+     *
+     * @deprecated use {@link World#fits}, which answers the same for every player
+     */
+    @Deprecated
     boolean fits(Vec3 feet, double height);
 
-    /** Whether core knows the blocks of {@code cell} (its part of the world was sent). */
+    /**
+     * Whether core knows the blocks of {@code cell} (its part of the world was sent).
+     *
+     * @deprecated use {@link World#known}, which answers the same for every player
+     */
+    @Deprecated
     boolean known(BlockPos cell);
 
     /** What a cell is to the body: a wall, something to climb, a fluid. */

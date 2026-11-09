@@ -23,4 +23,14 @@ public interface Teleport {
 
     /** Takes the player to exactly this point. */
     void to(Vec3 where);
+
+    /**
+     * Takes the player to this point and, once there, onto the safe place to stand nearest it -
+     * solid ground with room for the body, out of water and lava ({@link World#safeSpotNear}).
+     *
+     * <p>A provider too old to know it goes {@link #to} the point.
+     */
+    default void safeTo(Vec3 where) {
+        to(where);
+    }
 }

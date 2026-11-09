@@ -3,6 +3,8 @@ package meridian.core.api;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalDouble;
+import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Predicate;
 
@@ -130,6 +132,97 @@ public interface World {
      */
     default int fluidId(String name) {
         return -1;
+    }
+
+    // ------------------------------------------------------------------
+    // Standing: where the player's body can be, for any player
+    // ------------------------------------------------------------------
+    //
+    // The body is the player's own, as the model the server sent for it has it (wide 0.65, tall
+    // 1.85 for the default player). These answer for a game's player as well as for a headless one.
+
+    /**
+     * Where the player's feet are when it stands in cell {@code cell} - on the floor in it or under
+     * it (a full block under it, a slab in it), by the blocks' own collision boxes, with room for the
+     * whole body above, no fluid at the head and nothing burning at the feet - or empty when it
+     * cannot stand there, or core has not been sent that part of the world.
+     *
+     * <p>A core too old to tell answers empty.
+     */
+    default OptionalDouble standAt(BlockPos cell) {
+        return OptionalDouble.empty();
+    }
+
+    /**
+     * Whether the player's body, centred at {@code feet} and {@code height} tall, hits no solid
+     * block - and false where core has not been sent the world.
+     *
+     * <p>A core too old to tell answers false.
+     */
+    default boolean fits(Vec3 feet, double height) {
+        return false;
+    }
+
+    /**
+     * Whether the player's body with its feet at {@code feet} is in something that hurts - lava,
+     * fire and their kin - in any cell of its column from the feet to the head.
+     *
+     * <p>A core too old to tell answers false.
+     */
+    default boolean hurtsAt(Vec3 feet) {
+        return false;
+    }
+
+    /**
+     * The height to stand at on top of the column {@code (x, z)}: over the highest cell holding a
+     * block that is not air, or a fluid - one above a block, two above a fluid, so a drop onto a
+     * pond clears it. A canopy over the ground is the top, as it is seen from the sky.
+     *
+     * <p>Empty while it cannot be told: core has nothing of the column yet, or what lies over the
+     * highest block it has is not known yet - that part may still turn out to be the ground. Wait
+     * for it with {@link #awaitSurface}.
+     *
+     * <p>A core too old to tell answers empty.
+     */
+    default OptionalInt surfaceAt(int x, int z) {
+        return OptionalInt.empty();
+    }
+
+    /**
+     * Waits until {@link #surfaceAt} can tell the column {@code (x, z)}: asked at once, then each
+     * time the server sends or changes something of that column; there is no polling. The future
+     * completes on core's scheduler thread, or at once when the surface is known already.
+     *
+     * <pre>{@code
+     * world.awaitSurface(x, z, Duration.ofSeconds(2))
+     *      .thenAccept(y -> y.ifPresent(feet -> player.teleport(new Vec3(x + 0.5, feet, z + 0.5))));
+     * }</pre>
+     *
+     * <p>A core too old to wait answers at once, from what it knows now.
+     *
+     * @return the standing height, or empty when {@code timeout} ran out first
+     */
+    default CompletableFuture<OptionalInt> awaitSurface(int x, int z, Duration timeout) {
+        return CompletableFuture.completedFuture(surfaceAt(x, z));
+    }
+
+    /**
+     * The nearest safe place to stand around {@code (x, y, z)}: searched in square rings out to
+     * {@code radius} columns - the column itself first, so a straight drop wins when there is one -
+     * and in each column straight down from {@code y}, then up. Of one ring's columns the nearest
+     * wins, the height counting too.
+     *
+     * <p>Safe is solid ground with nothing burning in it, and above it as many cells as the body is
+     * tall clear of solid blocks and of any fluid: not in water, not in lava. Only what core knows
+     * counts; a cell not sent yet is never taken for open air.
+     *
+     * <p>A core too old to tell answers empty.
+     *
+     * @return the feet there - the middle of the column, on top of the ground - or empty when no
+     *         column within {@code radius} has such a place
+     */
+    default Optional<Vec3> safeSpotNear(int x, int y, int z, int radius) {
+        return Optional.empty();
     }
 
     /** The local player, or empty until a client session is live. */

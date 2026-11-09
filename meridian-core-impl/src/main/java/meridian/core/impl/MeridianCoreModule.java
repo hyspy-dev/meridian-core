@@ -297,7 +297,7 @@ public class MeridianCoreModule implements ProxyModule {
         // Block / Player building blocks — a Layer-2 module queries and acts,
         // writing its own logic.
         WorldImpl world = new WorldImpl(
-                chunkTracker, worldState, entityTracker, inventoryTracker, interactionControl,
+                chunkTracker, worldState, terrain, entityTracker, inventoryTracker, interactionControl,
                 movementControl, ctx.scheduler(), movement::eyeHeight);
         ctx.services().provide(World.class, world);
 

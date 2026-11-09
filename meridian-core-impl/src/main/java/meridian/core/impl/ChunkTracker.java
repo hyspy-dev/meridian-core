@@ -101,6 +101,8 @@ public final class ChunkTracker {
      * column's air sections and unloads whole columns, so there a missing section is air.
      */
     private volatile boolean announcesAbsent;
+    /** Whether this server sends fluids at all ({@code SetFluids}) - one with no fluid layer does not. */
+    private volatile boolean fluidsSent;
     /** Sections sent as nothing but air - a search steps over them. Left as soon as a block is set. */
     private final Set<SectionKey> airOnly = ConcurrentHashMap.newKeySet();
 
@@ -127,6 +129,21 @@ public final class ChunkTracker {
             return true;
         }
         return announcesAbsent ? absent.contains(key) : columns.contains(column(key.x(), key.z()));
+    }
+
+    /**
+     * Whether the fluids of the cell at a world position are known: its section's fluids came, or
+     * the section is {@linkplain #known known} to hold nothing at all. A section's blocks and its
+     * fluids come in packets of their own, one after the other; between the two the blocks are
+     * known and the fluids are not, and a pond reads dry. A server that has sent no fluids at all
+     * has no fluid layer to wait for.
+     */
+    public boolean fluidsKnown(int x, int y, int z) {
+        SectionKey key = new SectionKey(x >> 5, y >> 5, z >> 5);
+        if (!fluidsSent || fluidSections.containsKey(key)) {
+            return true;
+        }
+        return !sections.containsKey(key) && known(x, y, z);
     }
 
     void onSetChunk(SetChunk packet) {
@@ -172,6 +189,8 @@ public final class ChunkTracker {
             sections.remove(key);
             rotations.remove(key);
             fillers.remove(key);
+            fluidSections.remove(key);
+            fluidLevels.remove(key);
             airOnly.remove(key);
             absent.add(key);
             changedSection(key);
@@ -209,6 +228,8 @@ public final class ChunkTracker {
         if (section == null && (announcesAbsent ? absent.contains(key)
                 : columns.contains(column(key.x(), key.z())))) {
             airOnly.add(key);
+            // Known to hold nothing, fluids included: no fluid packet will come for it.
+            fluidSections.computeIfAbsent(key, k -> new int[ChunkDecoder.SECTION_BLOCKS]);
             section = sections.computeIfAbsent(key, k -> new int[ChunkDecoder.SECTION_BLOCKS]);
             absent.remove(key);
         }
@@ -266,17 +287,22 @@ public final class ChunkTracker {
         void close();
     }
 
-    /** One watched cell and what to tell. Compared by identity: two watches of a cell are two. */
+    /**
+     * One watched cell - or column, at every height - and what to tell. Compared by identity: two
+     * watches of a cell are two.
+     */
     private static final class Watch {
         final int x;
         final int y;
         final int z;
+        final boolean column;
         final Runnable changed;
 
-        Watch(int x, int y, int z, Runnable changed) {
+        Watch(int x, int y, int z, boolean column, Runnable changed) {
             this.x = x;
             this.y = y;
             this.z = z;
+            this.column = column;
             this.changed = changed;
         }
     }
@@ -286,14 +312,22 @@ public final class ChunkTracker {
 
     /**
      * Calls {@code changed} after every change the server makes that may touch the cell at a world
-     * position: a block set there, a batch of edits to its section, its section or another of its
-     * column arriving, its section said to be absent. It runs on the network thread that carried
-     * the change, after the mirror took it, and is told the cell may have changed - it reads what
-     * the cell holds now. Until {@link CellWatch#close} is called.
+     * position: a block or a fluid set there, a batch of edits to its section, its section's blocks
+     * or fluids or another section of its column arriving, its section said to be absent. It runs
+     * on the network thread that carried the change, after the mirror took it, and is told the cell
+     * may have changed - it reads what the cell holds now. Until {@link CellWatch#close} is called.
      */
     public CellWatch watchCell(int x, int y, int z, Runnable changed) {
-        Watch w = new Watch(x, y, z, changed);
-        long col = column(x >> 5, z >> 5);
+        return watch(new Watch(x, y, z, false, changed));
+    }
+
+    /** As {@link #watchCell}, for every cell of the column at {@code (x, z)}, at any height. */
+    public CellWatch watchColumn(int x, int z, Runnable changed) {
+        return watch(new Watch(x, 0, z, true, changed));
+    }
+
+    private CellWatch watch(Watch w) {
+        long col = column(w.x >> 5, w.z >> 5);
         watches.compute(col, (k, set) -> {
             Set<Watch> s = set != null ? set : ConcurrentHashMap.newKeySet();
             s.add(w);
@@ -312,7 +346,7 @@ public final class ChunkTracker {
         Set<Watch> set = watches.get(column(x >> 5, z >> 5));
         if (set != null) {
             for (Watch w : set) {
-                if (w.x == x && w.y == y && w.z == z) {
+                if (w.x == x && w.z == z && (w.column || w.y == y)) {
                     tell(w);
                 }
             }
@@ -326,7 +360,7 @@ public final class ChunkTracker {
         Set<Watch> set = watches.get(column(key.x(), key.z()));
         if (set != null) {
             for (Watch w : set) {
-                if (w.y >> 5 == key.y()) {
+                if (w.column || w.y >> 5 == key.y()) {
                     tell(w);
                 }
             }
@@ -375,6 +409,7 @@ public final class ChunkTracker {
         try {
             SectionKey key = new SectionKey(packet.x, packet.y, packet.z);
             ChunkDecoder.Fluids fluids = ChunkDecoder.decodeFluids(packet.data);
+            fluidsSent = true;
             fluidSections.put(key, fluids.ids());
             if (fluids.levels() != null) {
                 fluidLevels.put(key, fluids.levels());
@@ -384,13 +419,16 @@ public final class ChunkTracker {
         } catch (RuntimeException e) {
             log.warn("meridian-core: failed to decode fluid section ({},{},{}): {}",
                     packet.x, packet.y, packet.z, e.toString());
+            return;
         }
+        changedSection(new SectionKey(packet.x, packet.y, packet.z));
     }
 
     /** One fluid cell changed; {@code ServerSetFluid.x/y/z} are block coordinates. */
     void onServerSetFluid(ServerSetFluid packet) {
         setFluid(new SectionKey(packet.x >> 5, packet.y >> 5, packet.z >> 5),
                 indexBlock(packet.x, packet.y, packet.z), packet.fluidId, packet.fluidLevel);
+        changedCell(packet.x, packet.y, packet.z);
     }
 
     /** Several fluid cells of one section changed; its x/y/z are section coordinates. */
@@ -405,6 +443,7 @@ public final class ChunkTracker {
                 setFluid(key, index, cmd.fluidId, cmd.fluidLevel);
             }
         }
+        changedSection(key);
     }
 
     /**

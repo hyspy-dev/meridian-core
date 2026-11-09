@@ -31,7 +31,7 @@ final class CoreCommands {
     static final String USAGE = "pos | block <x y z> | known <x y z> | find <name-contains> [radius] [limit] | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
             + "use|plant|water <x y z> | hit|dig <x y z> [times] | break <x y z> [maxSwings] | place <x y z> [face] [orient] | "
             + "entities [range] [players] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | dodge | assets | asset <path> | "
-            + "movement | body | stand <x y z> | move <walk|jump|mantle|drop|leap|swim|climb|fly> <x y z> [walk|run|sprint] | "
+            + "movement | body | stand <x y z> | surface <x z> [wait <s>] | safe <x y z> [radius] | hurts <x y z> | move <walk|jump|mantle|drop|leap|swim|climb|fly> <x y z> [walk|run|sprint] | "
             + "predict <kind> <x y z> [gait] [trace] | hold <forward> <strafe> <yaw> [jump] [crouch] [sprint] [walk] [fly] | hold off | halt";
 
     private final ModuleContext ctx;
@@ -71,6 +71,20 @@ final class CoreCommands {
             case "assets" -> CompletableFuture.completedFuture(assets());
             case "movement" -> CompletableFuture.completedFuture(movement());
             case "stand" -> CompletableFuture.completedFuture(stand(at(args, 1)));
+            case "surface" -> surface(args);
+            case "safe" -> {
+                BlockPos p = at(args, 1);
+                int radius = args.size() > 4 ? Integer.parseInt(args.get(4)) : 8;
+                Map<String, Object> out = new LinkedHashMap<>();
+                out.put("from", p);
+                world().safeSpotNear(p.x(), p.y(), p.z(), radius).ifPresent(v -> out.put("spot", v));
+                yield CompletableFuture.completedFuture(out);
+            }
+            case "hurts" -> {
+                BlockPos p = at(args, 1);
+                yield CompletableFuture.completedFuture(Map.of("pos", p,
+                        "hurts", world().hurtsAt(new Vec3(p.x() + 0.5, p.y(), p.z() + 0.5))));
+            }
             case "move" -> move(args);
             case "body" -> CompletableFuture.completedFuture(body());
             case "hold" -> CompletableFuture.completedFuture(holdKeys(args));
@@ -224,11 +238,35 @@ final class CoreCommands {
     private Map<String, Object> stand(BlockPos cell) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("cell", cell);
-        java.util.OptionalDouble feet = movementService().standAt(cell);
+        java.util.OptionalDouble feet = world().standAt(cell);
         out.put("stands", feet.isPresent());
         feet.ifPresent(f -> out.put("feet", f));
-        out.put("known", movementService().known(cell));
+        out.put("known", world().known(cell.x(), cell.y(), cell.z()));
         return out;
+    }
+
+    /**
+     * {@code surface <x z> [wait <seconds>]}: the height to stand at on top of that column, or that
+     * it is not known yet - with {@code wait}, once it is (or the wait is over).
+     */
+    private CompletableFuture<Map<String, Object>> surface(List<String> args) {
+        if (args.size() < 3) {
+            throw new IllegalArgumentException("surface <x z> [wait <seconds>]");
+        }
+        int x = (int) Math.floor(Double.parseDouble(args.get(1)));
+        int z = (int) Math.floor(Double.parseDouble(args.get(2)));
+        int at = args.indexOf("wait");
+        CompletableFuture<java.util.OptionalInt> y = at > 0 && at + 1 < args.size()
+                ? world().awaitSurface(x, z, java.time.Duration.ofMillis((long) (Double.parseDouble(args.get(at + 1)) * 1000)))
+                : CompletableFuture.completedFuture(world().surfaceAt(x, z));
+        return y.thenApply(feet -> {
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("x", x);
+            out.put("z", z);
+            out.put("known", feet.isPresent());
+            feet.ifPresent(f -> out.put("feet", f));
+            return out;
+        });
     }
 
     /**
@@ -242,13 +280,13 @@ final class CoreCommands {
         return m.move(move).thenApply(CoreCommands::result);
     }
 
-    private static meridian.core.api.Movement.Move moveOf(meridian.core.api.Movement m, List<String> args) {
+    private meridian.core.api.Movement.Move moveOf(meridian.core.api.Movement m, List<String> args) {
         meridian.core.api.Movement.Kind kind = meridian.core.api.Movement.Kind.valueOf(args.get(1).toUpperCase(Locale.ROOT));
         BlockPos cell = at(args, 2);
         meridian.core.api.Movement.Gait gait = args.size() > 5
                 ? meridian.core.api.Movement.Gait.valueOf(args.get(5).toUpperCase(Locale.ROOT))
                 : meridian.core.api.Movement.Gait.RUN;
-        java.util.OptionalDouble feet = m.standAt(cell);
+        java.util.OptionalDouble feet = world().standAt(cell);
         double y;
         if (feet.isPresent()) {
             y = feet.getAsDouble();
@@ -539,6 +577,7 @@ final class CoreCommands {
             e.put("player", true);
         }
         tracker.positionOf(id).ifPresent(p -> e.put("position", p));
+        tracker.boundsOf(id).ifPresent(b -> e.put("box", b));
         if (tracker instanceof EntityTrackerImpl impl && !impl.interactionsOf(id).isEmpty()) {
             e.put("interactions", impl.interactionsOf(id));
         }

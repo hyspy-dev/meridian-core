@@ -5,6 +5,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import meridian.core.api.Box;
 import meridian.core.api.EntityTracker;
 import meridian.core.api.Vec3;
 import meridian.protocol.ComponentUpdate;
@@ -69,6 +70,11 @@ final class EntityTrackerImpl implements EntityTracker {
     private final Map<Integer, Map<InteractionType, Integer>> interactions = new ConcurrentHashMap<>();
     /** Each entity's active effects by index - added and removed as the server says. */
     private final Map<Integer, Set<Integer>> effects = new ConcurrentHashMap<>();
+    /**
+     * Each entity's hitbox about its feet, sized as the server sizes it ({@link #hitbox}), from its
+     * last model; none for a model without one.
+     */
+    private final Map<Integer, double[]> hitboxes = new ConcurrentHashMap<>();
     private volatile int localId = Integer.MIN_VALUE;
     private volatile Vec3 localPos;
     /** Look orientation of the local player, radians. */
@@ -97,6 +103,7 @@ final class EntityTrackerImpl implements EntityTracker {
                 bodies.remove(id);
                 interactions.remove(id);
                 effects.remove(id);
+                hitboxes.remove(id);
             }
         }
         if (packet.updates != null) {
@@ -126,8 +133,15 @@ final class EntityTrackerImpl implements EntityTracker {
                     } else if (component instanceof InteractionsUpdate entityInteractions
                             && entityInteractions.interactions != null) {
                         interactions.put(update.networkId, Map.copyOf(entityInteractions.interactions));
-                    } else if (component instanceof ModelUpdate modelUpdate
-                            && modelUpdate.model != null) {
+                    } else if (component instanceof ModelUpdate modelUpdate && modelUpdate.model == null) {
+                        hitboxes.remove(update.networkId);      // the model taken away, its box too
+                    } else if (component instanceof ModelUpdate modelUpdate) {
+                        double[] box = hitbox(modelUpdate.model, modelUpdate.entityScale);
+                        if (box != null) {
+                            hitboxes.put(update.networkId, box);
+                        } else {
+                            hitboxes.remove(update.networkId);
+                        }
                         if (modelUpdate.model.path != null && !modelUpdate.model.path.isEmpty()) {
                             types.put(update.networkId, modelUpdate.model.path);
                         }
@@ -213,6 +227,24 @@ final class EntityTrackerImpl implements EntityTracker {
         return interactions.getOrDefault(entityId, Map.of());
     }
 
+    /**
+     * A model's hitbox about the feet as the server collides by it ({@code EntityScaleBoundingBoxSystem}):
+     * the box sent already carries the model's own scale, and an entity scale replaces that scale
+     * rather than multiplying it - so the box grows by the ratio of the two. {@code null} for a
+     * model without a hitbox.
+     */
+    static double[] hitbox(meridian.protocol.Model model, float entityScale) {
+        meridian.protocol.Hitbox h = model.hitbox;
+        if (h == null) {
+            return null;
+        }
+        double k = 1;
+        if (Float.isFinite(entityScale) && entityScale > 0) {
+            k = Float.isFinite(model.scale) && model.scale > 0 ? entityScale / model.scale : entityScale;
+        }
+        return new double[] {h.minX * k, h.minY * k, h.minZ * k, h.maxX * k, h.maxY * k, h.maxZ * k};
+    }
+
     private static Vec3 positionOf(ModelTransform transform) {
         if (transform == null) return null;
         Position p = transform.position;
@@ -232,6 +264,17 @@ final class EntityTrackerImpl implements EntityTracker {
     @Override
     public Optional<Vec3> positionOf(int entityId) {
         return Optional.ofNullable(positions.get(entityId));
+    }
+
+    @Override
+    public Optional<Box> boundsOf(int entityId) {
+        Vec3 at = positions.get(entityId);
+        double[] h = hitboxes.get(entityId);
+        if (at == null || h == null) {
+            return Optional.empty();
+        }
+        return Optional.of(new Box(new Vec3(at.x() + h[0], at.y() + h[1], at.z() + h[2]),
+                new Vec3(at.x() + h[3], at.y() + h[4], at.z() + h[5])));
     }
 
     @Override
