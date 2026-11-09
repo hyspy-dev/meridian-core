@@ -207,10 +207,10 @@ public interface World {
     }
 
     /**
-     * The nearest safe place to stand around {@code (x, y, z)}: searched in square rings out to
-     * {@code radius} columns - the column itself first, so a straight drop wins when there is one -
-     * and in each column straight down from {@code y}, then up. Of one ring's columns the nearest
-     * wins, the height counting too.
+     * The nearest safe place to stand around {@code (x, y, z)}, by the distance in three dimensions
+     * from the point to the feet there, among the columns out to {@code radius} around it. The
+     * shore three blocks off beats a cave twenty under a lake; dropped from high over the ground,
+     * the column underneath is the nearest still. A tie in a column goes to the place below.
      *
      * <p>Safe is solid ground with nothing burning in it, and above it as many cells as the body is
      * tall clear of solid blocks and of any fluid: not in water, not in lava. Only what core knows

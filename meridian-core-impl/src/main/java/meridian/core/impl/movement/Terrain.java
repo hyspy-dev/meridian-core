@@ -217,10 +217,14 @@ public final class Terrain {
     }
 
     /**
-     * The nearest place to stand around {@code (px, py, pz)}, searched in square rings out to
-     * {@code radius}: ring nought is the column itself, so a straight drop wins when there is one.
-     * In each column the ground is looked for straight down from {@code py} first, then up; of a
-     * ring's columns the nearest to the point wins, the height counting too.
+     * The nearest place to stand around {@code (px, py, pz)}, by the distance in three dimensions
+     * from the point to the feet there, among the columns out to {@code radius} in square rings.
+     * A cave twenty blocks under a lake loses to the shore three blocks off; dropped from high
+     * over the ground, the column underneath is the nearest still. A tie in a column goes to the
+     * place below - a drop.
+     *
+     * <p>The rings are searched outwards until no column further out can be nearer than the best
+     * found so far.
      *
      * <p>A place to stand is solid ground, known, with nothing burning in it, and above it as many
      * cells as the body is tall clear of solid blocks and of any fluid - not in water, not in lava.
@@ -230,44 +234,50 @@ public final class Terrain {
      */
     public Optional<Vec3> safeSpotNear(int px, int py, int pz, int radius) {
         int room = Math.max(1, (int) Math.ceil(shape().height() - EPS));
-        for (int r = 0; r <= radius; r++) {
-            Vec3 best = null;
-            double bestAway = Double.MAX_VALUE;
+        Vec3 best = null;
+        double bestAway = Double.MAX_VALUE;
+        for (int r = 0; r <= radius && (double) r * r < bestAway; r++) {
             for (int dx = -r; dx <= r; dx++) {
                 for (int dz = -r; dz <= r; dz++) {
                     if (Math.max(Math.abs(dx), Math.abs(dz)) != r) {
                         continue;           // only the new ring, not the ones already searched
                     }
+                    double across = dx * dx + dz * dz;
+                    if (across >= bestAway) {
+                        continue;           // even level with the point it would be further
+                    }
                     int x = px + dx;
                     int z = pz + dz;
-                    int y = safeStandY(x, z, py, room);
+                    int most = (int) Math.min(COLUMN_TOP - COLUMN_BOTTOM + 2,
+                            Math.ceil(Math.sqrt(bestAway - across)));
+                    int y = safeStandY(x, z, py, room, most);
                     if (y == Integer.MIN_VALUE) {
                         continue;
                     }
-                    double away = dx * dx + dz * dz + (y - py) * (double) (y - py);
+                    double away = across + (y - py) * (double) (y - py);
                     if (away < bestAway) {
                         bestAway = away;
                         best = new Vec3(x + 0.5, y, z + 0.5);
                     }
                 }
             }
-            if (best != null) {
-                return Optional.of(best);
-            }
         }
-        return Optional.empty();
+        return Optional.ofNullable(best);
     }
 
-    /** The feet's height on the nearest safe ground in a column, below {@code fromY} first; MIN_VALUE for none. */
-    private int safeStandY(int x, int z, int fromY, int room) {
-        for (int y = Math.min(COLUMN_TOP, fromY); y >= COLUMN_BOTTOM; y--) {
-            if (standable(x, y, z, room)) {
-                return y + 1;
+    /**
+     * The feet's height on the safe ground in a column nearest to {@code fromY}, no further than
+     * {@code most} from it, the one below winning a tie; MIN_VALUE for none.
+     */
+    private int safeStandY(int x, int z, int fromY, int room, int most) {
+        for (int d = 0; d <= most; d++) {
+            int below = fromY - d - 1;          // the ground under feet d below the point
+            if (below >= COLUMN_BOTTOM && below <= COLUMN_TOP && standable(x, below, z, room)) {
+                return below + 1;
             }
-        }
-        for (int y = Math.max(COLUMN_BOTTOM, fromY + 1); y <= COLUMN_TOP; y++) {
-            if (standable(x, y, z, room)) {
-                return y + 1;
+            int above = fromY + d - 1;          // and under feet d above it
+            if (d > 0 && above >= COLUMN_BOTTOM && above <= COLUMN_TOP && standable(x, above, z, room)) {
+                return above + 1;
             }
         }
         return Integer.MIN_VALUE;
