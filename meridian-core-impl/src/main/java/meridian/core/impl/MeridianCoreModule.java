@@ -251,7 +251,7 @@ public class MeridianCoreModule implements ProxyModule {
                 .map(i -> i.categories == null ? java.util.List.<String>of()
                         : java.util.Arrays.stream(i.categories).filter(java.util.Objects::nonNull).toList())
                 .orElse(java.util.List.of()));
-        // The items come after the block types: rules that tell blocks apart by kind run again.
+        // A new item catalog: rules that tell blocks apart by kind run again.
         ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
                 (direction, session) -> new ItemRegistryObserver(itemRegistry, worldState::itemsArrived));
 

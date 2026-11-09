@@ -61,10 +61,11 @@ public final class WorldStateImpl implements WorldState {
     }
 
     /**
-     * The item catalog has arrived or grown: a block's {@link BlockView#categories()} can read
-     * otherwise now, so every rule runs again. The server declares the block types before the
-     * items, so a rule that tells blocks apart by kind sees none at the load packet's rewrite,
-     * and would stay blind without this. What it changes goes out as one emit, of what changed.
+     * The item catalog has arrived or changed: a block's {@link BlockView#categories()} can read
+     * otherwise now, so every rule runs again. The server sends the items just ahead of the block
+     * types (measured), so the load packet's rewrite already sees them; this covers an item update
+     * that comes later, which would leave a rule that tells blocks apart by kind judging by the
+     * old catalog. What it changes goes out as one emit, of what changed - usually nothing.
      */
     void itemsArrived() {
         if (!rules.isEmpty()) {
