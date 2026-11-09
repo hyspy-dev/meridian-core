@@ -42,7 +42,7 @@ final class BodySettings {
 
     private static Movement.Capabilities none(Surroundings.BodyShape shape) {
         return new Movement.Capabilities(shape.width(), shape.height(), shape.eyeHeight(), 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0);
+                0, 0, 0, Physics.GRAVITY);
     }
 
     private Movement.Capabilities compute(MovementSettings p, Surroundings.BodyShape shape, FlyMode fly,
@@ -60,7 +60,8 @@ final class BodySettings {
         double climb = p.climbSpeed * Tuning.CLIMB_SPEED_PER_TICK;
         double flySpeed = fly == FlyMode.Disabled ? 0 : p.horizontalFlySpeed;
         return new Movement.Capabilities(shape.width(), shape.height(), shape.eyeHeight(), Tuning.STEP_HEIGHT, jump,
-                mantle ? Tuning.MANTLE_MAX_HEIGHT : 0, safe, walk, run, sprint, runLeap, sprintLeap, swim, climb, flySpeed);
+                mantle ? Tuning.MANTLE_MAX_HEIGHT : 0, safe, walk, run, sprint, runLeap, sprintLeap, swim, climb, flySpeed,
+                Physics.GRAVITY);
     }
 
     /** The top of a standing jump, above the feet, tick by tick as the body rises. */

@@ -300,6 +300,14 @@ public final class MovementImpl implements Movement {
     }
 
     @Override
+    public CompletableFuture<Boolean> look(meridian.core.api.Look look) {
+        if (look == null || !Float.isFinite(look.yaw()) || !Float.isFinite(look.pitch())) {
+            return CompletableFuture.completedFuture(false);
+        }
+        return body.look(look.yaw(), look.pitch());
+    }
+
+    @Override
     public Prediction predict(Move move) {
         if (move == null || move.to() == null || move.kind() == null) {
             return new Prediction(new MoveResult(MoveResult.Status.BLOCKED, position()), 0, false, 0);

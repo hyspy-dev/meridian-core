@@ -7,6 +7,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import meridian.core.api.Box;
 import meridian.core.api.EntityTracker;
+import meridian.core.api.Look;
 import meridian.core.api.Vec3;
 import meridian.protocol.ComponentUpdate;
 import meridian.core.impl.interaction.EntityTarget;
@@ -305,21 +306,12 @@ final class EntityTrackerImpl implements EntityTracker {
     /**
      * Unit vector for the local player's current look direction, or
      * {@code null} if no orientation has been observed yet. Package-private
-     * accessor used by {@link PlayerImpl#lookDirection}; the formula mirrors
-     * {@link #entityInCrosshair} so both stay in sync.
+     * accessor used by {@link PlayerImpl#lookDirection}; {@link Look#direction}, as
+     * {@link #entityInCrosshair} aims by.
      */
     Vec3 localLookDirection() {
         if (!haveLook) return null;
-        // Match Hytale's own forward formula
-        // (TriggerVolumeTestCommand.java: forwardX = -sin(yaw), forwardZ = -cos(yaw)).
-        // Both axes carry a negative sign — yaw=0 looks toward -Z, yaw=π/2
-        // looks toward -X. An earlier draft of this method had +cos which
-        // sent the raycast directly behind the player.
-        double cosPitch = Math.cos(lookPitch);
-        double lx = -Math.sin(lookYaw) * cosPitch;
-        double ly = Math.sin(lookPitch);
-        double lz = -Math.cos(lookYaw) * cosPitch;
-        return new Vec3(lx, ly, lz);
+        return new Look(lookYaw, lookPitch).direction();
     }
 
     @Override
@@ -358,15 +350,8 @@ final class EntityTrackerImpl implements EntityTracker {
         Vec3 origin = localPos;
         if (origin == null || !haveLook) return OptionalInt.empty();
 
-        // Look unit vector. Hytale Direction is (yaw, pitch) in radians:
-        // pitch < 0 looks down (a topdown camera uses pitch = -PI/2).
-        // Yaw → forward formula mirrors the server's own builtin
-        // (TriggerVolumeTestCommand): forwardX = -sin(yaw), forwardZ = -cos(yaw).
-        // Kept in sync with {@link #localLookDirection}.
-        double cosPitch = Math.cos(lookPitch);
-        double lx = -Math.sin(lookYaw) * cosPitch;
-        double ly = Math.sin(lookPitch);
-        double lz = -Math.cos(lookYaw) * cosPitch;
+        Vec3 look = new Look(lookYaw, lookPitch).direction();
+        double lx = look.x(), ly = look.y(), lz = look.z();
 
         double maxRangeSq = maxRange * maxRange;
         double minCos = Math.cos(Math.toRadians(maxAngleDeg));

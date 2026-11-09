@@ -102,20 +102,18 @@ final class CoreCommands {
             }
             case "asset" -> CompletableFuture.completedFuture(asset(args.get(1)));
             case "chain" -> CompletableFuture.completedFuture(chain(Integer.parseInt(args.get(1))));
-            case "face" -> CompletableFuture.completedFuture(args.size() == 2
-                    ? faceEntity(Integer.parseInt(args.get(1))) : face(at(args, 1)));
+            case "face" -> args.size() == 2 ? faceEntity(Integer.parseInt(args.get(1))) : face(at(args, 1));
             case "entities" -> CompletableFuture.completedFuture(
                     entities(args.size() > 1 ? Double.parseDouble(args.get(1)) : 32,
                             args.size() > 2 && args.get(2).equalsIgnoreCase("players")));
             case "attack" -> {
                 int id = Integer.parseInt(args.get(1));
-                faceIfHeadless(id);
-                yield afterEntity(repeat(times(args, 2), () -> interactions().hitEntity(id)), id);
+                int n = times(args, 2);
+                yield faceIfHeadless(id).thenCompose(v -> afterEntity(repeat(n, () -> interactions().hitEntity(id)), id));
             }
             case "useentity" -> {
                 int id = Integer.parseInt(args.get(1));
-                faceIfHeadless(id);
-                yield afterEntity(interactions().useOnEntity(id).thenApply(List::of), id);
+                yield faceIfHeadless(id).thenCompose(v -> afterEntity(interactions().useOnEntity(id).thenApply(List::of), id));
             }
             case "useitem" -> {
                 java.time.Duration hold = hold(args);
@@ -324,6 +322,7 @@ final class CoreCommands {
         }
         out.put("velocity", Map.of("x", s.velocity().x(), "y", s.velocity().y(), "z", s.velocity().z()));
         out.put("yaw", s.yaw());
+        out.put("pitch", s.pitch());
         List<String> doing = new java.util.ArrayList<>();
         if (s.onGround()) doing.add("onGround");
         if (s.inFluid()) doing.add("inFluid");
@@ -486,61 +485,53 @@ final class CoreCommands {
     }
 
     /**
-     * Turns a headless client's head and body to the middle of a block, the way a player aims: a
-     * movement at the spot it stands on, sent as the client's own. What is selected by where the
-     * player looks - a shovel's area dig - is then aimed there. A game turns its own head.
+     * Turns a headless client's head and body to the middle of a block, the way a player aims -
+     * the body's next report carries the look ({@link meridian.core.api.Movement#face}). What is
+     * selected by where the player looks - a shovel's area dig - is then aimed there. A game turns
+     * its own head.
      */
-    private Map<String, Object> face(BlockPos target) {
-        Map<String, Object> out = faceAt(new Vec3(target.x() + 0.5, target.y() + 0.5, target.z() + 0.5));
-        out.put("at", target);
-        return out;
+    private CompletableFuture<Map<String, Object>> face(BlockPos target) {
+        return faceAt(new Vec3(target.x() + 0.5, target.y() + 0.5, target.z() + 0.5)).thenApply(out -> {
+            out.put("at", target);
+            return out;
+        });
     }
 
     /** Turns a headless client to an entity's middle - where a swing at it aims. */
-    private Map<String, Object> faceEntity(int entityId) {
+    private CompletableFuture<Map<String, Object>> faceEntity(int entityId) {
         Vec3 at = entityTracker().positionOf(entityId)
                 .orElseThrow(() -> new IllegalArgumentException("entity " + entityId + " is not in sight"));
-        Map<String, Object> out = faceAt(new Vec3(at.x(), at.y() + 0.9, at.z()));
-        out.put("entity", entityId);
-        return out;
+        return faceAt(new Vec3(at.x(), at.y() + 0.9, at.z())).thenApply(out -> {
+            out.put("entity", entityId);
+            return out;
+        });
     }
 
     /** A headless client turns to the entity before acting on it; a game aims by itself. */
-    private void faceIfHeadless(int entityId) {
-        if (sessions.get().map(HeadlessClientHandler::headlessOf).isPresent()
-                && entityTracker().positionOf(entityId).isPresent()) {
-            faceEntity(entityId);
+    private CompletableFuture<?> faceIfHeadless(int entityId) {
+        if (movementService().available() && entityTracker().positionOf(entityId).isPresent()) {
+            return faceEntity(entityId);
         }
+        return CompletableFuture.completedFuture(null);
     }
 
-    private Map<String, Object> faceAt(Vec3 point) {
-        meridian.api.session.ProxySession session = sessions.get()
-                .orElseThrow(() -> new IllegalStateException("no session yet"));
-        meridian.api.session.HeadlessClient client = HeadlessClientHandler.headlessOf(session);
-        if (client == null) {
+    private CompletableFuture<Map<String, Object>> faceAt(Vec3 point) {
+        meridian.core.api.Movement m = movementService();
+        if (!m.available()) {
             throw new IllegalStateException("face turns a headless client; a game turns its own head");
         }
-        Vec3 feet = player().position();
         Vec3 eyes = player().eyePosition();
-        double dx = point.x() - eyes.x();
-        double dy = point.y() - eyes.y();
-        double dz = point.z() - eyes.z();
-        double len = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (len < 1e-6) {
+        if (eyes != null && eyes.distanceSqTo(point) < 1e-12) {
             throw new IllegalArgumentException("that is where the eyes are");
         }
-        // The inverse of the look vector (-sin yaw cos pitch, sin pitch, -cos yaw cos pitch).
-        float yaw = (float) Math.atan2(-dx / len, -dz / len);
-        float pitch = (float) Math.asin(dy / len);
-        meridian.protocol.packets.player.ClientMovement move = new meridian.protocol.packets.player.ClientMovement();
-        move.absolutePosition = new meridian.protocol.Position(feet.x(), feet.y(), feet.z());
-        move.bodyOrientation = new meridian.protocol.Direction(yaw, 0f, 0f);
-        move.lookOrientation = new meridian.protocol.Direction(yaw, pitch, 0f);
-        client.sendAsClient(move);
-        Map<String, Object> out = new LinkedHashMap<>();
-        out.put("yaw", yaw);
-        out.put("pitch", pitch);
-        return out;
+        return m.face(point).thenApply(turned -> {
+            meridian.core.api.Movement.State s = m.state();
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("turned", turned);
+            out.put("yaw", s.yaw());
+            out.put("pitch", s.pitch());
+            return out;
+        });
     }
 
     /** The entities core sees within {@code range} of the player, nearest first. */

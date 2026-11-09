@@ -64,7 +64,7 @@ final class Pilot {
         double dy = to.y() - s.y;
         double flat = Math.hypot(dx, dz);
         double dist = Math.sqrt(flat * flat + dy * dy);
-        float yaw = flat > 1e-3 ? (float) Math.atan2(-dx, -dz) : s.yaw;
+        float yaw = flat > 1e-3 ? meridian.core.api.Look.yawAlong(dx, dz) : s.yaw;
         if (!s.onGround) {
             leftGround = true;
         }

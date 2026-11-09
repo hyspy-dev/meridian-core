@@ -85,6 +85,61 @@ public interface Movement {
      */
     void hold(Controls controls);
 
+    /**
+     * Turns the head to {@code look}, the body with it, the way a player turns to aim - and keeps
+     * it there while nothing steers. The body reports the turn to the server on its next tick, as
+     * the client reports a turn of the camera, so whatever the server aims by the look (a tool's
+     * area, the block a command acts on) aims there. A move under way or queued, or held keys,
+     * steer the look themselves: then the head is not turned.
+     *
+     * <p>A forge lands without it - the server checks only that a block is within reach - but a
+     * player that hits a block looks at it.
+     *
+     * <p>A core too old to turn the head answers {@code false}.
+     *
+     * @return {@code true} once the tick that turned the head has gone out to the server (which
+     *         takes it on its own next tick); {@code false} when a move or held keys steer, or core
+     *         does not move this player
+     */
+    default CompletableFuture<Boolean> look(Look look) {
+        return CompletableFuture.completedFuture(false);
+    }
+
+    /**
+     * Turns the head to look at {@code point} from the eyes - {@link Capabilities#eyeHeight} over
+     * the feet - as {@link #look} does. A point straight over or under the eyes keeps the yaw.
+     *
+     * @return as {@link #look}; {@code false} as well when the point is where the eyes are
+     */
+    default CompletableFuture<Boolean> face(Vec3 point) {
+        Vec3 feet = position();
+        if (point == null || feet == null || !available()) {
+            return CompletableFuture.completedFuture(false);
+        }
+        double dx = point.x() - feet.x();
+        double dy = point.y() - (feet.y() + capabilities().eyeHeight());
+        double dz = point.z() - feet.z();
+        if (dx * dx + dy * dy + dz * dz < 1e-12) {
+            return CompletableFuture.completedFuture(false);
+        }
+        Look l = Look.along(dx, dy, dz);
+        if (Math.abs(dx) < 1e-6 && Math.abs(dz) < 1e-6) {
+            l = new Look(state().yaw(), l.pitch());
+        }
+        return look(l);
+    }
+
+    /**
+     * Turns the head to look at the middle of a block - where a hit, a use or a dig on it aims - as
+     * {@link #look} does.
+     */
+    default CompletableFuture<Boolean> face(BlockPos block) {
+        if (block == null) {
+            return CompletableFuture.completedFuture(false);
+        }
+        return face(new Vec3(block.x() + 0.5, block.y() + 0.5, block.z() + 0.5));
+    }
+
     /** Plays a move on a copy of the body as it is now, without moving it. */
     Prediction predict(Move move);
 
@@ -164,10 +219,37 @@ public interface Movement {
      * @param swimSpeed    blocks a second, swimming
      * @param climbSpeed   climbing up
      * @param flySpeed     flying, where it is allowed; {@code 0} where not
+     * @param gravity      how fast a fall gathers speed, blocks a second each second - the server's
+     *                     ({@code PhysicsConstants.GRAVITY_ACCELERATION}); the air holds a fall back
+     *                     only near its terminal speed, far beyond any fall a path takes
      */
     record Capabilities(double width, double height, double eyeHeight, double stepHeight, double jumpHeight,
                         double mantleHeight, double safeDrop, double walkSpeed, double runSpeed, double sprintSpeed,
-                        double runLeap, double sprintLeap, double swimSpeed, double climbSpeed, double flySpeed) {
+                        double runLeap, double sprintLeap, double swimSpeed, double climbSpeed, double flySpeed,
+                        double gravity) {
+
+        /**
+         * The capabilities without the gravity, which is then the server's 32.
+         *
+         * @deprecated core gives the gravity: use the canonical constructor
+         */
+        @Deprecated
+        public Capabilities(double width, double height, double eyeHeight, double stepHeight, double jumpHeight,
+                            double mantleHeight, double safeDrop, double walkSpeed, double runSpeed,
+                            double sprintSpeed, double runLeap, double sprintLeap, double swimSpeed,
+                            double climbSpeed, double flySpeed) {
+            this(width, height, eyeHeight, stepHeight, jumpHeight, mantleHeight, safeDrop, walkSpeed, runSpeed,
+                    sprintSpeed, runLeap, sprintLeap, swimSpeed, climbSpeed, flySpeed, 32);
+        }
+
+        /**
+         * How long a fall of {@code height} blocks takes, seconds, from standing still:
+         * {@code √(2·height / gravity)} - what the body's own fall gives to the hundredth of a
+         * second over any drop it survives.
+         */
+        public double fallSeconds(double height) {
+            return height <= 0 || gravity <= 0 ? 0 : Math.sqrt(2 * height / gravity);
+        }
 
         public double speed(Gait gait) {
             return switch (gait) {

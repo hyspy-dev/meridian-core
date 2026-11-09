@@ -59,6 +59,8 @@ public final class Body {
     private MovementStates lastStates;
     /** The keys of the last tick. */
     private volatile Controls lastControls;
+    /** Turns of the head waiting for the tick that reports them ({@link #look}). */
+    private final java.util.List<CompletableFuture<Boolean>> turns = new java.util.ArrayList<>();
 
     Body(Scheduler scheduler, Physics physics, Supplier<HeadlessClient> client,
          Supplier<Surroundings.EffectMotion> effects) {
@@ -103,6 +105,40 @@ public final class Body {
     synchronized void hold(Controls controls) {
         held = controls;
         wake();
+    }
+
+    /**
+     * Turns the head, and the body with it, to a look - when nothing steers: no move under way or
+     * queued, no keys held. The next tick's report carries it; the future says whether it went.
+     */
+    synchronized CompletableFuture<Boolean> look(float yaw, float pitch) {
+        if (client.get() == null || state == null || physics.surroundings().settings() == null
+                || current != null || !queue.isEmpty() || held != null) {
+            return CompletableFuture.completedFuture(false);
+        }
+        state.yaw = yaw;
+        state.pitch = pitch;
+        state.bodyYaw = yaw;
+        CompletableFuture<Boolean> done = new CompletableFuture<>();
+        turns.add(done);
+        wake();
+        return done;
+    }
+
+    /** Answers the turns waiting: reported this tick with nothing steering, or not. */
+    private void answerTurns(boolean turned) {
+        if (turns.isEmpty()) {
+            return;
+        }
+        java.util.List<CompletableFuture<Boolean>> waiting = new java.util.ArrayList<>(turns);
+        turns.clear();
+        // Outside the lock's reach of whoever waits: they may queue a forge, or another turn.
+        Runnable answer = () -> waiting.forEach(f -> f.complete(turned));
+        try {
+            scheduler.schedule(answer, Duration.ZERO);
+        } catch (RejectedExecutionException shutDown) {
+            answer.run();
+        }
     }
 
     synchronized void stop() {
@@ -215,6 +251,7 @@ public final class Body {
     /** The session went away. */
     synchronized void reset() {
         stop();
+        answerTurns(false);
         state = null;
         lastStates = null;
         sentPos = null;
@@ -283,6 +320,7 @@ public final class Body {
                 return;
             }
             Controls controls = controls();
+            boolean steered = current != null || held != null;
             lastControls = controls;
             BodyState before = state.copy();
             boolean moved = physics.step(state, controls, effects.get());
@@ -292,6 +330,7 @@ public final class Body {
                 // The client reports every tick, standing still too.
                 send(c, states);
             }
+            answerTurns(moved && !steered);
             ticks++;
             next = baseNanos + ticks * TICK_NANOS - System.nanoTime();
             if (next < -TICK_NANOS * 30) {

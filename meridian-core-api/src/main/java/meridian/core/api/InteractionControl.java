@@ -146,8 +146,10 @@ public interface InteractionControl {
      * air, or what the block breaks into.
      *
      * <p>Aiming is the caller's, as for every forge: the player within reach, and for a headless
-     * one, turned to the block. The block's damage wears off between swings spaced far apart, so a
-     * hard block may take more than its count of hits.
+     * one, turned to the block ({@link Movement#face(BlockPos)}). The block's damage wears off
+     * between swings spaced far apart, so a hard block may take more than its count of hits.
+     *
+     * <p>Cancelling the returned future stops it: no swing goes out after the one under way.
      *
      * @param pos       the block to break
      * @param maxSwings the most swings to try
