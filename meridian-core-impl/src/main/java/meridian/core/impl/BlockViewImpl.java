@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.UnaryOperator;
 import meridian.core.api.BlockView;
+import meridian.core.api.Rotation;
 import meridian.protocol.BlockMaterial;
 import meridian.protocol.BlockTextures;
 import meridian.protocol.BlockType;
@@ -30,15 +31,32 @@ final class BlockViewImpl implements BlockView {
     private final int id;
     private final BlockType blockType;
     private final java.util.function.Function<String, List<String>> categoriesOf;
+    /** A block type's flip type by its name, from the game's files - SYMMETRIC until known. */
+    private final java.util.function.Function<String, Rotation.Flip> flipOf;
+
+    /** No flip types known: every block the server's default. */
+    static final java.util.function.Function<String, Rotation.Flip> NO_FLIPS = name -> Rotation.Flip.SYMMETRIC;
 
     BlockViewImpl(int id, BlockType blockType) {
         this(id, blockType, NO_ITEMS);
     }
 
     BlockViewImpl(int id, BlockType blockType, java.util.function.Function<String, List<String>> categoriesOf) {
+        this(id, blockType, categoriesOf, NO_FLIPS);
+    }
+
+    BlockViewImpl(int id, BlockType blockType, java.util.function.Function<String, List<String>> categoriesOf,
+                  java.util.function.Function<String, Rotation.Flip> flipOf) {
         this.id = id;
         this.blockType = blockType;
         this.categoriesOf = categoriesOf == null ? NO_ITEMS : categoriesOf;
+        this.flipOf = flipOf == null ? NO_FLIPS : flipOf;
+    }
+
+    @Override
+    public Rotation.Flip flip() {
+        Rotation.Flip f = blockType.name == null ? null : flipOf.apply(blockType.name);
+        return f == null ? Rotation.Flip.SYMMETRIC : f;
     }
 
     @Override
@@ -150,7 +168,7 @@ final class BlockViewImpl implements BlockView {
                 faces.right = remapped(remap, faces.right);
             }
         }
-        return new BlockViewImpl(id, copy, categoriesOf);
+        return new BlockViewImpl(id, copy, categoriesOf, flipOf);
     }
 
     private static String remapped(UnaryOperator<String> remap, String path) {
@@ -173,7 +191,7 @@ final class BlockViewImpl implements BlockView {
         // Vanilla pairs the blended modes with the blending flag and the others without it.
         copy.requiresAlphaBlending = opacity == BlockView.Opacity.TRANSPARENT
                 || opacity == BlockView.Opacity.SEMITRANSPARENT;
-        return new BlockViewImpl(id, copy, categoriesOf);
+        return new BlockViewImpl(id, copy, categoriesOf, flipOf);
     }
 
     @Override
@@ -182,21 +200,21 @@ final class BlockViewImpl implements BlockView {
         if (!visible) {
             copy.drawType = DrawType.Empty;
         }
-        return new BlockViewImpl(id, copy, categoriesOf);
+        return new BlockViewImpl(id, copy, categoriesOf, flipOf);
     }
 
     @Override
     public BlockView withSolid(boolean solid) {
         BlockType copy = blockType.clone();
         copy.material = solid ? BlockMaterial.Solid : BlockMaterial.Empty;
-        return new BlockViewImpl(id, copy, categoriesOf);
+        return new BlockViewImpl(id, copy, categoriesOf, flipOf);
     }
 
     @Override
     public BlockView withLight(int radius, int red, int green, int blue) {
         BlockType copy = blockType.clone();
         copy.light = new ColorLight((byte) radius, channel(red), channel(green), channel(blue));
-        return new BlockViewImpl(id, copy, categoriesOf);
+        return new BlockViewImpl(id, copy, categoriesOf, flipOf);
     }
 
     /** A light channel as the server keeps it: four bits, 0..15. */
@@ -208,7 +226,7 @@ final class BlockViewImpl implements BlockView {
     public BlockView withoutLight() {
         BlockType copy = blockType.clone();
         copy.light = null;
-        return new BlockViewImpl(id, copy, categoriesOf);
+        return new BlockViewImpl(id, copy, categoriesOf, flipOf);
     }
 
     /** The underlying (possibly transformed) protocol block type. */

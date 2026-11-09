@@ -22,6 +22,20 @@ public interface BlockView {
     /** The name of block id {@code 1}: the server's stand-in for a block it does not know. */
     String UNKNOWN = "Unknown";
 
+    /**
+     * The block-name generation this core's server writes - the stamp a save puts on block names
+     * so that a later game knows which renames they have already been through.
+     *
+     * <p>The server keeps its renames as numbered {@code BlockMigration} assets ({@code
+     * Server/Item/Block/Migrations/0.json ... 10.json} on 0.8.0-pre.4) and stamps what it writes with
+     * how many there are ({@code BlockMigration.getAssetMap().getAssetCount()}): a chunk section's
+     * first int, a prefab file's {@code blockIdVersion}. On load it applies every migration from the
+     * stamp upward, so a name stamped {@code 0} is put through every rename there ever was - names
+     * that are current today can come out as something else - while this stamp applies none on this
+     * server and only the newer ones on a later game.
+     */
+    int BLOCK_ID_VERSION = 11;
+
     int id();
 
     String name();
@@ -83,6 +97,17 @@ public interface BlockView {
      */
     default boolean rotationMatters() {
         return false;
+    }
+
+    /**
+     * How this block folds a mirror back into a rotation ({@link Rotation#mirror(int, int,
+     * Rotation.Flip)}): the {@code FlipType} its asset declares, which the server never sends - so it
+     * is read from the game's own files ({@link GameAssets}), inheritance and states included.
+     * {@link Rotation.Flip#SYMMETRIC}, the server's default, for a block the installed game does not
+     * define (a mod's), with no game at hand, or from a core too old to know.
+     */
+    default Rotation.Flip flip() {
+        return Rotation.Flip.SYMMETRIC;
     }
 
     /**

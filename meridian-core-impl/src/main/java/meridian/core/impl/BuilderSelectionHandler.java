@@ -182,17 +182,15 @@ final class BuilderSelectionHandler implements PacketHandler {
                     case Y -> BuilderSelection.Axis.Y;
                     case Z -> BuilderSelection.Axis.Z;
                 };
-                tools.turn(axis, r.angle);
-                tools.firePaste(l -> l.turned(axis, r.angle));
+                tools.turnedByTool(axis, r.angle);
                 return Action.DROP;
             }
             if (packet instanceof BuilderToolResetClipboardRotation) {
-                tools.resetTurns();
-                tools.firePaste(BuilderSelection.PasteListener::reset);
+                tools.resetByTool();
                 return Action.DROP;
             }
             if (packet instanceof BuilderToolPasteClipboard p) {
-                tools.firePaste(l -> l.pasted(p.x, p.y, p.z));
+                tools.pastedByTool(p.x, p.y, p.z);
                 return Action.DROP;
             }
             if (packet instanceof BuilderToolRandomizeClipboard) {
@@ -205,7 +203,7 @@ final class BuilderSelectionHandler implements PacketHandler {
                 if (words[0].equalsIgnoreCase("/flip") && words.length <= 2) {
                     BuilderSelection.Axis axis = tools.flipAxis(words.length == 2 ? words[1] : null);
                     if (axis != null) {
-                        tools.firePaste(l -> l.flipped(axis));
+                        tools.flippedByTool(axis);
                         return Action.DROP;
                     }
                 }

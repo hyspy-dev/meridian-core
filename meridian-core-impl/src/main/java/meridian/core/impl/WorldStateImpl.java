@@ -60,6 +60,18 @@ public final class WorldStateImpl implements WorldState {
         return itemCategories;
     }
 
+    /** Each block type's flip type by name, from the game's files ({@link BlockFlips}). */
+    private volatile java.util.function.Function<String, meridian.core.api.Rotation.Flip> flips =
+            BlockViewImpl.NO_FLIPS;
+
+    void flips(java.util.function.Function<String, meridian.core.api.Rotation.Flip> lookup) {
+        flips = lookup == null ? BlockViewImpl.NO_FLIPS : lookup;
+    }
+
+    java.util.function.Function<String, meridian.core.api.Rotation.Flip> flips() {
+        return flips;
+    }
+
     /**
      * The item catalog has arrived or changed: a block's {@link BlockView#categories()} can read
      * otherwise now, so every rule runs again. The server sends the items just ahead of the block
@@ -205,7 +217,7 @@ public final class WorldStateImpl implements WorldState {
             // Read-only view — BlockViewImpl.with* clones before mutating, so
             // wrapping server-truth directly here is safe and avoids a deep clone
             // per block on every call.
-            out.add(new BlockViewImpl(e.getKey(), e.getValue(), itemCategories));
+            out.add(new BlockViewImpl(e.getKey(), e.getValue(), itemCategories, flips));
         }
         return List.copyOf(out);
     }
@@ -280,7 +292,7 @@ public final class WorldStateImpl implements WorldState {
      * {@code truth}: the view clones before it changes anything.
      */
     BlockType clientView(int id, BlockType truth) {
-        BlockView view = new BlockViewImpl(id, truth, itemCategories);
+        BlockView view = new BlockViewImpl(id, truth, itemCategories, flips);
         List<UnaryOperator<BlockView>> active;
         synchronized (rules) {
             active = new ArrayList<>(rules.values());

@@ -113,20 +113,94 @@ public final class GameInstallation implements AutoCloseable {
         }
         Path picked = chosen;
         Path userDir = user.filter(Files::isDirectory).orElseGet(() -> rootOf(picked).resolve("UserData"));
+        return open(chosen, chosenVersion, userDir);
+    }
+
+    /** Opens one build's {@code Assets.zip}; empty when it cannot be read. */
+    private static Optional<GameInstallation> open(Path gameDirectory, String version, Path userDir) {
         try {
-            ZipFile zip = new ZipFile(chosen.resolve("Assets.zip").toFile());
+            ZipFile zip = new ZipFile(gameDirectory.resolve("Assets.zip").toFile());
             List<String> names = new ArrayList<>(zip.size());
             zip.stream().filter(e -> !e.isDirectory()).forEach(e -> names.add(e.getName()));
             Collections.sort(names);
             Map<String, String> hashes = readHashes(zip);
             log.info("meridian-core: game files from {} ({}, {} files, {} client hashes; downloads in {})",
-                    chosen, chosenVersion, names.size(), hashes.size(), userDir);
-            return Optional.of(new GameInstallation(chosen, userDir, chosenVersion, zip, hashes,
+                    gameDirectory, version, names.size(), hashes.size(), userDir);
+            return Optional.of(new GameInstallation(gameDirectory, userDir, version, zip, hashes,
                     Collections.unmodifiableList(names)));
         } catch (IOException e) {
-            log.warn("meridian-core: cannot open {}: {}", chosen.resolve("Assets.zip"), e.toString());
+            log.warn("meridian-core: cannot open {}: {}", gameDirectory.resolve("Assets.zip"), e.toString());
             return Optional.empty();
         }
+    }
+
+    /** Installations named by hand, by the path they were named by - opened once per process. */
+    private static final Map<String, Optional<GameInstallation>> NAMED = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * The installation a person named by hand: {@code where} is a build's game folder, its {@code
+     * Assets.zip}, a build folder ({@code .../install/<build>}), a folder of builds ({@code
+     * .../install}) or the Hytale folder above it. Of the builds found there the one speaking our
+     * protocol is taken (the newest, if several); when none does, the newest one there all the same,
+     * with a warning - the person said so, and the protocol only breaks the tie. Empty when the path
+     * holds no build.
+     */
+    public static Optional<GameInstallation> at(Path where) {
+        if (where == null) {
+            return Optional.empty();
+        }
+        String key = where.toAbsolutePath().normalize().toString();
+        return NAMED.computeIfAbsent(key, k -> locateUnder(where));
+    }
+
+    private static Optional<GameInstallation> locateUnder(Path where) {
+        List<Path> builds = new ArrayList<>();
+        Path p = where.toAbsolutePath().normalize();
+        if (Files.isRegularFile(p) && p.getFileName().toString().equalsIgnoreCase("Assets.zip")) {
+            builds.add(p.getParent());
+        } else if (Files.isRegularFile(p.resolve("Assets.zip"))) {
+            builds.add(p);
+        } else if (Files.isRegularFile(p.resolve("package").resolve("game").resolve("latest").resolve("Assets.zip"))) {
+            builds.add(p.resolve("package").resolve("game").resolve("latest"));
+        } else {
+            Path install = Files.isDirectory(p.resolve("install")) ? p.resolve("install") : p;
+            try (DirectoryStream<Path> children = Files.newDirectoryStream(install)) {
+                for (Path build : children) {
+                    Path dir = build.resolve("package").resolve("game").resolve("latest");
+                    if (Files.isRegularFile(dir.resolve("Assets.zip"))) {
+                        builds.add(dir);
+                    }
+                }
+            } catch (IOException ignored) {
+                // not a folder: nothing to look through
+            }
+        }
+        if (builds.isEmpty()) {
+            log.warn("meridian-core: no game build under {}", where);
+            return Optional.empty();
+        }
+        int ours = ProtocolSettings.PROTOCOL_CRC;
+        Path speaking = null, newest = null;
+        String speakingVersion = null, newestVersion = null;
+        for (Path build : builds) {
+            String v = versionOf(build);
+            Integer crc = crcOf(build);
+            if (crc != null && crc == ours && (speaking == null || newer(v, speakingVersion))) {
+                speaking = build;
+                speakingVersion = v;
+            }
+            if (newest == null || newer(v, newestVersion)) {
+                newest = build;
+                newestVersion = v;
+            }
+        }
+        Path chosen = speaking != null ? speaking : newest;
+        String version = speaking != null ? speakingVersion : newestVersion;
+        if (speaking == null) {
+            log.warn("meridian-core: nothing under {} is known to speak this protocol ({}) - using {} ({}) as named",
+                    where, ours, chosen, version);
+        }
+        return open(chosen, version, rootOf(chosen).resolve("UserData"));
     }
 
     /** The build folders to try: under the Hytale folders we were pointed at, then the usual ones. */

@@ -12,6 +12,7 @@ import java.util.function.Supplier;
 import meridian.core.api.Vec3;
 import meridian.api.session.ProxySession;
 import meridian.core.api.BuilderSelection;
+import meridian.core.api.Clipboard;
 import meridian.core.api.PastePreview;
 import meridian.protocol.InventorySection;
 import meridian.protocol.ItemBase;
@@ -23,7 +24,6 @@ import meridian.protocol.packets.buildertools.BuilderToolPrefabPreview;
 import meridian.protocol.packets.buildertools.BuilderToolSelectionToolReplyWithClipboard;
 import meridian.protocol.packets.buildertools.BuilderToolsEnabledTools;
 import meridian.protocol.packets.buildertools.ClipboardEntityChange;
-import meridian.protocol.packets.interface_.BlockChange;
 import meridian.protocol.packets.interface_.EditorBlocksChange;
 import meridian.protocol.packets.interface_.FluidChange;
 import meridian.protocol.ItemWithAllMetadata;
@@ -90,11 +90,34 @@ final class BuilderSelectionImpl implements BuilderSelection {
 
     BuilderSelectionImpl(SessionHolder session, ItemRegistry itemRegistry, InventoryTracker inventory,
             Supplier<Vec3> look) {
+        this(session, itemRegistry, inventory, look, null, null, Runnable::run);
+    }
+
+    BuilderSelectionImpl(SessionHolder session, ItemRegistry itemRegistry, InventoryTracker inventory,
+            Supplier<Vec3> look, WorldStateImpl worldState, meridian.core.api.Pages pages,
+            java.util.concurrent.Executor offload) {
         this.session = session;
         this.itemRegistry = itemRegistry;
         this.inventory = inventory;
         this.look = look;
+        this.worldState = worldState;
+        this.pages = pages;
+        this.offload = offload == null ? Runnable::run : offload;
     }
+
+    /** The block catalog, for each block's flip type and whether its facing turns; null in tests. */
+    private final WorldStateImpl worldState;
+    /** For the prefab list; null where core opens no windows. */
+    private final meridian.core.api.Pages pages;
+    /** Where reading a prefab for the list happens - not on the network thread. */
+    private final java.util.concurrent.Executor offload;
+
+    /** The clipboard core keeps turned, as handed over, unturned; null when the module turns its own. */
+    private volatile Clipboard base;
+    /** {@link #base} with every turn and mirror so far - what the paste tool shows. */
+    private volatile Clipboard shown;
+    /** The clipboard last sent to the client, whoever turned it - what a paste places. */
+    private volatile Clipboard lastSent = Clipboard.EMPTY;
 
     /**
      * The axis {@code /flip} mirrors across, the way the server picks it: a typed {@code x}/{@code
@@ -494,12 +517,108 @@ final class BuilderSelectionImpl implements BuilderSelection {
 
     @Override
     public void setClipboard(List<PastePreview.Change> blocks, List<PastePreview.FluidChange> fluids) {
+        base = null;
+        shown = null;
         clipboard = blocks == null || blocks.isEmpty() ? null : List.copyOf(blocks);
         clipboardFluids = clipboard == null || fluids == null ? List.of() : List.copyOf(fluids);
         turnX = turnY = turnZ = 0;
         if (clipboard != null) {
             sendClipboard(clipboard, clipboardFluids);
         }
+    }
+
+    @Override
+    public void setClipboard(Clipboard held) {
+        if (held == null || held.isEmpty()) {
+            setClipboard(null, null);
+            return;
+        }
+        clipboard = held.blocks();
+        clipboardFluids = held.fluids();
+        turnX = turnY = turnZ = 0;
+        base = held;
+        shown = held;
+        sendClipboard(held.blocks(), held.fluids());
+    }
+
+    /**
+     * The paste tool turned our clipboard: counted as the server counts it, and - for a clipboard
+     * core keeps - turned and sent back the way the server's paste tool answers ({@code RotateBlock:
+     * NonUniform}, its default), before anyone is told.
+     */
+    void turnedByTool(BuilderSelection.Axis axis, int degrees) {
+        turn(axis, degrees);
+        Clipboard now = shown;
+        if (base != null && now != null) {
+            Clipboard turned = now.turned(axis.ordinal(), degrees / 90, this::facingTurns);
+            shown = turned;
+            sendClipboard(turned.blocks(), turned.fluids());
+        }
+        firePaste(l -> l.turned(axis, degrees));
+    }
+
+    /** The paste tool mirrored our clipboard: for one core keeps, each block folded by its flip type. */
+    void flippedByTool(BuilderSelection.Axis axis) {
+        Clipboard now = shown;
+        if (base != null && now != null) {
+            Clipboard flipped = now.flipped(axis.ordinal(), this::flipOf);
+            shown = flipped;
+            sendClipboard(flipped.blocks(), flipped.fluids());
+        }
+        firePaste(l -> l.flipped(axis));
+    }
+
+    /** The paste tool's reset: for a clipboard core keeps, the unturned one goes back. */
+    void resetByTool() {
+        resetTurns();
+        Clipboard unturned = base;
+        if (unturned != null) {
+            shown = unturned;
+            sendClipboard(unturned.blocks(), unturned.fluids());
+        }
+        firePaste(BuilderSelection.PasteListener::reset);
+    }
+
+    /** The paste tool pasted: whoever listens gets the clipboard the tool was showing. */
+    void pastedByTool(int x, int y, int z) {
+        Clipboard placed = shown != null ? shown : lastSent;
+        firePaste(l -> l.pasted(x, y, z, placed));
+    }
+
+    /**
+     * Whether a turn of the paste tool turns this block's facing - the paste tool's default {@code
+     * RotateBlock: NonUniform} ({@code BlockSelection.rotate}): every block but one drawn as a cube
+     * with the same texture on all six faces ({@code BlockType.hasUniformTextures}).
+     */
+    boolean facingTurns(int blockId) {
+        meridian.protocol.BlockType t = worldState == null ? null : worldState.blockTypeById(blockId);
+        if (t == null || t.drawType == null) {
+            return true;
+        }
+        if (t.drawType != meridian.protocol.DrawType.Cube && t.drawType != meridian.protocol.DrawType.CubeWithModel
+                && t.drawType != meridian.protocol.DrawType.GizmoCube) {
+            return true;
+        }
+        if (t.cubeTextures == null || t.cubeTextures.length == 0) {
+            return true;
+        }
+        for (meridian.protocol.BlockTextures f : t.cubeTextures) {
+            if (f == null || f.top == null || !f.top.equals(f.bottom) || !f.top.equals(f.front)
+                    || !f.top.equals(f.back) || !f.top.equals(f.left) || !f.top.equals(f.right)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** A block's flip type, from the game's files ({@code BlockView.flip}). */
+    meridian.core.api.Rotation.Flip flipOf(int blockId) {
+        if (worldState == null) {
+            return meridian.core.api.Rotation.Flip.SYMMETRIC;
+        }
+        meridian.protocol.BlockType t = worldState.blockTypeById(blockId);
+        return t == null || t.name == null ? meridian.core.api.Rotation.Flip.SYMMETRIC
+                : worldState.flips().apply(t.name);
     }
 
     @Override
@@ -527,7 +646,7 @@ final class BuilderSelectionImpl implements BuilderSelection {
             pkt.previewScale = 100;
             pkt.biomeTint = 0x5B9E28;
             pkt.waterTint = 0x0A3355;
-            pkt.blocksChange = toBlockChanges(blocks);
+            pkt.blocksChange = Changes.blocks(blocks);
             pkt.fluidsChange = new FluidChange[0];
         }
         live.sendToClient(pkt);
@@ -559,9 +678,10 @@ final class BuilderSelectionImpl implements BuilderSelection {
         if (live == null) {
             return;
         }
+        lastSent = new Clipboard(blocks, fluids);
         EditorBlocksChange pkt = new EditorBlocksChange();
-        pkt.blocksChange = toBlockChanges(blocks);
-        pkt.fluidsChange = toFluidChanges(fluids);
+        pkt.blocksChange = Changes.blocks(blocks);
+        pkt.fluidsChange = Changes.fluids(fluids);
         pkt.advancedPreview = true;
         pkt.blocksCount = blocks.size();
         pkt.skipPreviewRebuild = false;
@@ -571,22 +691,12 @@ final class BuilderSelectionImpl implements BuilderSelection {
         live.sendToClient(pkt);
     }
 
-    private static BlockChange[] toBlockChanges(List<PastePreview.Change> blocks) {
-        BlockChange[] changes = new BlockChange[blocks.size()];
-        for (int i = 0; i < changes.length; i++) {
-            PastePreview.Change c = blocks.get(i);
-            changes[i] = new BlockChange(c.dx(), c.dy(), c.dz(), c.blockId(), (byte) c.rotation());
+    @Override
+    public boolean openPrefabList(String title, BuilderSelection.PrefabSource source) {
+        if (pages == null || source == null || session.get().isEmpty()) {
+            return false;
         }
-        return changes;
-    }
-
-    private static FluidChange[] toFluidChanges(List<PastePreview.FluidChange> fluids) {
-        FluidChange[] changes = new FluidChange[fluids.size()];
-        for (int i = 0; i < changes.length; i++) {
-            PastePreview.FluidChange f = fluids.get(i);
-            changes[i] = new FluidChange(f.dx(), f.dy(), f.dz(), f.fluidId(), (byte) f.level());
-        }
-        return changes;
+        return new PrefabListPage(this, title, source, offload).open(pages);
     }
 
     @Override
@@ -612,8 +722,8 @@ final class BuilderSelectionImpl implements BuilderSelection {
             return;
         }
         BuilderToolSelectionToolReplyWithClipboard reply = new BuilderToolSelectionToolReplyWithClipboard();
-        reply.blocksChange = toBlockChanges(blocks);
-        reply.fluidsChange = toFluidChanges(clipboardFluids);
+        reply.blocksChange = Changes.blocks(blocks);
+        reply.fluidsChange = Changes.fluids(clipboardFluids);
         reply.entityChanges = new ClipboardEntityChange[0];
         live.sendToClient(reply);
     }
