@@ -28,14 +28,11 @@ import meridian.core.api.World;
  */
 final class CoreCommands {
 
-    static final String USAGE = "pos | block <x y z> | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
-            + "use|plant|water <x y z> | hit|dig <x y z> [times] | place <x y z> [face] [orient] | "
-            + "entities [range] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | dodge | assets | asset <path> | "
+    static final String USAGE = "pos | block <x y z> | known <x y z> | find <name-contains> [radius] [limit] | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
+            + "use|plant|water <x y z> | hit|dig <x y z> [times] | break <x y z> [maxSwings] | place <x y z> [face] [orient] | "
+            + "entities [range] [players] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | dodge | assets | asset <path> | "
             + "movement | body | stand <x y z> | move <walk|jump|mantle|drop|leap|swim|climb|fly> <x y z> [walk|run|sprint] | "
             + "predict <kind> <x y z> [gait] [trace] | hold <forward> <strafe> <yaw> [jump] [crouch] [sprint] [walk] [fly] | hold off | halt";
-
-    /** Where the eyes are above the feet - {@code PlayerImpl}'s raycast origin. */
-    private static final double EYE_HEIGHT = 1.6;
 
     private final ModuleContext ctx;
     private final SessionHolder sessions;
@@ -63,6 +60,11 @@ final class CoreCommands {
         return switch (what) {
             case "pos" -> CompletableFuture.completedFuture(pos());
             case "block" -> CompletableFuture.completedFuture(block(at(args, 1)));
+            case "known" -> {
+                BlockPos p = at(args, 1);
+                yield CompletableFuture.completedFuture(Map.of("pos", p, "known", world().known(p.x(), p.y(), p.z())));
+            }
+            case "find" -> CompletableFuture.completedFuture(find(args));
             case "look" -> CompletableFuture.completedFuture(look());
             case "inv" -> CompletableFuture.completedFuture(inventory());
             case "stats" -> CompletableFuture.completedFuture(stats());
@@ -82,7 +84,8 @@ final class CoreCommands {
             case "face" -> CompletableFuture.completedFuture(args.size() == 2
                     ? faceEntity(Integer.parseInt(args.get(1))) : face(at(args, 1)));
             case "entities" -> CompletableFuture.completedFuture(
-                    entities(args.size() > 1 ? Double.parseDouble(args.get(1)) : 32));
+                    entities(args.size() > 1 ? Double.parseDouble(args.get(1)) : 32,
+                            args.size() > 2 && args.get(2).equalsIgnoreCase("players")));
             case "attack" -> {
                 int id = Integer.parseInt(args.get(1));
                 faceIfHeadless(id);
@@ -117,6 +120,16 @@ final class CoreCommands {
             case "plant" -> after(interactions().plantOnBlock(at(args, 1)).thenApply(List::of), Face.UP.from(at(args, 1)));
             case "water" -> after(interactions().waterBlock(at(args, 1)).thenApply(List::of), at(args, 1));
             case "dig" -> after(repeat(times(args, 4), () -> interactions().digSwing(at(args, 1))), at(args, 1));
+            case "break" -> {
+                BlockPos p = at(args, 1);
+                yield interactions().breakBlock(p, args.size() > 4 ? Integer.parseInt(args.get(4)) : 20)
+                        .thenApply(broken -> {
+                            Map<String, Object> out = new LinkedHashMap<>();
+                            out.put("broken", broken);
+                            out.put("block", block(p));
+                            return out;
+                        });
+            }
             case "place" -> {
                 BlockPos target = at(args, 1);
                 Face face = args.size() > 4 ? face(args.get(4)) : Face.UP;
@@ -458,9 +471,10 @@ final class CoreCommands {
             throw new IllegalStateException("face turns a headless client; a game turns its own head");
         }
         Vec3 feet = player().position();
-        double dx = point.x() - feet.x();
-        double dy = point.y() - (feet.y() + EYE_HEIGHT);
-        double dz = point.z() - feet.z();
+        Vec3 eyes = player().eyePosition();
+        double dx = point.x() - eyes.x();
+        double dy = point.y() - eyes.y();
+        double dz = point.z() - eyes.z();
         double len = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (len < 1e-6) {
             throw new IllegalArgumentException("that is where the eyes are");
@@ -480,22 +494,36 @@ final class CoreCommands {
     }
 
     /** The entities core sees within {@code range} of the player, nearest first. */
-    private Object entities(double range) {
+    private Object entities(double range, boolean playersOnly) {
         EntityTracker tracker = entityTracker();
-        Vec3 me = player().position();
         List<Map<String, Object>> out = new java.util.ArrayList<>();
-        for (int id : tracker.trackedEntities()) {
-            Optional<Vec3> at = tracker.positionOf(id);
-            if (at.isEmpty() || tracker.localEntityId().orElse(Integer.MIN_VALUE) == id) {
-                continue;
-            }
-            double d = Math.sqrt(sq(at.get().x() - me.x()) + sq(at.get().y() - me.y()) + sq(at.get().z() - me.z()));
-            if (d > range) {
-                continue;
-            }
-            out.add(entity(id, d));
+        for (int id : tracker.nearby(range, playersOnly)) {
+            tracker.positionOf(id).ifPresent(at -> out.add(entity(id, distanceTo(at))));
         }
-        out.sort(java.util.Comparator.comparingDouble(m -> (Double) m.get("distance")));
+        return out;
+    }
+
+    /**
+     * {@code find <name-contains> [radius] [limit]}: the blocks whose type name contains the text
+     * (case counts), nearest the feet first.
+     */
+    private Object find(List<String> args) {
+        if (args.size() < 2) {
+            throw new IllegalArgumentException("find <name-contains> [radius] [limit]");
+        }
+        String part = args.get(1);
+        double radius = args.size() > 2 ? Double.parseDouble(args.get(2)) : 16;
+        int limit = args.size() > 3 ? Integer.parseInt(args.get(3)) : 10;
+        Vec3 feet = player().position();
+        List<Map<String, Object>> out = new java.util.ArrayList<>();
+        for (Block b : world().find(feet, radius, t -> t.name() != null && t.name().contains(part), limit)) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("pos", new BlockPos(b.x(), b.y(), b.z()));
+            m.put("name", b.type().name());
+            m.put("distance", Math.round(Math.sqrt(sq(b.x() + 0.5 - feet.x()) + sq(b.y() + 0.5 - feet.y())
+                    + sq(b.z() + 0.5 - feet.z())) * 100) / 100.0);
+            out.add(m);
+        }
         return out;
     }
 
@@ -503,6 +531,7 @@ final class CoreCommands {
         EntityTracker tracker = entityTracker();
         Map<String, Object> e = new LinkedHashMap<>();
         e.put("id", id);
+        e.put("label", tracker.labelOf(id));
         e.put("distance", Math.round(distance * 100) / 100.0);
         tracker.entityModelAssetId(id).ifPresent(m -> e.put("model", m));
         tracker.nameplateOf(id).ifPresent(n -> e.put("name", n));

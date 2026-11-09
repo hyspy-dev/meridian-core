@@ -140,6 +140,26 @@ public interface InteractionControl {
     CompletableFuture<InteractionOutcome> digSwing(BlockPos aim);
 
     /**
+     * Swings the held tool at {@code pos} until the block there is gone: a {@link #digSwing} at a
+     * time, each once the server has said how the one before went, as a held button swings. Done
+     * when core has been sent the cell holding something other than the block it started with -
+     * air, or what the block breaks into.
+     *
+     * <p>Aiming is the caller's, as for every forge: the player within reach, and for a headless
+     * one, turned to the block. The block's damage wears off between swings spaced far apart, so a
+     * hard block may take more than its count of hits.
+     *
+     * @param pos       the block to break
+     * @param maxSwings the most swings to try
+     * @return {@code true} once the block is broken; {@code false} when {@code maxSwings} did not
+     *         break it, when nothing could be sent, or when the cell was not known or held no block
+     *         to begin with - then nothing is sent
+     */
+    default CompletableFuture<Boolean> breakBlock(BlockPos pos, int maxSwings) {
+        return CompletableFuture.completedFuture(false);
+    }
+
+    /**
      * Forges one attack on an entity: the held item's {@code Primary} swing, reporting the
      * entity as what it hit. The server takes a player's entity hits from the client and runs
      * the item's hit (its damage, knockback, effects) on the entity - as when the player clicks
@@ -188,11 +208,6 @@ public interface InteractionControl {
     }
 
     /**
-     * Forges the held item's {@code Primary} swing aimed at nothing - a swing in the open air.
-     *
-     * @return how the server ran the swing
-     */
-    /**
      * A dodge ({@code InteractionType.Dodge}): to the side the movement keys are held - left or
      * right - a quick push of the body, with the stamina it costs. Only where the server binds a
      * dodge to the player or the held item; the vanilla game binds none, and the server cancels it.
@@ -201,6 +216,11 @@ public interface InteractionControl {
         return CompletableFuture.failedFuture(new UnsupportedOperationException("dodge"));
     }
 
+    /**
+     * Forges the held item's {@code Primary} swing aimed at nothing - a swing in the open air.
+     *
+     * @return how the server ran the swing
+     */
     default CompletableFuture<InteractionOutcome> swing() {
         return CompletableFuture.failedFuture(new UnsupportedOperationException("swing"));
     }

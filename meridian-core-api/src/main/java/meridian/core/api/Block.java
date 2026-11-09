@@ -69,8 +69,19 @@ public interface Block {
 
     /** The cell this block stands on: this one, unless it {@linkplain #isFiller() only fills it}. */
     default BlockPos base() {
-        int f = filler();
-        return new BlockPos(x() - fillerAxis(f), y() - fillerAxis(f >> 10), z() - fillerAxis(f >> 5));
+        return baseOf(x(), y(), z(), filler());
+    }
+
+    /**
+     * The cell a block stands on, from a cell it fills and that cell's {@linkplain #filler() filler
+     * offset}: the cell minus the offset, so the cell itself for {@code 0}. The one decoding of the
+     * server's packing - for code that reads fillers without a {@code Block} in hand.
+     */
+    static BlockPos baseOf(int x, int y, int z, int filler) {
+        if (filler == 0) {
+            return new BlockPos(x, y, z);
+        }
+        return new BlockPos(x - fillerAxis(filler), y - fillerAxis(filler >> 10), z - fillerAxis(filler >> 5));
     }
 
     /** One axis of a packed filler offset: the low five bits, signed. */

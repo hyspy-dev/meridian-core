@@ -12,9 +12,6 @@ import meridian.protocol.MovementSettings;
  */
 final class BodySettings {
 
-    /** The highest ledge pulled up onto: three blocks, as the game's players know it. Not fitted. */
-    static final double MANTLE_MAX_HEIGHT = 3.0;
-
     private final Physics physics;
     private MovementSettings last;
     private Surroundings.BodyShape lastShape;
@@ -63,7 +60,7 @@ final class BodySettings {
         double climb = p.climbSpeed * Tuning.CLIMB_SPEED_PER_TICK;
         double flySpeed = fly == FlyMode.Disabled ? 0 : p.horizontalFlySpeed;
         return new Movement.Capabilities(shape.width(), shape.height(), shape.eyeHeight(), Tuning.STEP_HEIGHT, jump,
-                mantle ? MANTLE_MAX_HEIGHT : 0, safe, walk, run, sprint, runLeap, sprintLeap, swim, climb, flySpeed);
+                mantle ? Tuning.MANTLE_MAX_HEIGHT : 0, safe, walk, run, sprint, runLeap, sprintLeap, swim, climb, flySpeed);
     }
 
     /** The top of a standing jump, above the feet, tick by tick as the body rises. */

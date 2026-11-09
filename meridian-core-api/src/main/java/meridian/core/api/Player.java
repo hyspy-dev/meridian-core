@@ -13,6 +13,17 @@ public interface Player {
     Vec3 position();
 
     /**
+     * Where the player's eyes are: {@link #position()} raised by the eye height of the player's
+     * model, standing - the point a look, a reach and the crosshair are measured from. Until the
+     * server has sent the model, the default player model's: 1.6 blocks. {@code null} while the
+     * position is.
+     */
+    default Vec3 eyePosition() {
+        Vec3 feet = position();
+        return feet == null ? null : new Vec3(feet.x(), feet.y() + 1.6, feet.z());
+    }
+
+    /**
      * Unit vector for the player's look direction in world space — derived
      * from the most recently observed {@code lookOrientation} (yaw + pitch
      * in radians). {@code null} until the client has sent at least one

@@ -12,6 +12,16 @@ import java.util.function.UnaryOperator;
  * renamed protocol field never reaches a Layer-2 module.
  */
 public interface BlockView {
+
+    /**
+     * The name of block id {@code 0}: no block. The catalog lists air under it, and the prefab
+     * format writes it for a cell left empty.
+     */
+    String EMPTY = "Empty";
+
+    /** The name of block id {@code 1}: the server's stand-in for a block it does not know. */
+    String UNKNOWN = "Unknown";
+
     int id();
 
     String name();
@@ -44,6 +54,11 @@ public interface BlockView {
         return false;
     }
 
+    /**
+     * Whether a body collides with this block: its material is solid, the server's rule for what
+     * stops a player ({@code MATERIAL_SOLID}). Stone and a door are solid, and so is a fence, whose
+     * shape fills only part of the cell; grass and torches are not.
+     */
     boolean isSolid();
 
     boolean isVisible();
@@ -91,6 +106,11 @@ public interface BlockView {
      */
     BlockView withOpacity(Opacity opacity);
 
+    /**
+     * Makes the client collide with this block, or walk through it: its material set solid, or
+     * empty. The server keeps colliding by its own copy, so this changes only what the client
+     * predicts.
+     */
     BlockView withSolid(boolean solid);
 
     BlockView withVisible(boolean visible);

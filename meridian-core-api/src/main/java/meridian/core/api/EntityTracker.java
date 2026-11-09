@@ -1,5 +1,10 @@
 package meridian.core.api;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
@@ -82,6 +87,78 @@ public interface EntityTracker {
      * itself. Empty if nothing is tracked or the player position is unknown.
      */
     OptionalInt nearestEntity();
+
+    /**
+     * The entities within {@code range} of the local player, nearest first, the player itself left
+     * out - measured from the player's feet to where each entity stands. Empty while the player's
+     * position is unknown.
+     *
+     * @param range       how far out, in blocks
+     * @param playersOnly only {@linkplain #isPlayer players}
+     * @return network ids, nearest first
+     */
+    default List<Integer> nearby(double range, boolean playersOnly) {
+        Optional<Vec3> me = localPosition();
+        if (me.isEmpty() || !(range >= 0)) {
+            return List.of();
+        }
+        OptionalInt self = localEntityId();
+        double rangeSq = range * range;
+        Map<Integer, Double> found = new HashMap<>();
+        for (int id : trackedEntities()) {
+            if (self.isPresent() && self.getAsInt() == id || playersOnly && !isPlayer(id)) {
+                continue;
+            }
+            Optional<Vec3> at = positionOf(id);
+            if (at.isEmpty()) {
+                continue;
+            }
+            double dSq = at.get().distanceSqTo(me.get());
+            if (dSq <= rangeSq) {
+                found.put(id, dSq);
+            }
+        }
+        List<Integer> out = new ArrayList<>(found.keySet());
+        out.sort(Comparator.<Integer>comparingDouble(found::get).thenComparingInt(id -> id));
+        return out;
+    }
+
+    /**
+     * A name to show for an entity: its {@linkplain #nameplateOf nameplate} (a player's name, a
+     * named NPC's), else its species from {@linkplain #entityModelAssetId its model}
+     * ({@code Sheep}), else the last part of its {@linkplain #entityTypeOf model path} - the folder
+     * when the file is the shared {@code Model} mesh - else {@code "?"}.
+     */
+    default String labelOf(int entityId) {
+        Optional<String> nameplate = nameplateOf(entityId);
+        if (nameplate.isPresent() && !nameplate.get().isBlank()) {
+            return nameplate.get();
+        }
+        Optional<String> asset = entityModelAssetId(entityId);
+        if (asset.isPresent() && !asset.get().isBlank()) {
+            return lastName(asset.get());
+        }
+        Optional<String> type = entityTypeOf(entityId);
+        return type.isPresent() && !type.get().isBlank() ? lastName(type.get()) : "?";
+    }
+
+    /**
+     * The readable last part of a model path: {@code Creatures/Cow/Model.blockymodel} is
+     * {@code Cow}, {@code Characters/Player.blockymodel} is {@code Player}, {@code Sheep} is itself.
+     */
+    private static String lastName(String path) {
+        String[] parts = path.split("/");
+        int last = parts.length - 1;
+        String name = parts[last];
+        int dot = name.lastIndexOf('.');
+        if (dot > 0) {
+            name = name.substring(0, dot);
+        }
+        if ((name.isEmpty() || name.equalsIgnoreCase("Model")) && last >= 1) {
+            name = parts[last - 1];
+        }
+        return name;
+    }
 
     /**
      * Network id of the entity the local player is looking at — the tracked

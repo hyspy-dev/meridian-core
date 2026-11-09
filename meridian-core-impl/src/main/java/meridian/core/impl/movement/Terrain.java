@@ -3,6 +3,8 @@ package meridian.core.impl.movement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalDouble;
+import meridian.core.api.Block;
+import meridian.core.api.BlockPos;
 import meridian.core.api.FluidCell;
 import meridian.core.impl.ChunkTracker;
 import meridian.core.impl.WorldStateImpl;
@@ -40,9 +42,9 @@ public final class Terrain {
         this.hitboxes = hitboxes;
     }
 
-    /** Whether core knows the blocks at a cell: its section, or its column with that section left out as air. */
+    /** Whether core knows the blocks at a cell ({@link ChunkTracker#known}). */
     public boolean known(int x, int y, int z) {
-        return chunks.blockIdAt(x, y, z) >= 0 || chunks.columnKnown(x, z);
+        return chunks.known(x, y, z);
     }
 
     /** A block where it stands: its id, its type and the cell holding its shape (its base, for a filler). */
@@ -60,9 +62,10 @@ public final class Terrain {
         int filler = chunks.fillerAt(x, y, z);
         if (filler != 0) {
             // A cell a bigger block fills: the block's own cell holds the shape.
-            bx = x - axis(filler);
-            by = y - axis(filler >> 10);
-            bz = z - axis(filler >> 5);
+            BlockPos base = Block.baseOf(x, y, z, filler);
+            bx = base.x();
+            by = base.y();
+            bz = base.z();
             int baseId = chunks.blockIdAt(bx, by, bz);
             if (baseId > 0) {
                 id = baseId;
@@ -86,12 +89,6 @@ public final class Terrain {
             return;
         }
         boxesOf(b, out);
-    }
-
-    /** One axis of a packed filler offset: the low five bits, signed (as {@code Block.base()}). */
-    private static int axis(int packed) {
-        int v = packed & 0x1F;
-        return (v & 0x10) != 0 ? v - 0x20 : v;
     }
 
     /**

@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.UnaryOperator;
 import meridian.core.api.BlockView;
+import meridian.protocol.BlockMaterial;
 import meridian.protocol.BlockTextures;
 import meridian.protocol.BlockType;
 import meridian.protocol.ColorLight;
@@ -89,7 +90,9 @@ final class BlockViewImpl implements BlockView {
 
     @Override
     public boolean isSolid() {
-        return blockType.hitbox != 0;
+        // The material, as the server collides by it (and as core's movement does). The hitbox is
+        // only the shape, and its index 0 is the server's full cube, not "none".
+        return blockType.material == BlockMaterial.Solid;
     }
 
     @Override
@@ -171,9 +174,7 @@ final class BlockViewImpl implements BlockView {
     @Override
     public BlockView withSolid(boolean solid) {
         BlockType copy = blockType.clone();
-        if (!solid) {
-            copy.hitbox = 0;
-        }
+        copy.material = solid ? BlockMaterial.Solid : BlockMaterial.Empty;
         return new BlockViewImpl(id, copy, categoriesOf);
     }
 

@@ -1,11 +1,18 @@
 package meridian.core.impl;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.IntPredicate;
 import meridian.protocol.packets.world.ServerSetBlock;
 import meridian.protocol.packets.world.ServerSetBlocks;
 import meridian.protocol.packets.world.ServerSetFluid;
 import meridian.protocol.packets.world.ServerSetFluids;
+import meridian.protocol.packets.world.SetAbsentChunks;
 import meridian.protocol.packets.world.SetBlockCmd;
 import meridian.protocol.packets.world.SetChunk;
 import meridian.protocol.packets.world.SetFluidCmd;
@@ -31,6 +38,9 @@ import org.slf4j.LoggerFactory;
  *   <li>{@code SetBlockCmd.index} is the in-section block index.</li>
  *   <li>{@code UnloadChunk.chunkX/chunkZ} unload a whole vertical column.</li>
  * </ul>
+ *
+ * <p>Fed on the network threads, read from any thread without a lock: the maps are concurrent and
+ * a read may see a section a moment before or after an edit to it, never a torn one.
  */
 public final class ChunkTracker {
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
@@ -77,26 +87,59 @@ public final class ChunkTracker {
     // Ingest
     // ------------------------------------------------------------------
 
-    /** Columns (by section x, z) the server has sent sections of - where a missing section is air. */
-    private final java.util.Set<Long> columns = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** Columns (by section x, z) the server has sent sections of. */
+    private final Set<Long> columns = ConcurrentHashMap.newKeySet();
+    /**
+     * Sections the server said hold nothing ({@code SetAbsentChunks}): known, and all air, without
+     * a {@code SetChunk} of their own.
+     */
+    private final Set<SectionKey> absent = ConcurrentHashMap.newKeySet();
+    /**
+     * Whether this server says which sections are absent. One that does streams the sections in a
+     * sphere about the player and unloads them one at a time, so a section it has not sent is
+     * unknown even in a column it has sent; one that does not (an older server) leaves out a
+     * column's air sections and unloads whole columns, so there a missing section is air.
+     */
+    private volatile boolean announcesAbsent;
+    /** Sections sent as nothing but air - a search steps over them. Left as soon as a block is set. */
+    private final Set<SectionKey> airOnly = ConcurrentHashMap.newKeySet();
 
     private static long column(int sectionX, int sectionZ) {
         return ((long) sectionX << 32) | (sectionZ & 0xFFFFFFFFL);
     }
 
     /**
-     * Whether the server has sent the column a world position stands in. The server leaves out a
-     * column's sections of nothing but air, so there a missing section is air, not unknown.
+     * Whether the server has sent the column a world position stands in - some section of it.
+     * Whether a given cell of it is known is {@link #known}'s to say.
      */
     public boolean columnKnown(int x, int z) {
         return columns.contains(column(x >> 5, z >> 5));
+    }
+
+    /**
+     * Whether the blocks of the cell at a world position are known: its section was sent, or the
+     * server said the section holds nothing - or, from a server that does not say so, the section
+     * was left out of a column that was sent, as a section of nothing but air is.
+     */
+    public boolean known(int x, int y, int z) {
+        SectionKey key = new SectionKey(x >> 5, y >> 5, z >> 5);
+        if (sections.containsKey(key)) {
+            return true;
+        }
+        return announcesAbsent ? absent.contains(key) : columns.contains(column(key.x(), key.z()));
     }
 
     void onSetChunk(SetChunk packet) {
         try {
             SectionKey key = new SectionKey(packet.x, packet.y, packet.z);
             ChunkDecoder.Section section = ChunkDecoder.decodeSection(packet.data);
+            if (allAir(section.ids())) {
+                airOnly.add(key);
+            } else {
+                airOnly.remove(key);
+            }
             sections.put(key, section.ids());
+            absent.remove(key);
             columns.add(column(packet.x, packet.z));
             if (section.rotations() != null) {
                 rotations.put(key, section.rotations());
@@ -111,18 +154,63 @@ public final class ChunkTracker {
         } catch (RuntimeException e) {
             log.warn("meridian-core: failed to decode chunk section ({},{},{}): {}",
                     packet.x, packet.y, packet.z, e.toString());
+            return;
+        }
+        // The whole column: from an older server, its first section makes the rest known as air.
+        changedColumn(packet.x, packet.z);
+    }
+
+    /** Sections of a column the server says hold nothing; {@code ys} are section coordinates. */
+    void onSetAbsentChunks(SetAbsentChunks packet) {
+        announcesAbsent = true;
+        if (packet.ys == null) {
+            return;
+        }
+        for (int y : packet.ys) {
+            SectionKey key = new SectionKey(packet.x, y, packet.z);
+            // Absent now, whatever was there: the server's word is the latest.
+            sections.remove(key);
+            rotations.remove(key);
+            fillers.remove(key);
+            airOnly.remove(key);
+            absent.add(key);
+            changedSection(key);
         }
     }
 
+    /** The world was torn down ({@code ClearChunks}): a world change, or a resend of this one. */
+    void onClearChunks() {
+        sections.clear();
+        rotations.clear();
+        fillers.clear();
+        fluidSections.clear();
+        fluidLevels.clear();
+        columns.clear();
+        absent.clear();
+        airOnly.clear();
+    }
+
+    private static boolean allAir(int[] ids) {
+        for (int id : ids) {
+            if (id > 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /**
-     * The blocks of a section, for a change to them: one the server left out of a column it sent
-     * is all air and gets made now (a block placed high in the sky); one of a column never sent
-     * stays unknown.
+     * The blocks of a section, for a change to them: one known to hold nothing - absent by the
+     * server's word, or left out of a column an older server sent - is all air and gets made now
+     * (a block placed high in the sky); one not known stays unknown.
      */
     private int[] sectionForChange(SectionKey key) {
         int[] section = sections.get(key);
-        if (section == null && columns.contains(column(key.x(), key.z()))) {
+        if (section == null && (announcesAbsent ? absent.contains(key)
+                : columns.contains(column(key.x(), key.z())))) {
+            airOnly.add(key);
             section = sections.computeIfAbsent(key, k -> new int[ChunkDecoder.SECTION_BLOCKS]);
+            absent.remove(key);
         }
         return section;
     }
@@ -132,9 +220,13 @@ public final class ChunkTracker {
         int[] section = sectionForChange(key);
         if (section != null) {
             int index = indexBlock(packet.x, packet.y, packet.z);
+            if (packet.blockId > 0) {
+                airOnly.remove(key);    // before the block is there: a search must not step over it
+            }
             section[index] = packet.blockId;
             setRotation(key, index, packet.rotation);
             setFiller(key, index, packet.filler);
+            changedCell(packet.x, packet.y, packet.z);
         }
     }
 
@@ -148,12 +240,115 @@ public final class ChunkTracker {
             return;
         }
         for (SetBlockCmd cmd : packet.cmds) {
+            if (cmd.blockId > 0) {
+                airOnly.remove(key);
+                break;
+            }
+        }
+        for (SetBlockCmd cmd : packet.cmds) {
             int index = cmd.index & 0xFFFF;
             if (index < section.length) {
                 section[index] = cmd.blockId;
                 setRotation(key, index, cmd.rotation);
                 setFiller(key, index, cmd.filler);
             }
+        }
+        changedSection(key);
+    }
+
+    // ------------------------------------------------------------------
+    // Watching a cell
+    // ------------------------------------------------------------------
+
+    /** A watch on one cell, from {@link #watchCell}; closing it stops it. */
+    public interface CellWatch extends AutoCloseable {
+        @Override
+        void close();
+    }
+
+    /** One watched cell and what to tell. Compared by identity: two watches of a cell are two. */
+    private static final class Watch {
+        final int x;
+        final int y;
+        final int z;
+        final Runnable changed;
+
+        Watch(int x, int y, int z, Runnable changed) {
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            this.changed = changed;
+        }
+    }
+
+    /** Watches by the column (section x, z) they are in - what a change looks them up by. */
+    private final Map<Long, Set<Watch>> watches = new ConcurrentHashMap<>();
+
+    /**
+     * Calls {@code changed} after every change the server makes that may touch the cell at a world
+     * position: a block set there, a batch of edits to its section, its section or another of its
+     * column arriving, its section said to be absent. It runs on the network thread that carried
+     * the change, after the mirror took it, and is told the cell may have changed - it reads what
+     * the cell holds now. Until {@link CellWatch#close} is called.
+     */
+    public CellWatch watchCell(int x, int y, int z, Runnable changed) {
+        Watch w = new Watch(x, y, z, changed);
+        long col = column(x >> 5, z >> 5);
+        watches.compute(col, (k, set) -> {
+            Set<Watch> s = set != null ? set : ConcurrentHashMap.newKeySet();
+            s.add(w);
+            return s;
+        });
+        return () -> watches.computeIfPresent(col, (k, set) -> {
+            set.remove(w);
+            return set.isEmpty() ? null : set;
+        });
+    }
+
+    private void changedCell(int x, int y, int z) {
+        if (watches.isEmpty()) {
+            return;
+        }
+        Set<Watch> set = watches.get(column(x >> 5, z >> 5));
+        if (set != null) {
+            for (Watch w : set) {
+                if (w.x == x && w.y == y && w.z == z) {
+                    tell(w);
+                }
+            }
+        }
+    }
+
+    private void changedSection(SectionKey key) {
+        if (watches.isEmpty()) {
+            return;
+        }
+        Set<Watch> set = watches.get(column(key.x(), key.z()));
+        if (set != null) {
+            for (Watch w : set) {
+                if (w.y >> 5 == key.y()) {
+                    tell(w);
+                }
+            }
+        }
+    }
+
+    private void changedColumn(int sectionX, int sectionZ) {
+        if (watches.isEmpty()) {
+            return;
+        }
+        Set<Watch> set = watches.get(column(sectionX, sectionZ));
+        if (set != null) {
+            set.forEach(this::tell);
+        }
+    }
+
+    /** Tells one watch, never letting what it does break the feed. */
+    private void tell(Watch w) {
+        try {
+            w.changed.run();
+        } catch (RuntimeException e) {
+            log.warn("meridian-core: a block watch at ({},{},{}) failed: {}", w.x, w.y, w.z, e.toString());
         }
     }
 
@@ -263,6 +458,8 @@ public final class ChunkTracker {
                 fillers.remove(key);
                 fluidSections.remove(key);
                 fluidLevels.remove(key);
+                absent.remove(key);
+                airOnly.remove(key);
             }
         }
         int[] columnCoords = packet.columns;
@@ -281,6 +478,8 @@ public final class ChunkTracker {
         fillers.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
         fluidSections.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
         fluidLevels.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
+        absent.removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
+        airOnly.removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
     }
 
     // ------------------------------------------------------------------
@@ -367,5 +566,156 @@ public final class ChunkTracker {
     /** Number of sections currently mirrored. */
     public int sectionCount() {
         return sections.size();
+    }
+
+    // ------------------------------------------------------------------
+    // Search
+    // ------------------------------------------------------------------
+
+    /** A block a search found: its cell, its id, and how far its middle is from the start, squared. */
+    public record Found(int x, int y, int z, int id, double distanceSq) {}
+
+    private static final Comparator<Found> NEAREST_FIRST = Comparator.comparingDouble(Found::distanceSq)
+            .thenComparingInt(Found::y).thenComparingInt(Found::z).thenComparingInt(Found::x);
+
+    /**
+     * The blocks whose middle is within {@code radius} of {@code (fx, fy, fz)} and whose id
+     * {@code type} accepts, nearest first, at most {@code limit}.
+     *
+     * <p>Walks the mirrored sections the sphere reaches, not the cells of a cube: a section not
+     * sent, or sent as nothing but air, costs nothing, and no cell is looked at twice. Air is
+     * never offered to {@code type}, and nor is a cell a bigger block only fills - such a block is
+     * found at the cell it stands on. {@code type} is asked for every block in reach, so a caller
+     * whose test is dear answers it once per id.
+     */
+    public List<Found> find(double fx, double fy, double fz, double radius, IntPredicate type, int limit) {
+        if (limit < 1 || !(radius >= 0) || !Double.isFinite(fx) || !Double.isFinite(fy) || !Double.isFinite(fz)) {
+            return List.of();
+        }
+        double r2 = radius * radius;
+        // The cells whose middle (c + 0.5) can be within reach; a cast past the int range saturates.
+        int x0 = (int) Math.ceil(fx - radius - 0.5);
+        int x1 = (int) Math.floor(fx + radius - 0.5);
+        int y0 = (int) Math.ceil(fy - radius - 0.5);
+        int y1 = (int) Math.floor(fy + radius - 0.5);
+        int z0 = (int) Math.ceil(fz - radius - 0.5);
+        int z1 = (int) Math.floor(fz + radius - 0.5);
+        if (x0 > x1 || y0 > y1 || z0 > z1) {
+            return List.of();
+        }
+        Search s = new Search(fx, fy, fz, r2, x0, x1, y0, y1, z0, z1, type, limit);
+        int sx0 = x0 >> 5, sx1 = x1 >> 5, sy0 = y0 >> 5, sy1 = y1 >> 5, sz0 = z0 >> 5, sz1 = z1 >> 5;
+        double span = (sx1 - (double) sx0 + 1) * (sy1 - (double) sy0 + 1) * (sz1 - (double) sz0 + 1);
+        if (span <= sections.size()) {
+            for (int sx = sx0; sx <= sx1; sx++) {
+                for (int sz = sz0; sz <= sz1; sz++) {
+                    for (int sy = sy0; sy <= sy1; sy++) {
+                        SectionKey key = new SectionKey(sx, sy, sz);
+                        int[] ids = sections.get(key);
+                        if (ids != null) {
+                            s.section(key, ids);
+                        }
+                    }
+                }
+            }
+        } else {
+            // A reach wider than what is mirrored: go over what is there instead.
+            for (Map.Entry<SectionKey, int[]> e : sections.entrySet()) {
+                SectionKey k = e.getKey();
+                if (k.x() >= sx0 && k.x() <= sx1 && k.y() >= sy0 && k.y() <= sy1 && k.z() >= sz0 && k.z() <= sz1) {
+                    s.section(k, e.getValue());
+                }
+            }
+        }
+        List<Found> out = new ArrayList<>(s.best);
+        out.sort(NEAREST_FIRST);
+        return out;
+    }
+
+    /** One search under way: its sphere, its cell bounds, and the nearest blocks so far. */
+    private final class Search {
+        final double fx, fy, fz, r2;
+        final int x0, x1, y0, y1, z0, z1;
+        final IntPredicate type;
+        final int limit;
+        /** The nearest found so far, the farthest of them on top - the one a nearer block replaces. */
+        final PriorityQueue<Found> best;
+
+        Search(double fx, double fy, double fz, double r2, int x0, int x1, int y0, int y1, int z0, int z1,
+               IntPredicate type, int limit) {
+            this.fx = fx;
+            this.fy = fy;
+            this.fz = fz;
+            this.r2 = r2;
+            this.x0 = x0;
+            this.x1 = x1;
+            this.y0 = y0;
+            this.y1 = y1;
+            this.z0 = z0;
+            this.z1 = z1;
+            this.type = type;
+            this.limit = limit;
+            this.best = new PriorityQueue<>(Math.min(limit, 256) + 1, NEAREST_FIRST.reversed());
+        }
+
+        void section(SectionKey key, int[] ids) {
+            if (airOnly.contains(key)) {
+                return;
+            }
+            int bx = key.x() << 5, by = key.y() << 5, bz = key.z() << 5;
+            // The middle of this section's cells nearest the start: past reach, nothing in it is.
+            double nx = clamp(fx, bx + 0.5, bx + 31.5) - fx;
+            double ny = clamp(fy, by + 0.5, by + 31.5) - fy;
+            double nz = clamp(fz, bz + 0.5, bz + 31.5) - fz;
+            if (nx * nx + ny * ny + nz * nz > r2) {
+                return;
+            }
+            int[] fill = fillers.get(key);
+            int cx0 = Math.max(x0, bx), cx1 = Math.min(x1, bx + 31);
+            int cy0 = Math.max(y0, by), cy1 = Math.min(y1, by + 31);
+            int cz0 = Math.max(z0, bz), cz1 = Math.min(z1, bz + 31);
+            for (int y = cy0; y <= cy1; y++) {
+                double dy = y + 0.5 - fy;
+                double leftY = r2 - dy * dy;
+                if (leftY < 0) {
+                    continue;
+                }
+                for (int z = cz0; z <= cz1; z++) {
+                    double dz = z + 0.5 - fz;
+                    double left = leftY - dz * dz;
+                    if (left < 0) {
+                        continue;
+                    }
+                    // The row's cells within reach, from the circle the sphere cuts at this y and z.
+                    double reach = Math.sqrt(left);
+                    int xa = Math.max(cx0, (int) Math.ceil(fx - 0.5 - reach));
+                    int xb = Math.min(cx1, (int) Math.floor(fx - 0.5 + reach));
+                    int row = (y & 31) << 10 | (z & 31) << 5;
+                    for (int x = xa; x <= xb; x++) {
+                        int i = row | (x & 31);
+                        int id = ids[i];
+                        if (id <= 0 || fill != null && fill[i] != 0) {
+                            continue;
+                        }
+                        double dx = x + 0.5 - fx;
+                        double d2 = dx * dx + dy * dy + dz * dz;
+                        if (d2 > r2 || best.size() >= limit && d2 >= best.peek().distanceSq()) {
+                            continue;
+                        }
+                        if (!type.test(id)) {
+                            continue;
+                        }
+                        best.add(new Found(x, y, z, id, d2));
+                        if (best.size() > limit) {
+                            best.poll();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static double clamp(double v, double lo, double hi) {
+        return v < lo ? lo : Math.min(v, hi);
     }
 }

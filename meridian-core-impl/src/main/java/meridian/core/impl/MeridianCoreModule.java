@@ -263,7 +263,7 @@ public class MeridianCoreModule implements ProxyModule {
                 ctx.scheduler(), new meridian.core.impl.interaction.EntityLookup() {
                     @Override
                     public meridian.core.impl.interaction.EntityTarget target(int id) {
-                        return entityTracker.entityTarget(id, PlayerImpl.EYE_HEIGHT);
+                        return entityTracker.entityTarget(id, movement.eyeHeight());
                     }
 
                     @Override
@@ -286,7 +286,7 @@ public class MeridianCoreModule implements ProxyModule {
                     public meridian.core.impl.interaction.StatSheet selfStats() {
                         return playerState.sheet();
                     }
-                });
+                }, movement::eyeHeight);
         ctx.services().provide(InteractionControl.class, interactionControl);
         // A forged ApplyForce pushes the headless body, as the client's own push would.
         interactionControl.forceBody(movement.forceBody());
@@ -298,7 +298,7 @@ public class MeridianCoreModule implements ProxyModule {
         // writing its own logic.
         WorldImpl world = new WorldImpl(
                 chunkTracker, worldState, entityTracker, inventoryTracker, interactionControl,
-                movementControl);
+                movementControl, ctx.scheduler(), movement::eyeHeight);
         ctx.services().provide(World.class, world);
 
         // --- Chat: telling the player what happened ---------------------------

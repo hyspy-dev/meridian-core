@@ -115,6 +115,8 @@ public final class InteractionControlImpl implements InteractionControl {
     private final Scheduler scheduler;
     /** Network id &rarr; that entity as an aim (where it stands, its own interactions), or {@code null}. */
     private final EntityLookup entities;
+    /** The player's eyes above its feet: its model's, as core's movement keeps it. */
+    private final java.util.function.DoubleSupplier eyeHeight;
 
     private volatile ProxySession session;
     private volatile BlockPosition targetBlock;
@@ -244,8 +246,9 @@ public final class InteractionControlImpl implements InteractionControl {
     public InteractionControlImpl(InteractionRegistry registry, InventoryTracker inventory,
                                   ChunkTracker chunks, WorldStateImpl worldState,
                                   ItemRegistry items, Scheduler scheduler,
-                                  EntityLookup entities) {
+                                  EntityLookup entities, java.util.function.DoubleSupplier eyeHeight) {
         this.entities = entities;
+        this.eyeHeight = eyeHeight;
         this.registry = registry;
         this.inventory = inventory;
         this.chunks = chunks;
@@ -767,6 +770,72 @@ public final class InteractionControlImpl implements InteractionControl {
         return enqueueForge(() -> forgeDigSwing(aim));
     }
 
+    /**
+     * How long after the last swing the block's own change is waited for: it comes beside the
+     * server's word on the chain, and the two can arrive a tick or two apart.
+     */
+    private static final Duration BREAK_SETTLE = Duration.ofMillis(500);
+
+    @Override
+    public CompletableFuture<Boolean> breakBlock(BlockPos pos, int maxSwings) {
+        if (pos == null || maxSwings < 1 || session == null) {
+            return CompletableFuture.completedFuture(false);
+        }
+        int x = pos.x(), y = pos.y(), z = pos.z();
+        int start = chunks.blockIdAt(x, y, z);
+        if (!chunks.known(x, y, z) || start <= 0) {
+            return CompletableFuture.completedFuture(false);  // nothing known there, or nothing to break
+        }
+        // Gone once core is sent the cell holding something else: air, or what the block breaks into.
+        java.util.function.BooleanSupplier gone = () -> chunks.known(x, y, z) && chunks.blockIdAt(x, y, z) != start;
+        CompletableFuture<Boolean> done = new CompletableFuture<>();
+        ChunkTracker.CellWatch watch = chunks.watchCell(x, y, z, () -> {
+            if (!done.isDone() && gone.getAsBoolean()) {
+                answerBreak(done, () -> true, Duration.ZERO);
+            }
+        });
+        done.whenComplete((v, e) -> watch.close());
+        swingUntilGone(pos, 1, maxSwings, gone, done);
+        return done;
+    }
+
+    /** Swing {@code n} of {@code max}, once the one before has been answered - as a held button swings. */
+    private void swingUntilGone(BlockPos pos, int n, int max, java.util.function.BooleanSupplier gone,
+                                CompletableFuture<Boolean> done) {
+        if (done.isDone()) {
+            return;
+        }
+        digSwing(pos).whenComplete((outcome, error) -> {
+            if (done.isDone()) {
+                return;
+            }
+            if (gone.getAsBoolean()) {
+                answerBreak(done, () -> true, Duration.ZERO);
+                return;
+            }
+            boolean sent = outcome != null && outcome.status() != InteractionOutcome.Status.NOT_SENT;
+            if (sent && n < max) {
+                swingUntilGone(pos, n + 1, max, gone, done);
+            } else if (!sent && n == 1) {
+                answerBreak(done, () -> false, Duration.ZERO);   // nothing went out
+            } else {
+                // The last swing, or no more could be sent: its block change may still be coming.
+                answerBreak(done, gone, BREAK_SETTLE);
+            }
+        });
+    }
+
+    /** Answers a break on the scheduler after {@code delay}, with what {@code answer} says then. */
+    private void answerBreak(CompletableFuture<Boolean> done, java.util.function.BooleanSupplier answer,
+                             Duration delay) {
+        Runnable complete = () -> done.complete(answer.getAsBoolean());
+        try {
+            scheduler.schedule(complete, delay);
+        } catch (RejectedExecutionException terminated) {
+            complete.run();
+        }
+    }
+
     @Override
     public CompletableFuture<InteractionOutcome> hitEntity(int entityId) {
         return enqueueForge(() -> forgeAim(entityId, InteractionType.Primary));
@@ -807,8 +876,6 @@ public final class InteractionControlImpl implements InteractionControl {
         return hold == null || hold.isNegative() ? 0f : hold.toNanos() / 1_000_000_000f;
     }
 
-    /** Where the eyes are above the feet - the server's player eye height. */
-    private static final double EYE_HEIGHT = 1.6;
     /** What the server adds to the use distance before it refuses ({@code MAX_INTERACTION_DISTANCE_BUFFER}). */
     private static final double REACH_BUFFER = 2.0;
     /** The creative reach a client has unless its settings say otherwise. */
@@ -831,7 +898,7 @@ public final class InteractionControlImpl implements InteractionControl {
             reach = Math.max(reach, CREATIVE_REACH);
         }
         reach += REACH_BUFFER;
-        return target.withReach(target.distanceSqFromEyes(EYE_HEIGHT) <= reach * reach);
+        return target.withReach(target.distanceSqFromEyes(eyeHeight.getAsDouble()) <= reach * reach);
     }
 
     /**

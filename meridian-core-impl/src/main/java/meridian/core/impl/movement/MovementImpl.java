@@ -210,6 +210,15 @@ public final class MovementImpl implements Movement {
         return reach.capabilities();
     }
 
+    /**
+     * The player's eyes above its feet, standing: its model's, scaled, once the server has sent it -
+     * for a game's player too, whose body this does not move - and the default player model's until
+     * then. Core's one source for where the eyes are.
+     */
+    public double eyeHeight() {
+        return around.shape().eyeHeight();
+    }
+
     @Override
     public OptionalDouble standAt(BlockPos cell) {
         return terrain.standAt(cell.x(), cell.y(), cell.z());

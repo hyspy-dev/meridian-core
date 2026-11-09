@@ -188,6 +188,37 @@ public final class WorldStateImpl implements WorldState {
         return List.copyOf(out);
     }
 
+    /** Name &rarr; id, with the count of types it was built from: rebuilt when more types arrive. */
+    private record NameIndex(int from, Map<String, Integer> ids) {}
+
+    private volatile NameIndex idsByName = new NameIndex(-1, Map.of());
+
+    @Override
+    public java.util.OptionalInt blockId(String name) {
+        if (name == null) {
+            return java.util.OptionalInt.empty();
+        }
+        if (BlockView.EMPTY.equals(name)) {
+            return java.util.OptionalInt.of(0);
+        }
+        NameIndex index = idsByName;
+        int count = serverTruth.size();
+        if (index.from() != count) {
+            Map<String, Integer> built = new HashMap<>(count * 2);
+            for (Map.Entry<Integer, BlockType> e : serverTruth.entrySet()) {
+                String n = e.getValue().name;
+                // Two types of one name: the lower id, as the api's own answer has it.
+                if (n != null) {
+                    built.merge(n, e.getKey(), Math::min);
+                }
+            }
+            index = new NameIndex(count, Map.copyOf(built));
+            idsByName = index;
+        }
+        Integer id = index.ids().get(name);
+        return id == null ? java.util.OptionalInt.empty() : java.util.OptionalInt.of(id);
+    }
+
     @Override
     public BlockView blockTypeAt(BlockPos pos) {
         throw new UnsupportedOperationException(

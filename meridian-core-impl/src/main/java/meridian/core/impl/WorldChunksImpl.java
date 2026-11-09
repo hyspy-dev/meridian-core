@@ -99,7 +99,7 @@ final class WorldChunksImpl implements WorldChunks {
         int count = worldState.blockTypeCount();
         Map<Integer, String> names = new HashMap<>();
         for (BlockView type : worldState.allBlockTypes()) {
-            names.put(type.id(), type.name() == null ? "Unknown" : type.name());
+            names.put(type.id(), type.name() == null ? BlockView.UNKNOWN : type.name());
         }
         Map<Integer, String> built = Map.copyOf(names);
         blocks = built;

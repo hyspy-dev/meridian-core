@@ -22,9 +22,6 @@ import meridian.core.api.World;
  */
 final class PlayerImpl implements Player {
 
-    /** Hytale humanoid eye-height above the feet position, in blocks.
-     *  Matches the origin of the in-game crosshair raycast. */
-    static final double EYE_HEIGHT = 1.6;
     /** Default reach for {@link #lookedAtBlock()} when callers don't pass
      *  an explicit range. Picked to sit just past the player's normal
      *  block-interact reach — far enough that the picker matches the
@@ -39,16 +36,20 @@ final class PlayerImpl implements Player {
     private final InventoryTracker inventory;
     private final InteractionControl interactions;
     private final MovementControlImpl movement;
+    /** The eyes above the feet: the player's model's (core's movement keeps it). */
+    private final java.util.function.DoubleSupplier eyeHeight;
     /** Set by {@link WorldImpl} after the world finishes building; needed
      *  to scan blocks for {@link #lookedAtBlock}. */
     private volatile World world;
 
     PlayerImpl(EntityTrackerImpl entities, InventoryTracker inventory,
-               InteractionControl interactions, MovementControlImpl movement) {
+               InteractionControl interactions, MovementControlImpl movement,
+               java.util.function.DoubleSupplier eyeHeight) {
         this.entities = entities;
         this.inventory = inventory;
         this.interactions = interactions;
         this.movement = movement;
+        this.eyeHeight = eyeHeight;
     }
 
     /** Late binding from {@link WorldImpl} once its own fields are set. */
@@ -59,6 +60,12 @@ final class PlayerImpl implements Player {
     @Override
     public Vec3 position() {
         return entities.localPosition().orElse(null);
+    }
+
+    @Override
+    public Vec3 eyePosition() {
+        Vec3 feet = position();
+        return feet == null ? null : new Vec3(feet.x(), feet.y() + eyeHeight.getAsDouble(), feet.z());
     }
 
     @Override
@@ -74,18 +81,18 @@ final class PlayerImpl implements Player {
     @Override
     public Optional<BlockPos> lookedAtBlock(double maxRange) {
         World w = world;
-        Vec3 origin = position();
+        Vec3 origin = eyePosition();
         Vec3 dir = lookDirection();
         if (w == null || origin == null || dir == null) return Optional.empty();
         return raycastFirstSolid(w, origin, dir, maxRange);
     }
 
     /**
-     * Amanatides &amp; Woo voxel DDA — walks the ray cell-by-cell, returns
+     * Amanatides &amp; Woo voxel DDA — walks the ray cell-by-cell from the eyes, returns
      * the first non-air cell it encounters within {@code maxRange}.
      */
-    private static Optional<BlockPos> raycastFirstSolid(World world, Vec3 origin, Vec3 dir, double maxRange) {
-        double ox = origin.x(), oy = origin.y() + EYE_HEIGHT, oz = origin.z();
+    private static Optional<BlockPos> raycastFirstSolid(World world, Vec3 eyes, Vec3 dir, double maxRange) {
+        double ox = eyes.x(), oy = eyes.y(), oz = eyes.z();
         double dx = dir.x(), dy = dir.y(), dz = dir.z();
 
         int x = (int) Math.floor(ox);
