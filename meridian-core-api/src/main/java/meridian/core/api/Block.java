@@ -37,11 +37,41 @@ public interface Block {
      * {@code roll * 16 + pitch * 4 + yaw}, each a quarter turn ({@code 0} none, {@code 1} 90°,
      * {@code 2} 180°, {@code 3} 270°). {@code 0} is unturned - also what a block that cannot turn,
      * or one whose chunk is not loaded, reports. The prefab format stores the same number.
+     * {@link Rotation} reads, turns and compares it.
      */
     int rotation();
 
     /** Whether this block is air (or its chunk is not loaded). */
     boolean isAir();
+
+    /**
+     * Whether this cell holds what placing block {@code id} facing {@code rotation} would leave in
+     * it - the question a copy asks of the world it was made from.
+     *
+     * <ul>
+     *   <li>The block: {@code id} itself or another state of its family ({@link BlockView#sameBlock}) -
+     *       an open door where a shut one was copied is the door, the state being the player's to
+     *       change.</li>
+     *   <li>The facing: compared as a facing ({@link Rotation#same}), not as a number, and only for
+     *       a block whose facing is part of what it is ({@link BlockView#rotationMatters}).</li>
+     *   <li>A cell a bigger block only {@linkplain #isFiller() fills} matches nothing: the block
+     *       stands on another cell.</li>
+     *   <li>{@code id} 0 ({@link BlockView#EMPTY}) matches air, and so does a cell whose chunk is not
+     *       loaded - as {@link #isAir()} has it.</li>
+     * </ul>
+     *
+     * <p>{@code matches(id, rotation())} asks about the block alone, whichever way it faces.
+     */
+    default boolean matches(int id, int rotation) {
+        if (id <= 0) {
+            return isAir();
+        }
+        BlockView t = type();
+        if (t == null || isFiller() || !t.sameBlock(id)) {
+            return false;
+        }
+        return !t.rotationMatters() || Rotation.same(rotation(), rotation);
+    }
 
     /**
      * Whether this cell is the block's own, or one a bigger block only reaches into.

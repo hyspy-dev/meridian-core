@@ -33,7 +33,9 @@ final class CoreCommands {
             + "entities [range] [players] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | dodge | assets | asset <path> | "
             + "movement | body | stand <x y z> | surface <x z> [wait <s>] | safe <x y z> [radius] | hurts <x y z> | move <walk|jump|mantle|drop|leap|swim|climb|fly> <x y z> [walk|run|sprint] | "
             + "predict <kind> <x y z> [gait] [trace] | hold <forward> <strafe> <yaw> [jump] [crouch] [sprint] [walk] [fly] | hold off | halt | "
-            + "spoof [gamemode <creative|adventure|off> | flight|stamina|death|dropflying|swimming|nofall <on|off>]";
+            + "spoof [gamemode <creative|adventure|off> | flight|stamina|death|dropflying|swimming|nofall <on|off>] | "
+            + "rotation <index> [rotate <x|y|z> [quarters] | mirror <x|y|z>] | matches <x y z> <name|id> [rotation] | "
+            + "glow <name-contains> [r g b] | glow off";
 
     private final ModuleContext ctx;
     private final SessionHolder sessions;
@@ -66,6 +68,9 @@ final class CoreCommands {
                 yield CompletableFuture.completedFuture(Map.of("pos", p, "known", world().known(p.x(), p.y(), p.z())));
             }
             case "find" -> CompletableFuture.completedFuture(find(args));
+            case "rotation" -> CompletableFuture.completedFuture(rotation(args));
+            case "matches" -> CompletableFuture.completedFuture(matches(args));
+            case "glow" -> CompletableFuture.completedFuture(glow(args));
             case "look" -> CompletableFuture.completedFuture(look());
             case "inv" -> CompletableFuture.completedFuture(inventory());
             case "stats" -> CompletableFuture.completedFuture(stats());
@@ -464,6 +469,11 @@ final class CoreCommands {
         if (b.rotation() != 0) {
             out.put("rotation", b.rotation());
         }
+        if (b.type() != null && !b.type().states().isEmpty()) {
+            out.put("state", b.type().state());
+            out.put("family", b.type().family());
+            out.put("states", b.type().states());
+        }
         if (b.isFiller()) {
             out.put("filler", b.filler());
             out.put("base", b.base());
@@ -676,6 +686,94 @@ final class CoreCommands {
     }
 
     // ------------------------------------------------------------------
+
+    /** What core's {@link meridian.core.api.Rotation} makes of an orientation number, and of turning it. */
+    private static Map<String, Object> rotation(List<String> args) {
+        if (args.size() < 2) {
+            throw new IllegalArgumentException("rotation <index> [rotate <axis> [quarters] | mirror <axis>]");
+        }
+        int index = Integer.parseInt(args.get(1));
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("index", index);
+        out.put("yaw", meridian.core.api.Rotation.yaw(index));
+        out.put("pitch", meridian.core.api.Rotation.pitch(index));
+        out.put("roll", meridian.core.api.Rotation.roll(index));
+        out.put("canonical", meridian.core.api.Rotation.canonical(index));
+        if (args.size() >= 4) {
+            int axis = switch (args.get(3).toLowerCase(Locale.ROOT)) {
+                case "x" -> meridian.core.api.Rotation.X;
+                case "y" -> meridian.core.api.Rotation.Y;
+                case "z" -> meridian.core.api.Rotation.Z;
+                default -> throw new IllegalArgumentException("axis x, y or z");
+            };
+            switch (args.get(2).toLowerCase(Locale.ROOT)) {
+                case "rotate" -> out.put("result", meridian.core.api.Rotation.rotate(index, axis,
+                        args.size() > 4 ? Integer.parseInt(args.get(4)) : 1));
+                case "mirror" -> out.put("result", meridian.core.api.Rotation.mirror(index, axis));
+                default -> throw new IllegalArgumentException("rotate or mirror");
+            }
+        }
+        return out;
+    }
+
+    /** {@link Block#matches} of a cell against a block by name or id, facing a given way (its own by default). */
+    private Map<String, Object> matches(List<String> args) {
+        if (args.size() < 5) {
+            throw new IllegalArgumentException("matches <x y z> <name|id> [rotation]");
+        }
+        BlockPos p = at(args, 1);
+        Block b = world().blockAt(p.x(), p.y(), p.z());
+        String what = args.get(4);
+        int id;
+        if (what.chars().allMatch(Character::isDigit)) {
+            id = Integer.parseInt(what);
+        } else {
+            meridian.core.api.WorldState ws = ctx.services().get(meridian.core.api.WorldState.class)
+                    .orElseThrow(() -> new IllegalStateException("no WorldState service"));
+            id = ws.blockId(what).orElseThrow(() -> new IllegalArgumentException("no block type " + what));
+        }
+        int rotation = args.size() > 5 ? Integer.parseInt(args.get(5)) : b.rotation();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("pos", p);
+        out.put("id", id);
+        out.put("rotation", rotation);
+        out.put("matches", b.matches(id, rotation));
+        return out;
+    }
+
+    /** The rule key the {@code glow} command owns. */
+    private static final String GLOW_RULE = "core-commands:glow";
+
+    /**
+     * A rule over every block type for the stand: the types whose name contains the text glow, or
+     * no rule at all. Answers how many types the rule touches - what an emit of it should carry.
+     */
+    private Map<String, Object> glow(List<String> args) {
+        if (args.size() < 2) {
+            throw new IllegalArgumentException("glow <name-contains> [r g b] | glow off");
+        }
+        meridian.core.api.WorldState ws = ctx.services().get(meridian.core.api.WorldState.class)
+                .orElseThrow(() -> new IllegalStateException("no WorldState service"));
+        Map<String, Object> out = new LinkedHashMap<>();
+        String text = args.get(1);
+        if ("off".equalsIgnoreCase(text)) {
+            ws.clearOverrideAll(GLOW_RULE);
+            out.put("rule", "off");
+            return out;
+        }
+        int r = args.size() > 4 ? Integer.parseInt(args.get(2)) : 15;
+        int g = args.size() > 4 ? Integer.parseInt(args.get(3)) : 15;
+        int bl = args.size() > 4 ? Integer.parseInt(args.get(4)) : 15;
+        ws.overrideAllBlockTypes(GLOW_RULE, v -> v.name() != null && v.name().contains(text)
+                ? v.withLight(1, r, g, bl) : v);
+        List<Integer> ids = ws.allBlockTypes().stream()
+                .filter(v -> v.name() != null && v.name().contains(text))
+                .map(meridian.core.api.BlockView::id).sorted().toList();
+        out.put("rule", text);
+        out.put("types", ids);
+        out.put("catalog", ws.allBlockTypes().size());
+        return out;
+    }
 
     private World world() {
         return ctx.services().get(World.class).orElseThrow(() -> new IllegalStateException("no World service"));

@@ -2,6 +2,7 @@ package meridian.core.impl.movement;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import meridian.core.api.Rotation;
 import meridian.protocol.Hitbox;
 import meridian.protocol.UpdateType;
 import meridian.protocol.packets.assets.UpdateBlockHitboxes;
@@ -46,9 +47,9 @@ public final class BlockHitboxes {
         if (boxes == null || boxes.length == 0) {
             return UNIT;
         }
-        int yaw = rotation & 3;
-        int pitch = (rotation >> 2) & 3;
-        int roll = (rotation >> 4) & 3;
+        int yaw = Rotation.yaw(rotation);
+        int pitch = Rotation.pitch(rotation);
+        int roll = Rotation.roll(rotation);
         double[][] out = new double[boxes.length][];
         for (int i = 0; i < boxes.length; i++) {
             Hitbox h = boxes[i];

@@ -46,6 +46,37 @@ public interface BlockView {
     }
 
     /**
+     * The block this one is a state of, by id: the type its states were declared on. Its own id for
+     * a block without states, and for the declaring type itself. Two block types are one block in
+     * different states - an open door and a shut one, a lit lamp and a dark one - exactly when
+     * their {@code family()} is the same.
+     *
+     * <p>The server's rule ({@code BlockType.getDefaultStateKey}: the type a state was declared in),
+     * which it hands the client as the {@code "default"} entry of every state type's
+     * {@link #states()}. Not the names: a state type is called {@code *<block>_State_Definitions_<state>},
+     * but nothing stops another block's name from looking like that.
+     */
+    default int family() {
+        Integer declared = states().get(DEFAULT_STATE);
+        return declared != null && declared >= 0 ? declared : id();
+    }
+
+    /**
+     * Whether block {@code id} is this block - this very type, or another state of its family. Needs
+     * no catalog: a family's every member lists all the others in its {@link #states()}.
+     */
+    default boolean sameBlock(int id) {
+        return id == id() || id == family() || states().containsValue(id);
+    }
+
+    /**
+     * The state name the server gives a block that is no state of anything ({@code
+     * StateData.NULL_STATE_ID}): what {@link #state()} reports then, and the key under which a state
+     * type's {@link #states()} names the type it belongs to ({@link #family()}).
+     */
+    String DEFAULT_STATE = "default";
+
+    /**
      * Whether which way this block faces is part of what it is. False for a block that cannot be
      * turned, and for one the game turns at random as it is placed - two rocks facing different
      * ways are still the same rock.
@@ -116,8 +147,11 @@ public interface BlockView {
     BlockView withVisible(boolean visible);
 
     /**
-     * Makes the block emit light of the given radius and colour
-     * (each channel 0–255). Used by, e.g., a night-vision module.
+     * Makes the block emit light of the given radius and colour. Each channel is 0..15, not
+     * 0..255: the server keeps a block's light as three 4-bit values (its asset's {@code "#RGB"},
+     * a {@code "#RRGGBB"} divided by 17) and floods it out one step a block, so the largest channel
+     * is how far it reaches and how bright it is. A value outside 0..15 is taken as the nearest end.
+     * Used by, e.g., a night-vision module.
      */
     BlockView withLight(int radius, int red, int green, int blue);
 

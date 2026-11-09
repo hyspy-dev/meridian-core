@@ -470,9 +470,18 @@ public final class InteractionControlImpl implements InteractionControl {
 
     /** Vertical orientation for an {@code UpDown} block — flipped on a ceiling. */
     private static BlockRotation upDownRotation(BlockFace face) {
-        return face == BlockFace.Down
-                ? new BlockRotation(Rotation.None, Rotation.OneEighty, Rotation.None)
-                : new BlockRotation(Rotation.None, Rotation.None, Rotation.None);
+        return blockRotation(face == BlockFace.Down
+                ? meridian.core.api.Rotation.of(0, 2, 0) : meridian.core.api.Rotation.NONE);
+    }
+
+    /** The protocol's quarter turns, by count: None, Ninety, OneEighty, TwoSeventy. */
+    private static final Rotation[] QUARTERS = Rotation.values();
+
+    /** The server's orientation number as the three quarter turns a placement carries. */
+    static BlockRotation blockRotation(int index) {
+        return new BlockRotation(QUARTERS[meridian.core.api.Rotation.yaw(index)],
+                QUARTERS[meridian.core.api.Rotation.pitch(index)],
+                QUARTERS[meridian.core.api.Rotation.roll(index)]);
     }
 
     /** The block id a {@code PlaceBlockInteraction} in {@code compiled} places, or -1. */
@@ -505,13 +514,7 @@ public final class InteractionControlImpl implements InteractionControl {
         }
         double deg = Math.toDegrees(lookYaw);
         int q = (int) Math.floorMod(Math.round(deg / 90.0), 4L);
-        Rotation yaw = switch (q) {
-            case 1 -> Rotation.Ninety;
-            case 2 -> Rotation.OneEighty;
-            case 3 -> Rotation.TwoSeventy;
-            default -> Rotation.None;
-        };
-        return new BlockRotation(yaw, Rotation.None, Rotation.None);
+        return blockRotation(meridian.core.api.Rotation.of(q, 0, 0));
     }
 
     /**
@@ -524,9 +527,9 @@ public final class InteractionControlImpl implements InteractionControl {
      */
     private static BlockRotation axisRotation(BlockFace face) {
         return switch (face) {
-            case Up, Down     -> new BlockRotation(Rotation.None,   Rotation.None,   Rotation.None);
-            case North, South -> new BlockRotation(Rotation.None,   Rotation.Ninety, Rotation.None);
-            case East, West   -> new BlockRotation(Rotation.Ninety, Rotation.Ninety, Rotation.None);
+            case Up, Down     -> blockRotation(meridian.core.api.Rotation.NONE);
+            case North, South -> blockRotation(meridian.core.api.Rotation.of(0, 1, 0));
+            case East, West   -> blockRotation(meridian.core.api.Rotation.of(1, 1, 0));
             default           -> null;
         };
     }
