@@ -1,6 +1,8 @@
 package meridian.core.impl.movement;
 
 import io.netty.channel.ChannelHandlerContext;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
@@ -118,7 +120,7 @@ final class GameWheel {
         synchronized (this) {
             w = wheel;
             if (w != null) {
-                return Optional.of(w);
+                return Optional.of(w.hold());
             }
             p = at;
             if (p == null || !canTake()) {
@@ -134,7 +136,10 @@ final class GameWheel {
                     f != null ? f.yaw : l != null ? l.yaw : 0f, onGround, flying);
         }
         log.info("meridian-core: took the player's body at ({}, {}, {})", p.x, p.y, p.z);
-        return Optional.of(w);
+        synchronized (this) {
+            // Lost again before the first hold was made: nothing to hold.
+            return wheel == w ? Optional.of(w.hold()) : Optional.empty();
+        }
     }
 
     /** The game has the body back, for this reason; nothing when it has it already. */
@@ -155,6 +160,14 @@ final class GameWheel {
         body.letGo();
         log.info("meridian-core: the player's body is the game's again ({})", why);
         w.done.complete(why);
+        List<Hold> holds;
+        synchronized (this) {
+            holds = List.copyOf(w.holds);
+            w.holds.clear();
+        }
+        for (Hold h : holds) {
+            h.own.complete(why);
+        }
     }
 
     /** Core's teleport while it holds the body: the body goes there. */
@@ -258,22 +271,60 @@ final class GameWheel {
         };
     }
 
-    private final class Held implements Movement.Wheel {
+    /**
+     * Core's hold on the body, from the first take to the game getting it back - shared by every
+     * {@link Hold} on it.
+     */
+    private final class Held {
         final CompletableFuture<Movement.Release> done = new CompletableFuture<>();
+        /** Who holds it now; the body goes back when the last lets go. Guarded by the wheel. */
+        final List<Hold> holds = new ArrayList<>();
+
+        /** A new hold on it, for one more taker. Called with the wheel's monitor held. */
+        Hold hold() {
+            Hold h = new Hold(this);
+            holds.add(h);
+            return h;
+        }
+    }
+
+    /**
+     * One taker's hold: its own to give back. The body is the game's again once every hold is
+     * given back, or at once when the game takes it (a key, a teleport, a death, a world).
+     */
+    private final class Hold implements Movement.Wheel {
+        final Held of;
+        final CompletableFuture<Movement.Release> own = new CompletableFuture<>();
+
+        Hold(Held of) {
+            this.of = of;
+        }
 
         @Override
         public boolean held() {
-            return wheel == this;
+            synchronized (GameWheel.this) {
+                return wheel == of && of.holds.contains(this);
+            }
         }
 
         @Override
         public void release() {
-            end(this, Movement.Release.GIVEN_BACK);
+            boolean last;
+            synchronized (GameWheel.this) {
+                if (wheel != of || !of.holds.remove(this)) {
+                    return;
+                }
+                last = of.holds.isEmpty();
+            }
+            if (last) {
+                end(of, Movement.Release.GIVEN_BACK);
+            }
+            own.complete(Movement.Release.GIVEN_BACK);
         }
 
         @Override
         public CompletableFuture<Movement.Release> released() {
-            return done;
+            return own;
         }
     }
 }

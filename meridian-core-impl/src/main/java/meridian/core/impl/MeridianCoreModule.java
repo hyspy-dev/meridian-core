@@ -419,6 +419,20 @@ public class MeridianCoreModule implements ProxyModule {
         // The server's prefab files, and the world taken into one - no packets, only the format.
         ctx.services().provide(meridian.core.api.Prefabs.class, new PrefabsImpl(world, worldState));
 
+        // --- Navigator and Worker: going somewhere, and working on blocks there -------------
+        // On core's own services only - movement, the world, the hands - for any module that
+        // takes the player somewhere or puts them to work (a miner, a builder).
+        meridian.core.impl.navigation.Walker walker = new meridian.core.impl.navigation.Walker(
+                movement, world, interactionControl, ctx.offloadExecutor(), ctx.getLogger());
+        ctx.services().provide(meridian.core.api.Navigator.class, walker);
+        meridian.core.impl.navigation.WorkerImpl worker = new meridian.core.impl.navigation.WorkerImpl(
+                movement, world, interactionControl, entityTracker, walker, ctx.offloadExecutor(), ctx.getLogger());
+        ctx.services().provide(meridian.core.api.Worker.class, worker);
+        meridian.core.impl.navigation.NavigationPanel navigation =
+                new meridian.core.impl.navigation.NavigationPanel(walker, worker, movement, interactionControl);
+        navigation.register(ctx);
+        SettingsSpec.Builder settings = SettingsSpec.builder();
+
         // --- 0.6+ only: features whose packets an older protocol does not carry ------
         // Everything in this block references packets absent from the 0.5.9 line. On that line
         // these files are dropped and this block is removed, so the services are simply never
@@ -443,12 +457,13 @@ public class MeridianCoreModule implements ProxyModule {
         // No-clip's toggle lives here, in core, because that is where the whole feature lives on
         // this line. A single switch, and a line that says what it is - client-side only, held on
         // against a server that is authoritative for the real thing.
-        ctx.registerSettings(SettingsSpec.builder()
-                .bool("noclip", "No-clip (client-side; server still collides)", false,
+        settings.bool("noclip", "No-clip (client-side; server still collides)", false,
                         noClip::setEnabled)
-                .liveText("No-clip", () -> noClip.isEnabled() ? "on (client-side)" : "off")
-                .build());
+                .liveText("No-clip", () -> noClip.isEnabled() ? "on (client-side)" : "off");
         // --- end 0.6+ only ----------------------------------------------------------
+
+        settings.section("Go to a point", navigation.section());
+        ctx.registerSettings(settings.build());
 
         // The services above on the proxy's command channel: core <conn> ..., for driving and
         // checking the forged chains from outside the game.
@@ -456,7 +471,8 @@ public class MeridianCoreModule implements ProxyModule {
 
         ctx.getLogger().info("meridian-core ready (WorldState, EntityTracker, CameraControl, "
                 + "InteractionRegistry, InventoryTracker, ChunkTracker, ItemRegistry, "
-                + "InteractionControl, World, MapMarkers, Waypoints, Chat, SelectionBus, ClientSpoof)");
+                + "InteractionControl, World, MapMarkers, Waypoints, Chat, SelectionBus, ClientSpoof, "
+                + "Navigator, Worker)");
     }
 
     /** Writes the map, never letting a storage problem take the session down with it. */

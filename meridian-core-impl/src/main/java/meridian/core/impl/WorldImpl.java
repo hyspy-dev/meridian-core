@@ -19,6 +19,8 @@ import meridian.api.module.Scheduler;
 import meridian.core.api.Block;
 import meridian.core.api.BlockPos;
 import meridian.core.api.BlockView;
+import meridian.core.api.Face;
+import meridian.core.api.InteractionOutcome;
 import meridian.core.api.InteractionControl;
 import meridian.core.api.Player;
 import meridian.core.api.Vec3;
@@ -229,6 +231,34 @@ public final class WorldImpl implements World {
             done.complete(OptionalInt.empty());
         }
         return done;
+    }
+
+    /** Where a block placed into a cell is set against: below first, then the sides, then above. */
+    private static final int[][] PLACE_AGAINST = {
+            {0, -1, 0}, {1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1}, {0, 1, 0}
+    };
+
+    @Override
+    public CompletableFuture<InteractionOutcome> placeAt(BlockPos cell, Face orient) {
+        if (cell == null || !known(cell.x(), cell.y(), cell.z()) || !blockAt(cell.x(), cell.y(), cell.z()).isAir()) {
+            return CompletableFuture.completedFuture(InteractionOutcome.notSent());
+        }
+        for (int[] d : PLACE_AGAINST) {
+            int nx = cell.x() + d[0];
+            int ny = cell.y() + d[1];
+            int nz = cell.z() + d[2];
+            if (!known(nx, ny, nz)) {
+                continue;
+            }
+            Block neighbour = blockAt(nx, ny, nz);
+            if (neighbour.isAir()) {
+                continue;
+            }
+            // The neighbour's face that looks at the cell: cell - neighbour.
+            Face against = Face.ofDelta(-d[0], -d[1], -d[2]);
+            return neighbour.place(against, orient != null ? orient : against);
+        }
+        return CompletableFuture.completedFuture(InteractionOutcome.notSent());
     }
 
     @Override

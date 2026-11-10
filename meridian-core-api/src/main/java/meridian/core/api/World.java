@@ -225,6 +225,19 @@ public interface World {
         return Optional.empty();
     }
 
+    /**
+     * Places the held block into the empty {@code cell}, as a player builds there: against a
+     * neighbour that holds a block - the one below first, then the four sides, then the one above
+     * ({@link Block#place(Face, Face)} on it). The block faces as if placed against {@code orient};
+     * {@code null} faces it by the side it attaches to.
+     *
+     * @return how the server ran it; {@link InteractionOutcome#notSent()} when the cell holds a
+     *         block, is not known, or has no neighbour to place against
+     */
+    default CompletableFuture<InteractionOutcome> placeAt(BlockPos cell, Face orient) {
+        return CompletableFuture.completedFuture(InteractionOutcome.notSent());
+    }
+
     /** The local player, or empty until a client session is live. */
     Optional<Player> player();
 }

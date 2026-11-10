@@ -28,7 +28,7 @@ import meridian.core.api.World;
  */
 final class CoreCommands {
 
-    static final String USAGE = "pos | block <x y z> | reach [item] | besttool <x y z> | known <x y z> | find <name-contains> [radius] [limit] | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
+    static final String USAGE = "pos | block <x y z> | reach [item] | besttool <x y z> | placeat <x y z> [face] | known <x y z> | find <name-contains> [radius] [limit] | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
             + "use|plant|water <x y z> | hit|dig <x y z> [times] | break <x y z> [maxSwings] | place <x y z> [face] [orient] | "
             + "entities [range] [players] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | dodge | assets | asset <path> | "
             + "movement | body | stand <x y z> | surface <x z> [wait <s>] | safe <x y z> [radius] | hurts <x y z> | move <walk|jump|mantle|drop|leap|swim|climb|fly> <x y z> [walk|run|sprint] | "
@@ -169,6 +169,12 @@ final class CoreCommands {
                             out.put("block", block(p));
                             return out;
                         });
+            }
+            case "placeat" -> {
+                // The held block into an empty cell, against whichever neighbour it has.
+                BlockPos cell = at(args, 1);
+                Face orient = args.size() > 4 ? face(args.get(4)) : null;
+                yield after(world().placeAt(cell, orient).thenApply(List::of), cell);
             }
             case "place" -> {
                 BlockPos target = at(args, 1);

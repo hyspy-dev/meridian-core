@@ -49,9 +49,11 @@ public interface Movement {
      *
      * <p>The game gets the body back where it is on {@link Wheel#release}, and by itself the moment
      * the player presses a key that moves them, the server teleports them, they die or they go to
-     * another world; the move under way then ends {@code INTERRUPTED}. There is one wheel: taking
-     * it while it is held hands out the same one. A headless session's body is core's anyway - its
-     * wheel is held until the session ends, and releasing it does nothing.
+     * another world; the move under way then ends {@code INTERRUPTED}. Each taker gets a hold of
+     * its own, to give back for itself: the body goes back to the game when the last hold is given
+     * back, so one module done with it does not take it from another still at work. A headless
+     * session's body is core's anyway - its wheel is held until the session ends, and releasing
+     * it does nothing.
      *
      * @return the wheel; empty when the body cannot be taken - the game has not said where it is,
      *         the server has not sent the movement settings, the player rides a mount - or core is
@@ -61,16 +63,22 @@ public interface Movement {
         return java.util.Optional.empty();
     }
 
-    /** Core's hold on the player's body ({@link #take}). */
+    /** One taker's hold on the player's body ({@link #take}). */
     interface Wheel {
 
-        /** Whether core still holds the body. */
+        /** Whether this hold still holds the body. */
         boolean held();
 
-        /** Gives the body back to the game where it is now; nothing once it is back. */
+        /**
+         * Gives this hold back; the game gets the body back, where it is now, once no hold is left.
+         * Nothing once this hold is gone.
+         */
         void release();
 
-        /** Completes once the game has the body back, with why. */
+        /**
+         * Completes once this hold is gone, with why: given back by its taker, or the body taken
+         * by the game - a key, a teleport, a death, a world.
+         */
         CompletableFuture<Release> released();
     }
 
