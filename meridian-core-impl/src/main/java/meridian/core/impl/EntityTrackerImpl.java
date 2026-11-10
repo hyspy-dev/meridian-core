@@ -79,6 +79,8 @@ final class EntityTrackerImpl implements EntityTracker {
     private final Map<Integer, double[]> hitboxes = new ConcurrentHashMap<>();
     /** The stack's item id of each dropped item on the ground ({@code Item} component). */
     private final Map<Integer, String> items = new ConcurrentHashMap<>();
+    /** ... and how many it is. */
+    private final Map<Integer, Integer> quantities = new ConcurrentHashMap<>();
     private volatile int localId = Integer.MIN_VALUE;
     private volatile Vec3 localPos;
     /** Look orientation of the local player, radians. */
@@ -109,6 +111,7 @@ final class EntityTrackerImpl implements EntityTracker {
                 effects.remove(id);
                 hitboxes.remove(id);
                 items.remove(id);
+                quantities.remove(id);
             }
         }
         if (packet.updates != null) {
@@ -160,6 +163,7 @@ final class EntityTrackerImpl implements EntityTracker {
                     } else if (component instanceof ItemUpdate item && item.item != null
                             && item.item.itemId != null && !item.item.itemId.isEmpty()) {
                         items.put(update.networkId, item.item.itemId);
+                        quantities.put(update.networkId, item.item.quantity);
                     } else if (component instanceof PlayerSkinUpdate) {
                         // Only players carry a skin component — definitive
                         // player marker, independent of the model path.
@@ -298,6 +302,11 @@ final class EntityTrackerImpl implements EntityTracker {
     @Override
     public Optional<String> itemOf(int entityId) {
         return Optional.ofNullable(items.get(entityId));
+    }
+
+    @Override
+    public int itemQuantityOf(int entityId) {
+        return quantities.getOrDefault(entityId, 0);
     }
 
     @Override

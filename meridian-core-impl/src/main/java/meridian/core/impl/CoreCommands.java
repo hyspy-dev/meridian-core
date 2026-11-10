@@ -28,7 +28,7 @@ import meridian.core.api.World;
  */
 final class CoreCommands {
 
-    static final String USAGE = "pos | block <x y z> | reach [item] | besttool <x y z> | placeat <x y z> [face] | known <x y z> | find <name-contains> [radius] [limit] | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
+    static final String USAGE = "pos | block <x y z> | reach [item] | besttool <x y z> | placeat <x y z> [face] | chest <x y z> | known <x y z> | find <name-contains> [radius] [limit] | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
             + "use|plant|water <x y z> | hit|dig <x y z> [times] | break <x y z> [maxSwings] | place <x y z> [face] [orient] | "
             + "entities [range] [players] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | dodge | assets | asset <path> | "
             + "movement | body | stand <x y z> | surface <x z> [wait <s>] | safe <x y z> [radius] | hurts <x y z> | move <walk|jump|mantle|drop|leap|swim|climb|fly> <x y z> [walk|run|sprint] | "
@@ -169,6 +169,22 @@ final class CoreCommands {
                             out.put("block", block(p));
                             return out;
                         });
+            }
+            case "chest" -> {
+                // What core last saw in the container at x y z, and which one was opened last.
+                BlockPos p = at(args, 1);
+                meridian.core.api.Containers c = ctx.services().get(meridian.core.api.Containers.class).orElse(null);
+                Map<String, Object> out = new LinkedHashMap<>();
+                meridian.core.api.Containers.Contents in = c == null ? null : c.at(p);
+                List<Map<String, Object>> items = new java.util.ArrayList<>();
+                if (in != null) {
+                    in.items().forEach((slot, item) -> items.add(Map.of("slot", slot, "id", item.id(),
+                            "quantity", item.quantity())));
+                }
+                out.put("seen", in != null);
+                out.put("items", items);
+                out.put("last", c == null ? null : c.lastOpened().orElse(null));
+                yield CompletableFuture.completedFuture(out);
             }
             case "placeat" -> {
                 // The held block into an empty cell, against whichever neighbour it has.

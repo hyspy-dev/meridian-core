@@ -60,6 +60,11 @@ public interface EntityTracker {
         return Optional.empty();
     }
 
+    /** How many items a dropped item on the ground is - its stack's size; {@code 0} for anything else. */
+    default int itemQuantityOf(int entityId) {
+        return 0;
+    }
+
     /**
      * Nameplate text shown above the entity — the player's username for players,
      * or a custom display name for named entities. Populated from observed

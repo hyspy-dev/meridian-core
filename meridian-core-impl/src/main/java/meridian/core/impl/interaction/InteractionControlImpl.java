@@ -785,14 +785,36 @@ public final class InteractionControlImpl implements InteractionControl {
     @Override
     public java.util.OptionalDouble digReach(String itemId) {
         String item = itemId == null || itemId.isEmpty() ? null : itemId;
+        double sweep = sweepOf(item);
+        if (Double.isNaN(sweep)) {
+            return java.util.OptionalDouble.empty();
+        }
+        if (sweep > 0) {
+            return java.util.OptionalDouble.of(sweep);
+        }
+        GameMode own = entities.selfGameMode();
+        GameMode mode = own != null ? own : GameMode.Adventure;
+        double use = items.useDistance(item, mode);
+        return java.util.OptionalDouble.of(mode == GameMode.Creative ? Math.max(use, CREATIVE_REACH) : use);
+    }
+
+    @Override
+    public boolean digSweeps(String itemId) {
+        return sweepOf(itemId == null || itemId.isEmpty() ? null : itemId) > 0;
+    }
+
+    /**
+     * How far the item's dig sweeps: a BreakBlock in its swing breaks the block aimed at (a
+     * pickaxe's) - {@code 0}; with none, what breaks blocks is a sweep the server makes (a shovel's,
+     * whose HitBlock forks break them) - its reach. A sweep beside a BreakBlock hits entities only.
+     * {@code NaN} when the swing is not known.
+     */
+    private double sweepOf(String item) {
         OptionalInt rootId = resolveRoot(InteractionType.Primary, item);
         CompiledInteraction root = rootId.isEmpty() ? null : compileRoot(rootId.getAsInt());
         if (root == null) {
-            return java.util.OptionalDouble.empty();
+            return Double.NaN;
         }
-        // A BreakBlock in the swing breaks the block aimed at (a pickaxe's); with none, what breaks
-        // blocks is a sweep the server makes (a shovel's, whose HitBlock forks break them) - only
-        // as far as it reaches. A sweep beside a BreakBlock hits entities only.
         boolean aimed = false;
         double sweep = Double.MAX_VALUE;
         for (FlatOp op : root.ops()) {
@@ -807,13 +829,7 @@ public final class InteractionControlImpl implements InteractionControl {
                 }
             }
         }
-        if (!aimed && sweep < Double.MAX_VALUE) {
-            return java.util.OptionalDouble.of(sweep);
-        }
-        GameMode own = entities.selfGameMode();
-        GameMode mode = own != null ? own : GameMode.Adventure;
-        double use = items.useDistance(item, mode);
-        return java.util.OptionalDouble.of(mode == GameMode.Creative ? Math.max(use, CREATIVE_REACH) : use);
+        return !aimed && sweep < Double.MAX_VALUE ? sweep : 0;
     }
 
     /** How far from where it starts a selector takes things in; 0 when it does not say. */

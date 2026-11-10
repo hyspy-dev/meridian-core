@@ -230,6 +230,12 @@ final class BlockViewImpl implements BlockView {
     }
 
     /** The underlying (possibly transformed) protocol block type. */
+    @Override
+    public String gatherType() {
+        return blockType.gathering == null || blockType.gathering.breaking == null ? null
+                : blockType.gathering.breaking.gatherType;
+    }
+
     BlockType toBlockType() {
         return blockType;
     }

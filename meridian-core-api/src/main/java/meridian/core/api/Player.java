@@ -68,6 +68,11 @@ public interface Player {
      */
     int hotbarSlotOf(String substring);
 
+    /** The id of the item in a hotbar slot, or {@code null} when it is empty. */
+    default String hotbarItem(int slot) {
+        return null;
+    }
+
     /**
      * The hotbar slot holding what breaks {@code block} best, by the server's rule: a tool whose
      * spec names the block's gather type (stone, soil, wood...) at no less than the block's quality,
@@ -80,6 +85,27 @@ public interface Player {
      */
     default int bestToolSlot(BlockView block) {
         return -1;
+    }
+
+    /**
+     * {@link #bestToolSlot(BlockView)} among the items whose ids {@code among} accepts only: the
+     * slot of the strongest of them whose spec names the block's gather type at no less than its
+     * quality.
+     *
+     * @return the slot, or {@code -1} when none of them is such a tool - no bare hand here
+     */
+    default int bestToolSlot(BlockView block, java.util.function.Predicate<String> among) {
+        return -1;
+    }
+
+    /**
+     * How hard the item in a hotbar slot hits the block: the power of its spec for the block's gather
+     * type - the server's own number; a bare hand or an item that is no tool counts as the hand.
+     *
+     * @return the power; {@code 0} when it does not break the block at all, or the block takes no breaking
+     */
+    default double toolPower(int slot, BlockView block) {
+        return 0;
     }
 
     /**

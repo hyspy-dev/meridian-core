@@ -426,7 +426,8 @@ public class MeridianCoreModule implements ProxyModule {
                 movement, world, interactionControl, ctx.offloadExecutor(), ctx.getLogger());
         ctx.services().provide(meridian.core.api.Navigator.class, walker);
         meridian.core.impl.navigation.WorkerImpl worker = new meridian.core.impl.navigation.WorkerImpl(
-                movement, world, interactionControl, entityTracker, walker, ctx.offloadExecutor(), ctx.getLogger());
+                movement, world, interactionControl, entityTracker, walker, containers, playerState,
+                () -> sessionHolder.get().orElse(null), ctx.offloadExecutor(), ctx.getLogger());
         ctx.services().provide(meridian.core.api.Worker.class, worker);
         meridian.core.impl.navigation.NavigationPanel navigation =
                 new meridian.core.impl.navigation.NavigationPanel(walker, worker, movement, interactionControl);

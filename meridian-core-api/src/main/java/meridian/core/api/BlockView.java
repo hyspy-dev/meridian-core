@@ -141,6 +141,16 @@ public interface BlockView {
     }
 
     /**
+     * What the block is gathered as when broken - the server's gather type: {@code Soils},
+     * {@code Rocks}, {@code SoftBlocks}, {@code OreCopper}... - the tools that break it are the ones
+     * whose specs name it ({@link Player#bestToolSlot}). {@code null} for a block that is not broken
+     * that way, or before the type came.
+     */
+    default String gatherType() {
+        return null;
+    }
+
+    /**
      * Re-points every cube face at {@code remap.apply(path)}. A {@code null} result keeps
      * that face as it is, so a partial map only touches what it names. Faces of every
      * weighted variant go through the function; the block's draw mode is untouched.

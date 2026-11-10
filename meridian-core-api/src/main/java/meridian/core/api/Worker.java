@@ -36,6 +36,25 @@ public interface Worker {
         }
     }
 
+    /**
+     * Which tool to take for a block: the hotbar's best for it ({@link Player#bestToolSlot}), unless
+     * the block's gather type has a tool preferred for it here and the hotbar holds one that breaks
+     * it.
+     *
+     * <p>Near the edge of {@link Access#within} a tool whose dig is a sweep ({@link
+     * InteractionControl#digSweeps} - a shovel's arc breaks every block in it that it breaks) is
+     * passed over, preferred or best, for one that breaks only the block it aims at, when a block
+     * just outside the box would go with it. With no such tool it is taken all the same.
+     *
+     * @param prefer a gather type ({@code Soils}) to a part of the id of the tool to take for it
+     *               ({@code Shovel})
+     */
+    record Tools(java.util.Map<String, String> prefer) {
+
+        /** The best tool for each block. */
+        public static final Tools BEST = new Tools(java.util.Map.of());
+    }
+
     /** How getting at a block and breaking it went. */
     enum Outcome {
         /** Broken. */
@@ -80,7 +99,26 @@ public interface Worker {
      * never standing on the block nor on one in the way. What {@code access} allows is broken
      * first; a block next to lava is left.
      */
-    CompletableFuture<Dug> dig(BlockPos target, Access access);
+    default CompletableFuture<Dug> dig(BlockPos target, Access access) {
+        return dig(target, access, Tools.BEST);
+    }
+
+    /** {@link #dig(BlockPos, Access)}, with the tool for each block it breaks chosen by {@code tools}. */
+    CompletableFuture<Dug> dig(BlockPos target, Access access, Tools tools);
+
+    /**
+     * Puts items into the container at {@code chest} - a chest, a barrel: walks to within reach,
+     * opens it, moves the stacks in from the hotbar, the storage and the backpack as a shift-click
+     * does, and closes it. What does not fit stays with the player.
+     *
+     * @param items how many of each item, by id, to put in at most
+     * @return how many of each went in; none when the container could not be got to, did not open,
+     *         or is full
+     */
+    default CompletableFuture<java.util.Map<String, Integer>> deposit(BlockPos chest,
+                                                                     java.util.Map<String, Integer> items) {
+        return CompletableFuture.completedFuture(java.util.Map.of());
+    }
 
     /**
      * Walks over the drops lying in {@code area}, nearest first, into each one's own cell (the

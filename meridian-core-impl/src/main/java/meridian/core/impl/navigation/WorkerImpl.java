@@ -10,8 +10,18 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.function.Supplier;
+import meridian.api.session.ProxySession;
 import meridian.core.api.Block;
 import meridian.core.api.BlockBox;
+import meridian.core.api.BlockView;
+import meridian.core.api.PlayerState;
+import meridian.core.impl.ContainersImpl;
+import meridian.protocol.SmartMoveType;
+import meridian.protocol.packets.inventory.SmartMoveItemStack;
+import meridian.protocol.packets.window.CloseWindow;
 import meridian.core.api.BlockPos;
 import meridian.core.api.EntityTracker;
 import meridian.core.api.Goal;
@@ -48,6 +58,12 @@ public final class WorkerImpl implements Worker {
     static final double REACH_MARGIN = 0.3;
     /** Once there, a block is still tried this much past the reach it was chosen for. */
     static final double REACH_SLACK = 0.4;
+    /** A sweep hitting a block this hard breaks it in a swing or two: a shovel's 0.4-0.5 on soil, not its 0.05 on stone. */
+    static final double SWEEP_BREAKS = 0.2;
+    /** A container is opened from no farther than this, eyes to its middle - inside the game's reach of 5. */
+    static final double USE_REACH = 4.0;
+    /** How long a container is waited for to open, and the stacks moved in to arrive. */
+    static final long WINDOW_WAIT_MS = 2500;
 
     private final Movement movement;
     private final World world;
@@ -55,6 +71,12 @@ public final class WorkerImpl implements Worker {
     /** Where the drops lie; {@code null} where core does not offer it - then none are walked to. */
     private final EntityTracker entities;
     private final Navigator navigator;
+    /** What is in the containers opened; {@code null} where core does not offer it - then nothing is put in one. */
+    private final ContainersImpl containers;
+    /** The player's inventory, as the server last sent it. */
+    private final PlayerState inventory;
+    /** The session packets of the player's own go out on. */
+    private final Supplier<ProxySession> session;
     private final Executor executor;
     private final Logger log;
     /** The work under way; a new one, or a cancel, moves it on. */
@@ -63,12 +85,16 @@ public final class WorkerImpl implements Worker {
     private volatile CompletableFuture<?> breaking;
 
     public WorkerImpl(Movement movement, World world, InteractionControl interactions, EntityTracker entities,
-                      Navigator navigator, Executor executor, Logger log) {
+                      Navigator navigator, ContainersImpl containers, PlayerState inventory,
+                      Supplier<ProxySession> session, Executor executor, Logger log) {
         this.movement = movement;
         this.world = world;
         this.interactions = interactions;
         this.entities = entities;
         this.navigator = navigator;
+        this.containers = containers;
+        this.inventory = inventory;
+        this.session = session;
         this.executor = executor;
         this.log = log;
     }
@@ -89,8 +115,8 @@ public final class WorkerImpl implements Worker {
     }
 
     @Override
-    public CompletableFuture<Dug> dig(BlockPos target, Access access) {
-        Access how = access == null ? Access.ANY : access;
+    public CompletableFuture<Dug> dig(BlockPos target, Access access, Tools tools) {
+        Rules how = new Rules(access == null ? Access.ANY : access, tools == null ? Tools.BEST : tools);
         return held(id -> {
             List<BlockPos> broken = new ArrayList<>();
             Outcome o = digNow(id, target, how, broken);
@@ -102,6 +128,14 @@ public final class WorkerImpl implements Worker {
     public CompletableFuture<Integer> pickUp(BlockBox area) {
         return held(id -> collect(id, area), 0);
     }
+
+    @Override
+    public CompletableFuture<Map<String, Integer>> deposit(BlockPos chest, Map<String, Integer> items) {
+        return held(id -> depositNow(id, chest, items), Map.of());
+    }
+
+    /** What a dig may break on the way, and the tools it takes. */
+    private record Rules(Access access, Tools tools) {}
 
     /** What a piece of work does, with its id: {@link #live} while the id is the work under way. */
     private interface Job<T> {
@@ -151,7 +185,8 @@ public final class WorkerImpl implements Worker {
      * what may be broken first, first. A place that cannot be reached, or from where something will
      * not break, is passed for the next.
      */
-    private Outcome digNow(int id, BlockPos target, Access access, List<BlockPos> broken) throws Exception {
+    private Outcome digNow(int id, BlockPos target, Rules rules, List<BlockPos> broken) throws Exception {
+        Access access = rules.access();
         if (!world.known(target.x(), target.y(), target.z()) || world.blockAt(target.x(), target.y(), target.z()).isAir()) {
             return Outcome.NOTHING;
         }
@@ -159,7 +194,7 @@ public final class WorkerImpl implements Worker {
             return Outcome.LAVA;
         }
         Set<BlockPos> tried = new HashSet<>();
-        double reach = equip(target);
+        double reach = equip(target, rules);
         boolean placed = false;
         boolean got = false;
         for (int attempt = 0; attempt < STAND_TRIES && live(id); attempt++) {
@@ -181,7 +216,7 @@ public final class WorkerImpl implements Worker {
                 }
             }
             got = true;
-            if (breakFromHere(id, target, access, s.passage(), broken)) {
+            if (breakFromHere(id, target, rules, s.passage(), broken)) {
                 return Outcome.BROKEN;
             }
         }
@@ -193,8 +228,9 @@ public final class WorkerImpl implements Worker {
      * Breaks the way in to the block, then what is still on the line from the eyes to it, then the
      * block - each with its own best tool, and only within that tool's reach.
      */
-    private boolean breakFromHere(int id, BlockPos target, Access access, List<BlockPos> passage,
+    private boolean breakFromHere(int id, BlockPos target, Rules rules, List<BlockPos> passage,
                                   List<BlockPos> broken) throws Exception {
+        Access access = rules.access();
         for (BlockPos p : passage) {
             if (!live(id)) {
                 return false;
@@ -202,7 +238,7 @@ public final class WorkerImpl implements Worker {
             if (world.blockAt(p.x(), p.y(), p.z()).isAir()) {
                 continue;
             }
-            if (!breakInReach(p, broken)) {
+            if (!breakInReach(p, rules, broken)) {
                 return false;
             }
         }
@@ -219,7 +255,7 @@ public final class WorkerImpl implements Worker {
             if (access.within() != null && !next.equals(target) && !access.within().contains(next)) {
                 return false;
             }
-            if (!breakInReach(next, broken)) {
+            if (!breakInReach(next, rules, broken)) {
                 return false;
             }
             if (next.equals(target)) {
@@ -230,8 +266,8 @@ public final class WorkerImpl implements Worker {
     }
 
     /** Takes the best tool for the block and breaks it, if the body is within that tool's reach. */
-    private boolean breakInReach(BlockPos pos, List<BlockPos> broken) throws Exception {
-        double reach = equip(pos);
+    private boolean breakInReach(BlockPos pos, Rules rules, List<BlockPos> broken) throws Exception {
+        double reach = equip(pos, rules);
         Vec3 eye = eye();
         if (eye == null || distSq(eye, centre(pos)) > (reach + REACH_SLACK) * (reach + REACH_SLACK)) {
             log.info("meridian-core: {} is out of reach ({})", text(pos), String.format(Locale.ROOT, "%.1f", reach));
@@ -245,14 +281,14 @@ public final class WorkerImpl implements Worker {
     }
 
     /**
-     * Takes the hotbar's tool that breaks the block best; how far a dig with what is held then
-     * reaches - a shovel's sweep is short - inside {@link #REACH}.
+     * Takes the tool for the block ({@link Tools}); how far a dig with what is held then reaches - a
+     * shovel's sweep is short - inside {@link #REACH}.
      */
-    private double equip(BlockPos pos) throws Exception {
+    private double equip(BlockPos pos, Rules rules) throws Exception {
         Block b = world.blockAt(pos.x(), pos.y(), pos.z());
         Player player = world.player().orElse(null);
         if (player != null && !b.isAir()) {
-            int slot = player.bestToolSlot(b.type());
+            int slot = toolFor(player, pos, b.type(), rules);
             if (slot >= 0 && slot != player.activeHotbarSlot()) {
                 interactions.switchHotbarSlot(slot).get(5, TimeUnit.SECONDS);
             }
@@ -260,6 +296,62 @@ public final class WorkerImpl implements Worker {
         String held = player == null ? null : player.heldItem();
         double reach = interactions.digReach(held).orElse(REACH);
         return Math.max(1.0, Math.min(REACH, reach - REACH_MARGIN));
+    }
+
+    /**
+     * The hotbar slot to break the block with: the tool preferred for its gather type, else the best
+     * - near the edge of the box it may break in, one that does not sweep blocks outside it away.
+     */
+    private int toolFor(Player player, BlockPos pos, BlockView type, Rules rules) {
+        BlockBox within = rules.access().within();
+        java.util.function.Predicate<String> safe = id -> within == null || !interactions.digSweeps(id)
+                || !spills(player, id, pos, within);
+        String part = type == null || type.gatherType() == null ? null : rules.tools().prefer().get(type.gatherType());
+        if (part != null) {
+            int slot = player.bestToolSlot(type, id -> id.contains(part) && safe.test(id));
+            if (slot >= 0) {
+                return slot;
+            }
+        }
+        int best = player.bestToolSlot(type);
+        if (within != null && best >= 0) {
+            String bestId = player.hotbarItem(best);
+            if (bestId != null && !safe.test(bestId)) {
+                int aimed = player.bestToolSlot(type, safe);
+                if (aimed >= 0) {
+                    return aimed;
+                }
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Whether a dig with this sweeping tool at {@code pos} could break a block just outside the box:
+     * one beside it (the 26 around) that the tool breaks in earnest.
+     */
+    private boolean spills(Player player, String itemId, BlockPos pos, BlockBox within) {
+        int slot = player.hotbarSlotOf(itemId);
+        if (slot < 0) {
+            return false;
+        }
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    int x = pos.x() + dx;
+                    int y = pos.y() + dy;
+                    int z = pos.z() + dz;
+                    if (within.contains(x, y, z) || !world.known(x, y, z)) {
+                        continue;
+                    }
+                    Block n = world.blockAt(x, y, z);
+                    if (!n.isAir() && player.toolPower(slot, n.type()) >= SWEEP_BREAKS) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     /** Turns to the block and swings until it is gone. */
@@ -537,6 +629,136 @@ public final class WorkerImpl implements Worker {
             }
         }
         return picked;
+    }
+
+    // ------------------------------------------------------------------
+    // A container
+    // ------------------------------------------------------------------
+
+    /** The player's own sections the stacks go from, by the names core keeps them under, with their ids. */
+    private static final Map<String, Integer> SECTIONS = Map.of("Hotbar", -1, "Storage", -2, "Backpack", -9);
+
+    /**
+     * Goes to the container, opens it, moves the stacks in as a shift-click does ({@code
+     * PutInHotbarOrWindow}: from the hotbar or the storage into the open window first) and closes
+     * it; how many of each went in, by what the player holds before and after.
+     */
+    private Map<String, Integer> depositNow(int id, BlockPos chest, Map<String, Integer> want) throws Exception {
+        ProxySession s = session.get();
+        if (containers == null || inventory == null || s == null || want == null || want.isEmpty()
+                || !world.known(chest.x(), chest.y(), chest.z()) || world.blockAt(chest.x(), chest.y(), chest.z()).isAir()) {
+            return Map.of();
+        }
+        Vec3 eye = eye();
+        if (eye == null) {
+            return Map.of();
+        }
+        if (distSq(eye, centre(chest)) > USE_REACH * USE_REACH) {
+            NavResult r = navigator.goTo(Goal.near(chest, 2)).get(3, TimeUnit.MINUTES);
+            if (!live(id) || r.status() != NavResult.Status.ARRIVED) {
+                return Map.of();
+            }
+        }
+        Map<String, Integer> before = held();
+        movement.face(chest).get(2, TimeUnit.SECONDS);
+        int window = containers.windowAt(chest);
+        if (window < 0) {
+            containers.reaching(chest);
+            interactions.useOnBlock(chest).get(10, TimeUnit.SECONDS);
+            for (long waited = 0; waited < WINDOW_WAIT_MS && window < 0; waited += 100) {
+                Thread.sleep(100);
+                window = containers.windowAt(chest);
+            }
+        }
+        if (window < 0) {
+            log.info("meridian-core: the container at {} did not open", text(chest));
+            return Map.of();
+        }
+        try {
+            Map<String, Integer> left = new HashMap<>(want);
+            for (Map.Entry<String, PlayerState.Section> e : inventory.inventories().entrySet()) {
+                Integer section = SECTIONS.get(e.getKey());
+                if (section == null) {
+                    continue;
+                }
+                for (Map.Entry<Integer, meridian.core.api.Containers.Item> slot : e.getValue().items().entrySet()) {
+                    meridian.core.api.Containers.Item item = slot.getValue();
+                    int need = item == null ? 0 : left.getOrDefault(item.id(), 0);
+                    if (need <= 0) {
+                        continue;
+                    }
+                    int n = Math.min(need, item.quantity());
+                    SmartMoveItemStack move = new SmartMoveItemStack();
+                    move.fromSectionId = section;
+                    move.fromSlotId = slot.getKey();
+                    move.quantity = n;
+                    move.moveType = SmartMoveType.PutInHotbarOrWindow;
+                    s.sendToServer(move);
+                    left.put(item.id(), need - n);
+                }
+            }
+            // What went in shows as what the player no longer holds.
+            Map<String, Integer> moved = Map.of();
+            for (long waited = 0; waited < WINDOW_WAIT_MS; waited += 100) {
+                Thread.sleep(100);
+                Map<String, Integer> now = moved(before, held(), want);
+                if (now.equals(moved) && !now.isEmpty() && waited >= 500) {
+                    break;
+                }
+                moved = now;
+            }
+            return moved;
+        } finally {
+            close(s, window);
+        }
+    }
+
+    /** Closes a window the player has open: the server told, and a game shown it shut. */
+    private void close(ProxySession s, int window) {
+        CloseWindow close = new CloseWindow();
+        close.id = window;
+        s.sendToServer(close);
+        boolean headless;
+        try {
+            headless = s.headless() != null;
+        } catch (NoSuchMethodError olderProxy) {
+            headless = false;
+        }
+        if (!headless) {
+            CloseWindow shut = new CloseWindow();
+            shut.id = window;
+            s.sendToClient(shut);
+        }
+        containers.closed(window);
+    }
+
+    /** How many of each item the player holds, over the hotbar, the storage and the backpack. */
+    private Map<String, Integer> held() {
+        Map<String, Integer> out = new HashMap<>();
+        for (Map.Entry<String, PlayerState.Section> e : inventory.inventories().entrySet()) {
+            if (!SECTIONS.containsKey(e.getKey())) {
+                continue;
+            }
+            for (meridian.core.api.Containers.Item item : e.getValue().items().values()) {
+                if (item != null) {
+                    out.merge(item.id(), item.quantity(), Integer::sum);
+                }
+            }
+        }
+        return out;
+    }
+
+    /** How many of each wanted item the player holds fewer of now. */
+    private static Map<String, Integer> moved(Map<String, Integer> before, Map<String, Integer> after,
+                                              Map<String, Integer> want) {
+        Map<String, Integer> out = new HashMap<>();
+        for (String item : want.keySet()) {
+            int gone = before.getOrDefault(item, 0) - after.getOrDefault(item, 0);
+            if (gone > 0) {
+                out.put(item, gone);
+            }
+        }
+        return out;
     }
 
     // ------------------------------------------------------------------

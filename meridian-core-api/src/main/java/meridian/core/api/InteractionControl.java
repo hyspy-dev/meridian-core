@@ -174,6 +174,14 @@ public interface InteractionControl {
     }
 
     /**
+     * Whether a dig with this item is a sweep the server makes - a shovel's arc, which breaks every
+     * block in it that the item breaks, not only the one aimed at.
+     */
+    default boolean digSweeps(String itemId) {
+        return false;
+    }
+
+    /**
      * Forges one attack on an entity: the held item's {@code Primary} swing, reporting the
      * entity as what it hit. The server takes a player's entity hits from the client and runs
      * the item's hit (its damage, knockback, effects) on the entity - as when the player clicks
