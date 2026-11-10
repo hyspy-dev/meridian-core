@@ -789,13 +789,31 @@ public final class InteractionControlImpl implements InteractionControl {
         if (Double.isNaN(sweep)) {
             return java.util.OptionalDouble.empty();
         }
-        if (sweep > 0) {
-            return java.util.OptionalDouble.of(sweep);
-        }
+        return java.util.OptionalDouble.of(sweep > 0 ? sweep : useDistance(item));
+    }
+
+    @Override
+    public java.util.OptionalDouble useReach(String itemId) {
+        return java.util.OptionalDouble.of(useDistance(itemId == null || itemId.isEmpty() ? null : itemId));
+    }
+
+    /**
+     * The server's reach with the item in hand, before its buffer ({@code getPlayerInteractionDistanceSq}):
+     * the item's use distance for the game mode, in Creative at least the client's creative reach.
+     */
+    private double useDistance(String item) {
         GameMode own = entities.selfGameMode();
         GameMode mode = own != null ? own : GameMode.Adventure;
         double use = items.useDistance(item, mode);
-        return java.util.OptionalDouble.of(mode == GameMode.Creative ? Math.max(use, CREATIVE_REACH) : use);
+        return mode == GameMode.Creative ? Math.max(use, creativeReach) : use;
+    }
+
+    /**
+     * The client's creative reach, as its preferences tell the server - clamped as the server
+     * clamps it. Until they come, the server's own default.
+     */
+    void onPreferences(meridian.protocol.packets.player.SyncPlayerPreferences prefs) {
+        creativeReach = Math.max(0, Math.min(MAX_CREATIVE_REACH, prefs.creativeInteractionDistance));
     }
 
     @Override
@@ -949,6 +967,10 @@ public final class InteractionControlImpl implements InteractionControl {
     private static final double REACH_BUFFER = 2.0;
     /** The creative reach a client has unless its settings say otherwise. */
     private static final double CREATIVE_REACH = 10.0;
+    /** The most creative reach the server takes from a client's settings. */
+    private static final double MAX_CREATIVE_REACH = 128.0;
+    /** The creative reach the client's preferences set ({@link #onPreferences}). */
+    private volatile double creativeReach = CREATIVE_REACH;
 
     /**
      * An entity as an aim, with whether the player reaches it - the server's
@@ -961,13 +983,8 @@ public final class InteractionControlImpl implements InteractionControl {
         if (target == null) {
             return null;
         }
-        GameMode own = entities.selfGameMode();
-        GameMode mode = own != null ? own : GameMode.Adventure;
-        double reach = items.useDistance(inventory.itemInHandId(), mode);
-        if (mode == GameMode.Creative) {
-            reach = Math.max(reach, CREATIVE_REACH);
-        }
-        reach += REACH_BUFFER;
+        String held = inventory.itemInHandId();
+        double reach = useDistance(held == null || held.isEmpty() ? null : held) + REACH_BUFFER;
         return target.withReach(target.distanceSqFromEyes(eyeHeight.getAsDouble()) <= reach * reach);
     }
 

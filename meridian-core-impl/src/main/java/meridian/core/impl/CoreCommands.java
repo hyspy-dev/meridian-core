@@ -144,12 +144,14 @@ final class CoreCommands {
             case "water" -> after(interactions().waterBlock(at(args, 1)).thenApply(List::of), at(args, 1));
             case "dig" -> after(repeat(times(args, 4), () -> interactions().digSwing(at(args, 1))), at(args, 1));
             case "reach" -> {
-                // How far a dig with an item reaches (the held one without an id).
+                // How far a dig and a use with an item reach (the held one without an id).
                 String item = args.size() > 1 ? args.get(1) : world().player().map(Player::heldItem).orElse(null);
                 java.util.OptionalDouble r = interactions().digReach(item);
+                java.util.OptionalDouble use = interactions().useReach(item);
                 Map<String, Object> out = new LinkedHashMap<>();
                 out.put("item", item == null ? "" : item);
                 out.put("reach", r.isPresent() ? r.getAsDouble() : -1);
+                out.put("use", use.isPresent() ? use.getAsDouble() : -1);
                 yield CompletableFuture.completedFuture(out);
             }
             case "besttool" -> {

@@ -174,6 +174,19 @@ public interface InteractionControl {
     }
 
     /**
+     * How far from the eyes to a block's middle a use with this item in hand reaches - opening a
+     * chest, a door, an aimed dig: the item's use distance for the player's game mode, as the server
+     * sends it (5 in Adventure unless the item says otherwise); in Creative at least the client's
+     * creative reach (10 unless its settings say otherwise). The server allows 2 more before it
+     * refuses. An empty or {@code null} item is the bare hand.
+     *
+     * @return the distance; empty when core cannot tell
+     */
+    default java.util.OptionalDouble useReach(String itemId) {
+        return java.util.OptionalDouble.empty();
+    }
+
+    /**
      * Whether a dig with this item is a sweep the server makes - a shovel's arc, which breaks every
      * block in it that the item breaks, not only the one aimed at.
      */

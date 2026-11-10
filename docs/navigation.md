@@ -91,9 +91,12 @@ So nobody yanks the body from anyone else:
     every block in it that it breaks, so it would take soft blocks just outside the box with it.
     "Near" means a block it breaks in earnest (power 0.2 or more) is among the 26 around, outside
     the box. With no such other tool, the sweep is taken all the same.
-- **Where from.** A place within that tool's dig reach (`InteractionControl.digReach`):
-  - A pickaxe breaks the block it is aimed at, up to 5 away. 4.5 is used.
-  - A shovel's sweep reaches 2.5.
+- **Where from.** A place within that tool's dig reach (`InteractionControl.digReach`), as the
+  server's config for the item says, kept 0.3 short:
+  - A pickaxe breaks the block it is aimed at, within the item's use distance for the game mode
+    (`InteractionControl.useReach`): 5 in Adventure unless the item says otherwise. In Creative it
+    is at least the client's creative reach, 10 unless its settings say otherwise.
+  - A shovel's sweep reaches as far as its far end: 2.5.
 
   The body stays where it is when it can, and otherwise walks there. It never stands on the block,
   nor on a block it breaks first. Up to 3 places are tried.
@@ -115,7 +118,8 @@ cannot get to is left.
 
 ## How items go into a chest (`Worker.deposit`)
 
-The worker walks to within 4 blocks of the chest and opens it, as a use does. It moves the stacks
+The worker walks within the held item's use reach of the chest (`InteractionControl.useReach`,
+kept 0.3 short) and opens it, as a use does. It moves the stacks
 of the items asked for in from the hotbar, the storage and the backpack, as a shift-click does:
 `SmartMoveItemStack`, `PutInHotbarOrWindow` (from the hotbar or the storage, into the open window
 first). Then it closes the window, on the server and on a game's screen.
@@ -139,7 +143,7 @@ nav <conn> plan <x y z> [radius]   -> the moves (kind, cell, gait), without movi
 nav <conn> cancel                  -> ends the trip and the work under way
 core <conn> placeat <x y z> [face] -> the held block into an empty cell (World.placeAt)
 core <conn> chest <x y z>          -> what core last saw in that container, and which was opened last
-core <conn> reach [item]           -> how far a dig with the item reaches
+core <conn> reach [item]           -> how far a dig (reach) and a use (use) with the item reach
 core <conn> besttool <x y z>       -> the hotbar slot that breaks that block best
 ```
 

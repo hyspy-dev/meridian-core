@@ -42,8 +42,8 @@ import org.slf4j.Logger;
  */
 public final class WorkerImpl implements Worker {
 
-    /** A block is broken from no farther than this, eyes to its middle - inside the game's own reach of 5. */
-    static final double REACH = 4.5;
+    /** The reach taken when core cannot tell the held item's: the server's default use distance, in Adventure. */
+    static final double DEFAULT_REACH = 5.0;
     /** The most swings at one block before it is left. */
     static final int MAX_SWINGS = 30;
     /** How many places to stand are tried for one block before it is left. */
@@ -54,14 +54,12 @@ public final class WorkerImpl implements Worker {
     static final long PICKUP_WAIT_MS = 1500;
     /** A place to break a block from costs this much more for each block to break first. */
     static final double PER_OBSTACLE = 6.0;
-    /** A tool's reach is kept this much short, so the dig still lands from where the body ends up. */
+    /** A reach is kept this much short, so the dig or the use still lands from where the body ends up. */
     static final double REACH_MARGIN = 0.3;
     /** Once there, a block is still tried this much past the reach it was chosen for. */
     static final double REACH_SLACK = 0.4;
     /** A sweep hitting a block this hard breaks it in a swing or two: a shovel's 0.4-0.5 on soil, not its 0.05 on stone. */
     static final double SWEEP_BREAKS = 0.2;
-    /** A container is opened from no farther than this, eyes to its middle - inside the game's reach of 5. */
-    static final double USE_REACH = 4.0;
     /** How long a container is waited for to open, and the stacks moved in to arrive. */
     static final long WINDOW_WAIT_MS = 2500;
 
@@ -281,8 +279,8 @@ public final class WorkerImpl implements Worker {
     }
 
     /**
-     * Takes the tool for the block ({@link Tools}); how far a dig with what is held then reaches - a
-     * shovel's sweep is short - inside {@link #REACH}.
+     * Takes the tool for the block ({@link Tools}); how far a dig with what is held then reaches, as
+     * the server's config for it says - a shovel's sweep is short - kept {@link #REACH_MARGIN} short.
      */
     private double equip(BlockPos pos, Rules rules) throws Exception {
         Block b = world.blockAt(pos.x(), pos.y(), pos.z());
@@ -294,8 +292,8 @@ public final class WorkerImpl implements Worker {
             }
         }
         String held = player == null ? null : player.heldItem();
-        double reach = interactions.digReach(held).orElse(REACH);
-        return Math.max(1.0, Math.min(REACH, reach - REACH_MARGIN));
+        double reach = interactions.digReach(held).orElse(interactions.useReach(held).orElse(DEFAULT_REACH));
+        return Math.max(1.0, reach - REACH_MARGIN);
     }
 
     /**
@@ -653,7 +651,10 @@ public final class WorkerImpl implements Worker {
         if (eye == null) {
             return Map.of();
         }
-        if (distSq(eye, centre(chest)) > USE_REACH * USE_REACH) {
+        Player player = world.player().orElse(null);
+        double reach = Math.max(1.0, interactions.useReach(player == null ? null : player.heldItem())
+                .orElse(DEFAULT_REACH) - REACH_MARGIN);
+        if (distSq(eye, centre(chest)) > reach * reach) {
             NavResult r = navigator.goTo(Goal.near(chest, 2)).get(3, TimeUnit.MINUTES);
             if (!live(id) || r.status() != NavResult.Status.ARRIVED) {
                 return Map.of();
