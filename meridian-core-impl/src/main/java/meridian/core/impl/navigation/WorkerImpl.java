@@ -48,18 +48,37 @@ public final class WorkerImpl implements Worker {
     static final int MAX_SWINGS = 30;
     /** How many places to stand are tried for one block before it is left. */
     static final int STAND_TRIES = 3;
-    /** A drop is walked to within this when its own cell cannot be stood in; the server picks it up within 1.75 of the feet. */
-    static final double PICKUP_NEAR = 1.0;
     /** How long to wait at a drop for the server to take it (a block's drop waits 0.5 s first). */
     static final long PICKUP_WAIT_MS = 1500;
     /** A place to break a block from costs this much more for each block to break first. */
     static final double PER_OBSTACLE = 6.0;
+    /** ... and this much for one inside {@link Access#within}, which is dug anyway. */
+    static final double PER_OWN_OBSTACLE = 0.5;
     /** A reach is kept this much short, so the dig or the use still lands from where the body ends up. */
     static final double REACH_MARGIN = 0.3;
     /** Once there, a block is still tried this much past the reach it was chosen for. */
     static final double REACH_SLACK = 0.4;
     /** A sweep hitting a block this hard breaks it in a swing or two: a shovel's 0.4-0.5 on soil, not its 0.05 on stone. */
     static final double SWEEP_BREAKS = 0.2;
+    /** A block is broken from no farther than this, eyes to its middle, when a place that near will do. */
+    static final double COMFORT = 3.0;
+    /** ... a place farther costs this much more for each block past it: a player steps up to what they dig. */
+    static final double PER_BLOCK_PAST = 1.5;
+    /**
+     * The line from the eyes to a block is this thick, half each side: a line that only gets through
+     * where two blocks meet at an edge or a corner does not get through - a player does not hit
+     * through a crack.
+     */
+    static final double SIGHT_EDGE = 0.12;
+    /**
+     * A place on the far side of a wall from the body costs this much more for each solid block on the
+     * straight line between: it is likely not to be got to, and the walk round is long.
+     */
+    static final double PER_WALL_BETWEEN = 3.0;
+    /** A face aimed at is aimed this far inside the block, from its middle toward the face. */
+    static final double FACE_IN = 0.4;
+    /** A drop is walked to within this of where it lies, feet to it: inside the server's 1.75. */
+    static final double PICKUP_REACH = 1.5;
     /** How long a container is waited for to open, and the stacks moved in to arrive. */
     static final long WINDOW_WAIT_MS = 2500;
 
@@ -124,7 +143,20 @@ public final class WorkerImpl implements Worker {
 
     @Override
     public CompletableFuture<Integer> pickUp(BlockBox area) {
-        return held(id -> collect(id, area), 0);
+        if (area == null) {
+            return CompletableFuture.completedFuture(0);
+        }
+        return held(id -> collect(id, (e, at) -> area.contains((int) Math.floor(at.x()), (int) Math.floor(at.y()),
+                (int) Math.floor(at.z()))), 0);
+    }
+
+    @Override
+    public CompletableFuture<Integer> pickUp(java.util.Collection<Integer> items) {
+        if (items == null || items.isEmpty()) {
+            return CompletableFuture.completedFuture(0);
+        }
+        Set<Integer> these = new HashSet<>(items);
+        return held(id -> collect(id, (e, at) -> these.contains(e)), 0);
     }
 
     @Override
@@ -202,6 +234,8 @@ public final class WorkerImpl implements Worker {
             }
             placed = true;
             tried.add(s.cell());
+            log.info("meridian-core: {} to be broken from {}{} (cost {})", text(target), text(s.cell()),
+                    s.here() ? ", where the body is" : "", String.format(Locale.ROOT, "%.1f", s.cost()));
             if (!s.here()) {
                 NavResult r = navigator.goTo(Goal.at(s.cell())).get(3, TimeUnit.MINUTES);
                 if (!live(id)) {
@@ -357,7 +391,10 @@ public final class WorkerImpl implements Worker {
         if (world.blockAt(pos.x(), pos.y(), pos.z()).isAir()) {
             return true;
         }
-        movement.face(pos).get(2, TimeUnit.SECONDS);
+        Vec3 eye = eye();
+        Vec3 aim = eye == null ? centre(pos) : sight(eye, pos).aim();
+        double d = eye == null ? 1 : Math.sqrt(distSq(eye, aim));
+        movement.face(aim, Math.max(Movement.FACE_WITHIN, Math.atan(0.25 / Math.max(d, 0.5)))).get(2, TimeUnit.SECONDS);
         CompletableFuture<Boolean> run = interactions.breakBlock(pos, MAX_SWINGS);
         breaking = run;
         try {
@@ -432,9 +469,18 @@ public final class WorkerImpl implements Worker {
                         if (passage == null || passage.contains(under)) {
                             continue;
                         }
-                        toBreak = passage.size();
+                        // The way in and what is still on the line: both are broken from here.
+                        Set<BlockPos> all = new HashSet<>(passage);
+                        all.addAll(inTheWay);
+                        toBreak = all.size();
                     }
-                    double cost = toBreak * PER_OBSTACLE + Math.sqrt(distSq(me, eye)) - (isHere ? 2 : 0);
+                    double far = Math.max(0, Math.sqrt(distSq(eye, aim)) - COMFORT) * PER_BLOCK_PAST;
+                    far += isHere ? 0 : PER_WALL_BETWEEN * solidBetween(me, new Vec3(cell.x() + 0.5, feet.getAsDouble(),
+                            cell.z() + 0.5));
+                    // Inside the box what is in the way is dug anyway: breaking it first costs little,
+                    // and the body stays rather than walking round to a clear line.
+                    double perBlock = access.within() != null ? PER_OWN_OBSTACLE : PER_OBSTACLE;
+                    double cost = toBreak * perBlock + Math.sqrt(distSq(me, eye)) - (isHere ? 2 : 0) + far;
                     if (best == null || cost < best.cost()) {
                         best = new Stand(cell, isHere, cost, passage);
                     }
@@ -503,7 +549,69 @@ public final class WorkerImpl implements Worker {
      * first, the target left out; {@code null} when a cell on it is not known.
      */
     private List<BlockPos> obstacles(Vec3 eye, BlockPos target) {
-        Vec3 aim = centre(target);
+        return sight(eye, target).inTheWay();
+    }
+
+    /** A line from the eyes to a point of a block, and what is in its way; {@code inTheWay} null when unknown. */
+    record Sight(Vec3 aim, List<BlockPos> inTheWay) {}
+
+    /**
+     * The best line from the eyes to the block: to its middle, or to the middle of a face turned
+     * toward the eyes (a little inside it) - the one with the fewest blocks in the way, the middle
+     * first when it ties. A player looks at the face they see: a block low in a tunnel's wall is hit on
+     * its face, not through the block over it toward its middle.
+     */
+    private Sight sight(Vec3 eye, BlockPos target) {
+        Vec3 middle = centre(target);
+        List<BlockPos> best = obstaclesTo(eye, target, middle);
+        Vec3 bestAim = middle;
+        if (best != null && best.isEmpty()) {
+            return new Sight(middle, best);
+        }
+        int[][] faces = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+        for (int[] n : faces) {
+            double toEye = n[0] * (eye.x() - middle.x()) + n[1] * (eye.y() - middle.y()) + n[2] * (eye.z() - middle.z());
+            if (toEye <= 0.5) {
+                continue;                                  // the face is turned away, or edge on
+            }
+            Vec3 aim = new Vec3(middle.x() + n[0] * FACE_IN, middle.y() + n[1] * FACE_IN, middle.z() + n[2] * FACE_IN);
+            List<BlockPos> in = obstaclesTo(eye, target, aim);
+            if (in != null && (best == null || in.size() < best.size())) {
+                best = in;
+                bestAim = aim;
+                if (in.isEmpty()) {
+                    break;
+                }
+            }
+        }
+        return new Sight(bestAim, best);
+    }
+
+    /** How many solid blocks the straight line between two places goes through, at the body's middle. */
+    private int solidBetween(Vec3 a, Vec3 b) {
+        double dx = b.x() - a.x();
+        double dz = b.z() - a.z();
+        double dy = b.y() - a.y();
+        int n = Math.max(1, (int) Math.ceil(Math.sqrt(dx * dx + dy * dy + dz * dz) / 0.25));
+        Set<Long> seen = new HashSet<>();
+        int solid = 0;
+        for (int i = 1; i < n; i++) {
+            int x = (int) Math.floor(a.x() + dx * i / n);
+            int y = (int) Math.floor(a.y() + 1.0 + dy * i / n);
+            int z = (int) Math.floor(a.z() + dz * i / n);
+            long k = ((long) x << 40) ^ ((long) (y & 0xFFF) << 28) ^ (z & 0xFFFFFFFL);
+            if (!seen.add(k) || !world.known(x, y, z)) {
+                continue;
+            }
+            if (movement.cell(new BlockPos(x, y, z)).solid()) {
+                solid++;
+            }
+        }
+        return solid;
+    }
+
+    /** What is in the way of the line from the eyes to {@code aim}, a point of the target block. */
+    private List<BlockPos> obstaclesTo(Vec3 eye, BlockPos target, Vec3 aim) {
         double dx = aim.x() - eye.x();
         double dy = aim.y() - eye.y();
         double dz = aim.z() - eye.z();
@@ -520,18 +628,28 @@ public final class WorkerImpl implements Worker {
         double ty = dy == 0 ? Double.MAX_VALUE : (dy > 0 ? y + 1 - eye.y() : eye.y() - y) * tdy;
         double tz = dz == 0 ? Double.MAX_VALUE : (dz > 0 ? z + 1 - eye.z() : eye.z() - z) * tdz;
         List<BlockPos> out = new ArrayList<>();
+        double edge = SIGHT_EDGE / Math.max(1e-6, Math.sqrt(dx * dx + dy * dy + dz * dz));
         for (int guard = 0; guard < 64; guard++) {
             if (x == target.x() && y == target.y() && z == target.z()) {
                 return out;
             }
-            if (!world.known(x, y, z)) {
+            if (!inTheWay(x, y, z, target, out)) {
                 return null;
             }
-            Block b = world.blockAt(x, y, z);
-            if (!b.isAir()) {
-                BlockPos base = b.base();
-                if (!base.equals(target) && !out.contains(base)) {
-                    out.add(base);
+            // Leaving this cell near an edge: the cell across the other face it nearly crosses is in
+            // the way as well - the line is SIGHT_EDGE thick, and does not slip between two blocks.
+            double t = Math.min(tx, Math.min(ty, tz));
+            int step = tx <= ty && tx <= tz ? 0 : ty <= tz ? 1 : 2;
+            if (t < 1) {
+                // A tie is the line through the very edge: the other cell is checked all the more.
+                if (step != 0 && tx - t < edge && !inTheWay(x + sx, y, z, target, out)) {
+                    return null;
+                }
+                if (step != 1 && ty - t < edge && !inTheWay(x, y + sy, z, target, out)) {
+                    return null;
+                }
+                if (step != 2 && tz - t < edge && !inTheWay(x, y, z + sz, target, out)) {
+                    return null;
                 }
             }
             if (tx <= ty && tx <= tz) {
@@ -552,6 +670,56 @@ public final class WorkerImpl implements Worker {
         return out;
     }
 
+    /**
+     * Where to stand to pick up a drop lying where the body cannot stand - on a block under a low
+     * ceiling, in a hole: of the places round it the body stands in, with the feet within
+     * {@link #PICKUP_REACH} of it, the nearest to the body. {@code null} when there is none.
+     */
+    private Goal pickupFrom(Vec3 drop, Vec3 me) {
+        int[] c = Walker.cellOf(drop);
+        BlockPos best = null;
+        double bestD = Double.MAX_VALUE;
+        for (int dy = -2; dy <= 1; dy++) {
+            for (int dx = -2; dx <= 2; dx++) {
+                for (int dz = -2; dz <= 2; dz++) {
+                    BlockPos cell = new BlockPos(c[0] + dx, c[1] + dy, c[2] + dz);
+                    OptionalDouble feet = movement.standAt(cell);
+                    if (feet.isEmpty()) {
+                        continue;
+                    }
+                    Vec3 at = new Vec3(cell.x() + 0.5, feet.getAsDouble(), cell.z() + 0.5);
+                    if (distSq(at, drop) > PICKUP_REACH * PICKUP_REACH) {
+                        continue;
+                    }
+                    double d = distSq(me, at);
+                    if (d < bestD) {
+                        bestD = d;
+                        best = cell;
+                    }
+                }
+            }
+        }
+        return best == null ? null : Goal.at(best);
+    }
+
+    /**
+     * Adds the block at the cell to {@code out} when it is one in the way (not air, not the target);
+     * {@code false} when core does not know the cell.
+     */
+    private boolean inTheWay(int x, int y, int z, BlockPos target, List<BlockPos> out) {
+        if (!world.known(x, y, z)) {
+            return false;
+        }
+        Block b = world.blockAt(x, y, z);
+        if (!b.isAir()) {
+            BlockPos base = b.base();
+            if (!base.equals(target) && !out.contains(base)) {
+                out.add(base);
+            }
+        }
+        return true;
+    }
+
     /** Whether lava is next to the block, so breaking it would let it in. */
     private boolean nearLava(BlockPos p) {
         int[][] around = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
@@ -569,8 +737,9 @@ public final class WorkerImpl implements Worker {
     // ------------------------------------------------------------------
 
     /** Walks over the drops in the area, nearest first, until none is left that can be got to. */
-    private Integer collect(int id, BlockBox area) throws Exception {
-        if (entities == null || area == null) {
+    /** The drops {@code which} takes, by entity and where it lies, walked over nearest first. */
+    private Integer collect(int id, java.util.function.BiPredicate<Integer, Vec3> which) throws Exception {
+        if (entities == null) {
             return 0;
         }
         int picked = 0;
@@ -589,8 +758,7 @@ public final class WorkerImpl implements Worker {
                     continue;
                 }
                 Vec3 at = entities.positionOf(e).orElse(null);
-                if (at == null || !area.contains((int) Math.floor(at.x()), (int) Math.floor(at.y()),
-                        (int) Math.floor(at.z()))) {
+                if (at == null || !which.test(e, at)) {
                     continue;
                 }
                 double d = distSq(me, at);
@@ -605,7 +773,11 @@ public final class WorkerImpl implements Worker {
             }
             int[] c = Walker.cellOf(bestAt);
             BlockPos cell = new BlockPos(c[0], c[1], c[2]);
-            Goal goal = movement.standAt(cell).isPresent() ? Goal.at(cell) : Goal.near(cell, PICKUP_NEAR);
+            Goal goal = movement.standAt(cell).isPresent() ? Goal.at(cell) : pickupFrom(bestAt, me);
+            if (goal == null) {
+                passed.add(best);
+                continue;
+            }
             NavResult r = navigator.goTo(goal).get(3, TimeUnit.MINUTES);
             if (!live(id)) {
                 break;

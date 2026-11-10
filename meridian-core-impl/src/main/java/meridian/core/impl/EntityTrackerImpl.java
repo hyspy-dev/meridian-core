@@ -81,6 +81,8 @@ final class EntityTrackerImpl implements EntityTracker {
     private final Map<Integer, String> items = new ConcurrentHashMap<>();
     /** ... and how many it is. */
     private final Map<Integer, Integer> quantities = new ConcurrentHashMap<>();
+    /** Where each entity was first seen since it came into view: a drop's, where it fell from. */
+    private final Map<Integer, Vec3> firstSeen = new ConcurrentHashMap<>();
     private volatile int localId = Integer.MIN_VALUE;
     private volatile Vec3 localPos;
     /** Look orientation of the local player, radians. */
@@ -112,6 +114,7 @@ final class EntityTrackerImpl implements EntityTracker {
                 hitboxes.remove(id);
                 items.remove(id);
                 quantities.remove(id);
+                firstSeen.remove(id);
             }
         }
         if (packet.updates != null) {
@@ -122,6 +125,7 @@ final class EntityTrackerImpl implements EntityTracker {
                         Vec3 pos = positionOf(transform.transform);
                         if (pos != null) {
                             positions.put(update.networkId, pos);
+                            firstSeen.putIfAbsent(update.networkId, pos);
                         }
                         if (transform.transform != null && transform.transform.bodyOrientation != null) {
                             bodies.put(update.networkId, transform.transform.bodyOrientation);
@@ -307,6 +311,11 @@ final class EntityTrackerImpl implements EntityTracker {
     @Override
     public int itemQuantityOf(int entityId) {
         return quantities.getOrDefault(entityId, 0);
+    }
+
+    @Override
+    public Optional<Vec3> firstSeenAt(int entityId) {
+        return Optional.ofNullable(firstSeen.get(entityId));
     }
 
     @Override

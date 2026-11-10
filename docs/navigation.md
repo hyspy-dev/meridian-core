@@ -140,9 +140,22 @@ middle, as a player's does.
     is at least the client's creative reach, 10 unless its settings say otherwise.
   - A shovel's sweep reaches as far as its far end: 2.5.
 
-  The body stays where it is when it can, and otherwise walks there. It never stands on the block,
-  nor on a block it breaks first. Up to 3 places are tried.
-- **In the way.** What `Access` allows is broken first, each block with its own best tool:
+  The body stays where it is when it can, and otherwise walks there. A place farther than 3 blocks
+  from the block, eyes to its middle, costs more for each block past, so the body steps up to what
+  it digs when a nearer place will do. It never stands on the block, nor on a block it breaks first.
+  Up to 3 places are tried.
+- **The line from the eyes** to the block is 0.12 thick each side: where it passes that near an edge
+  of a block, that block is in the way too. A line that only gets through where two blocks meet at an
+  edge or a corner does not get through: a player does not hit through a crack.
+- **Where on the block.** The line goes to the block's middle, or to the middle of a face turned
+  toward the eyes, whichever has the fewest blocks in the way. A block low in a tunnel's wall is hit on
+  its face, not through the block over it toward its middle. The head turns to that point.
+- **The other side of a wall.** A place costs 3 more for each solid block on the straight line
+  between the body and it: it is likely not to be got to.
+- **Inside the box** (`Access.inside`), a block in the way costs little to break first (0.5 against
+  6), since it is dug anyway: the body stays and digs on rather than walking round to a clear line.
+- **In the way.** What `Access` allows is broken first, each block with its own best tool. A place
+  costs by all it breaks there: the way in and what is still on the line.
   - `Access.inside(box)`: only blocks inside the box. A selection is dug from inside itself.
   - `Access.ANY`: anything on the line from the eyes. For a block in the rock, also a way in the
     body's height, so the body can walk in after the drop.
@@ -155,8 +168,13 @@ middle, as a player's does.
 ## How drops are picked up (`Worker.pickUp`)
 
 The worker walks over the drops lying in the area, nearest first. It goes into each drop's own
-cell, or as near as it can stand: the server picks a drop up within 1.75 of the feet. A drop it
-cannot get to is left.
+cell, or, where the body cannot stand there (on a block under a low ceiling, in a hole), to the
+place nearest the body with the feet within 1.5 of the drop: the server picks a drop up within 1.75
+of the feet. A drop it cannot get to is left.
+
+`Worker.pickUp(items)` does the same for these items, wherever they lie. `EntityTracker.firstSeenAt`
+says where core first saw an entity: for an item just dropped, where it fell from - so a module can
+tell its own drops however far they went since.
 
 ## How items go into a chest (`Worker.deposit`)
 

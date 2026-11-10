@@ -66,6 +66,14 @@ public interface EntityTracker {
     }
 
     /**
+     * Where core first saw the entity since it came into view - for an item just dropped, where it
+     * fell from, however far it rolled or fell since. Empty for one core does not track.
+     */
+    default Optional<Vec3> firstSeenAt(int entityId) {
+        return Optional.empty();
+    }
+
+    /**
      * Nameplate text shown above the entity — the player's username for players,
      * or a custom display name for named entities. Populated from observed
      * {@code NameplateUpdate} components.

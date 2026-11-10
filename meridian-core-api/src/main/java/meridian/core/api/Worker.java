@@ -128,6 +128,17 @@ public interface Worker {
      */
     CompletableFuture<Integer> pickUp(BlockBox area);
 
+    /**
+     * Walks over these dropped items wherever they lie, nearest first, into each one's own cell, as
+     * {@link #pickUp(BlockBox)} does - those that rolled, fell or floated away from where they were
+     * dropped too. One gone already, or that cannot be got to, is left.
+     *
+     * @return how many were picked up
+     */
+    default CompletableFuture<Integer> pickUp(java.util.Collection<Integer> items) {
+        return CompletableFuture.completedFuture(0);
+    }
+
     /** Ends what is under way, after the swing it is in. */
     void cancel();
 }
