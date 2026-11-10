@@ -240,7 +240,7 @@ final class Physics {
         double cz = (box[2] + box[5]) / 2;
         if (!stepped && m.horizontal() && !ground0 && !s.flying && !s.climbing && !s.swimming
                 && s.keyF > 0 && around.feature(ClientFeature.Mantling)
-                && mantle(s, shape, fullHeight, m, feet0, dx, dz, cx, cz)) {
+                && mantle(s, shape, fullHeight, m, feet0, box[1], dx, dz, cx, cz)) {
             states(s, k, keys);
             return true;
         }
@@ -474,14 +474,16 @@ final class Physics {
     }
 
     /**
-     * The body turns toward its movement: to the look, or 45° off it for a side key (back and a
-     * side key the other way), at most {@code BODY_TURN} a tick.
+     * The body turns toward its movement: to the look, or off it toward the keys' way, no more than
+     * 45° (back and a side key the other way) - 45° for a side key at full, as a player's keys go,
+     * less for the share of one a turning head gives the keys ({@link Neck#follow}); at most
+     * {@code BODY_TURN} a tick.
      */
     private static void turnBody(BodyState s) {
         double off = 0;
         if (Math.abs(s.keyS) > EPS) {
-            double side = Math.signum(s.keyS);
-            off = (s.keyF < -EPS ? side : -side) * Tuning.BODY_OFFSET;
+            double away = s.keyF < -EPS ? Math.atan2(s.keyS, -s.keyF) : -Math.atan2(s.keyS, Math.max(s.keyF, 0));
+            off = Math.max(-Tuning.BODY_OFFSET, Math.min(Tuning.BODY_OFFSET, away));
         }
         double target = s.yaw + off;
         double d = Math.IEEEremainder(target - s.bodyYaw, 2 * Math.PI);
@@ -934,12 +936,13 @@ final class Physics {
 
     /**
      * A ledge: moving into a wall in the air whose top is above the head by no more than
-     * {@code MANTLE_OVER_HEAD}. The body is put on the top at once, {@code MANTLE_REACH} past where
-     * it met the wall, the coordinate along the wall kept, and is held still for
-     * {@code MANTLE_FREEZE_TICKS}. Returns whether it happened.
+     * {@code MANTLE_OVER_HEAD} - or that the head went past on the way down this tick: falling fast,
+     * a tick carries the head farther than that, and the hands take the ledge it passed. The body is
+     * put on the top at once, {@code MANTLE_REACH} past where it met the wall, the coordinate along
+     * the wall kept, and is held still for {@code MANTLE_FREEZE_TICKS}. Returns whether it happened.
      */
     private boolean mantle(BodyState s, Surroundings.BodyShape shape, double height, Collider.Moved m, double feet0,
-                           double dx, double dz, double cx, double cz) {
+                           double feet1, double dx, double dz, double cx, double cz) {
         double nx = 0;
         double nz = 0;
         if (m.hitX() && Math.abs(dx) > EPS) {
@@ -950,7 +953,8 @@ final class Physics {
             return false;
         }
         double head = feet0 + height;
-        Double top = terrain.ledgeTop(cx, cz, nx, nz, shape.halfX(), shape.halfZ(), head + EPS,
+        double passed = Math.min(feet0, feet1) + height;
+        Double top = terrain.ledgeTop(cx, cz, nx, nz, shape.halfX(), shape.halfZ(), passed + EPS,
                 head + Tuning.MANTLE_OVER_HEAD + EPS, 0.05, height);
         if (top == null) {
             return false;

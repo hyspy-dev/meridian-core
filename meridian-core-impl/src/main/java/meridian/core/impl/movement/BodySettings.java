@@ -18,6 +18,7 @@ final class BodySettings {
     private FlyMode lastFly;
     private boolean lastMantle;
     private Movement.Capabilities cached;
+    private RunUps cachedRunUps;
 
     BodySettings(Physics physics) {
         this.physics = physics;
@@ -37,7 +38,78 @@ final class BodySettings {
         lastFly = fly;
         lastMantle = mantle;
         cached = p == null ? none(shape) : compute(p, shape, fly, mantle);
+        cachedRunUps = p == null ? null : runUps(p, shape);
         return cached;
+    }
+
+    /** How a sprinting jump flies after each run-up ({@link RunUps}); {@code null} before the settings. */
+    synchronized RunUps runUps() {
+        capabilities();
+        return cachedRunUps;
+    }
+
+    /**
+     * Each run-up of 0 to {@link RunUps#MOST} blocks, from a standstill in the middle of a block: the
+     * ground's law with forward and sprint held (the asked-for speed rising by acceleration·W²/base,
+     * the velocity keeping {@code KEY_KEEP} and gaining the rest, the sprint easing in over six
+     * ticks) until the floor ends a tick and a half ahead - as the pilot jumps - then the jump and
+     * the air's law, sprint still held, until the feet are 4 under the edge.
+     */
+    private RunUps runUps(MovementSettings p, Surroundings.BodyShape shape) {
+        int n = RunUps.MOST + 1;
+        double[][] xs = new double[n][];
+        double[][] ys = new double[n][];
+        double base = Math.max(p.baseSpeed, 1e-3);
+        double runCap = base * p.forwardRunSpeedMultiplier;
+        double sprintMul = p.forwardSprintSpeedMultiplier > 0 ? p.forwardSprintSpeedMultiplier : 1;
+        double acc = Math.max(p.acceleration, 1e-3);
+        double keep = Tuning.KEY_KEEP;
+        double gain = 1 - keep;
+        double halfX = shape.halfX();
+        for (int k = 0; k < n; k++) {
+            double edge = k + 0.5;
+            double v = 0;
+            double ramp = 0;
+            double x = 0;
+            int ticks = 0;
+            while (x < edge + halfX - Math.max(v, 1) * Physics.DT * 1.5 && ticks < 600) {
+                double e = Math.min(1.0, (double) ticks / Tuning.SPRINT_EASE_TICKS);
+                double cap = runCap * (1 + (sprintMul - 1) * e * e * e);
+                ramp = Math.min(cap, ramp + acc * cap * cap / base);
+                double along = keep * v;
+                if (along >= cap) {
+                    v *= keep;
+                } else {
+                    double add = Math.min(gain * ramp, cap - along);
+                    v = keep * v + add;
+                    ramp = add / gain;
+                }
+                x += v * Physics.DT;
+                ticks++;
+            }
+            java.util.List<double[]> flight = new java.util.ArrayList<>();
+            double vy = p.jumpForce;
+            double y = 0;
+            double[] h = {v, 0};
+            flight.add(new double[] {x - edge, 0});
+            for (int i = 0; i < 600; i++) {
+                Physics.airAlong(h, runCap * sprintMul, p);
+                vy = physics.fall(vy, p, 1);
+                y += vy * Physics.DT;
+                x += h[0] * Physics.DT;
+                flight.add(new double[] {x - edge, y});
+                if (y < -4) {
+                    break;
+                }
+            }
+            xs[k] = new double[flight.size()];
+            ys[k] = new double[flight.size()];
+            for (int i = 0; i < flight.size(); i++) {
+                xs[k][i] = flight.get(i)[0];
+                ys[k][i] = flight.get(i)[1];
+            }
+        }
+        return new RunUps(xs, ys, halfX);
     }
 
     private static Movement.Capabilities none(Surroundings.BodyShape shape) {

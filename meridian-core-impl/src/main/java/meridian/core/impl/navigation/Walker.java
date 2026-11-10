@@ -33,6 +33,10 @@ public final class Walker implements Navigator {
     static final int MAX_REPLANS = 12;
     /** Searches again at most this often for one way when its moves would not arrive. */
     static final int MAX_BANS = 8;
+    /** A straight walk at least this long is sprinted, stamina allowing. */
+    static final double SPRINT_FROM = 6.0;
+    /** The stamina a sprint along the way leaves, for the run-ups of leaps: a sprint takes 1 a second. */
+    static final double STAMINA_KEPT = 4.0;
 
     private final Movement movement;
     private final World world;
@@ -45,12 +49,22 @@ public final class Walker implements Navigator {
     private final AtomicInteger trip = new AtomicInteger();
     /** The trip's hold on a game's body, given back when it ends; {@code null} for none. */
     private volatile Movement.Wheel took;
+    /** The player's stamina now; {@code NaN} when it is not known. */
+    private final java.util.function.DoubleSupplier stamina;
 
     public Walker(Movement movement, World world, InteractionControl interactions, Executor executor, Logger log) {
+        this(movement, world, interactions, () -> Double.NaN, executor, log);
+    }
+
+    /** With the player's stamina ({@code NaN} unknown), for sprinting the long straight walks. */
+    public Walker(Movement movement, World world, InteractionControl interactions,
+                  java.util.function.DoubleSupplier stamina, Executor executor, Logger log) {
+        this.stamina = stamina;
         this.movement = movement;
         this.world = world;
         this.interactions = interactions;
-        this.finder = new PathFinder(movement, world);
+        this.finder = new PathFinder(movement, world,
+                movement instanceof meridian.core.impl.movement.MovementImpl m ? m::runUps : () -> null);
         this.executor = executor;
         this.log = log;
     }
@@ -68,6 +82,29 @@ public final class Walker implements Navigator {
         }
         int[] c = cellOf(p);
         return checked(c, p, goal, new HashSet<>()).steps();
+    }
+
+    /**
+     * The way over the grid as found - no move banned, not straightened - played on a copy of the body
+     * tick by tick, for looking into a move: the steps, how many arrived, and the ticks.
+     */
+    public java.util.Map<String, Object> trace(Goal goal) {
+        java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+        Vec3 p = movement.position();
+        if (p == null || !(movement instanceof meridian.core.impl.movement.MovementImpl impl)) {
+            out.put("error", "no body");
+            return out;
+        }
+        int[] c = cellOf(p);
+        PathFinder.Way way = finder.find(c[0], c[1], c[2], p.y(), goal, new HashSet<>());
+        List<String> ticks = new ArrayList<>();
+        Movement.Prediction pred = impl.predict(moves(way.steps().subList(0, untilDoor(way.steps()))), ticks);
+        out.put("steps", way.steps().stream().map(s -> s.kind() + " " + s.x() + " " + s.y() + " " + s.z() + " " + s.gait())
+                .toList());
+        out.put("arrived", pred.arrived());
+        out.put("result", pred.result().status().name());
+        out.put("trace", ticks);
+        return out;
     }
 
     @Override
@@ -120,6 +157,63 @@ public final class Walker implements Navigator {
      * way found again. What is left is a way the body can go, or as far along one as it can.
      */
     private PathFinder.Way checked(int[] c, Vec3 p, Goal goal, Set<String> banned) {
+        return straightened(p, grid(c, p, goal, banned));
+    }
+
+    /**
+     * The checked way with its level walks straightened ({@link PathFinder#straightened}), played on a
+     * copy of the body first as well: if the straight lines would not do, the way as found.
+     */
+    private PathFinder.Way straightened(Vec3 p, PathFinder.Way way) {
+        List<Step> straight = finder.straightened(p, way.steps());
+        List<Step> fast = sprinted(p, straight);
+        for (List<Step> ws : fast == straight ? List.of(straight) : List.of(fast, straight)) {
+            if (ws == way.steps()) {
+                return way;
+            }
+            int upTo = untilDoor(ws);
+            Movement.Prediction pred = movement.predict(moves(ws.subList(0, upTo)));
+            if ((pred.arrived() >= upTo && !pred.hurt()) || unknown(pred)) {
+                return new PathFinder.Way(ws, way.complete());
+            }
+        }
+        log.info("navigation: the straightened way would not make it - the way as found");
+        return way;
+    }
+
+    /**
+     * The long straight walks sprinted ({@link #SPRINT_FROM} or more): as many as the stamina pays
+     * for at a second a second, keeping {@link #STAMINA_KEPT} for the leaps' run-ups. None while the
+     * stamina is not known. The same steps when none is.
+     */
+    private List<Step> sprinted(Vec3 p, List<Step> steps) {
+        double left = stamina.getAsDouble() - STAMINA_KEPT;
+        double speed = movement.capabilities().sprintSpeed();
+        if (!(left > 0) || !(speed > 0)) {
+            return steps;
+        }
+        List<Step> out = new ArrayList<>(steps.size());
+        boolean any = false;
+        double x = p.x();
+        double z = p.z();
+        for (Step s : steps) {
+            double len = Math.hypot(s.x() + 0.5 - x, s.z() + 0.5 - z);
+            Step o = s;
+            if (s.kind() == Movement.Kind.WALK && s.door() == null && s.gait() != Movement.Gait.SPRINT
+                    && len >= SPRINT_FROM && len / speed <= left) {
+                left -= len / speed;
+                o = new Step(s.kind(), s.x(), s.y(), s.z(), s.feet(), Movement.Gait.SPRINT, s.door());
+                any = true;
+            }
+            out.add(o);
+            x = s.x() + 0.5;
+            z = s.z() + 0.5;
+        }
+        return any ? out : steps;
+    }
+
+    /** A way over the grid, found and played on a copy of the body, moves that would not arrive banned. */
+    private PathFinder.Way grid(int[] c, Vec3 p, Goal goal, Set<String> banned) {
         PathFinder.Way way = finder.find(c[0], c[1], c[2], p.y(), goal, banned);
         for (int i = 0; i < MAX_BANS && !way.steps().isEmpty(); i++) {
             // Up to the first shut door: past it is played once it is open.

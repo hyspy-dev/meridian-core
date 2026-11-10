@@ -301,6 +301,11 @@ public final class MovementImpl implements Movement {
         return reach.capabilities();
     }
 
+    /** How a sprinting jump flies after a run-up, for planning leaps; {@code null} before the settings. */
+    public RunUps runUps() {
+        return reach.runUps();
+    }
+
     /**
      * The player's eyes above its feet, standing: its model's, scaled, once the server has sent it -
      * for a game's player too, whose body this does not move - and the default player model's until
@@ -387,10 +392,15 @@ public final class MovementImpl implements Movement {
 
     @Override
     public CompletableFuture<Boolean> look(meridian.core.api.Look look) {
-        if (look == null || !Float.isFinite(look.yaw()) || !Float.isFinite(look.pitch())) {
+        return look(look, FACE_WITHIN);
+    }
+
+    @Override
+    public CompletableFuture<Boolean> look(meridian.core.api.Look look, double within) {
+        if (look == null || !Float.isFinite(look.yaw()) || !Float.isFinite(look.pitch()) || !Double.isFinite(within)) {
             return CompletableFuture.completedFuture(false);
         }
-        return body.look(look.yaw(), look.pitch());
+        return body.look(look.yaw(), look.pitch(), within);
     }
 
     @Override

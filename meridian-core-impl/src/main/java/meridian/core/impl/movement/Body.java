@@ -61,6 +61,14 @@ public final class Body {
     private volatile Controls lastControls;
     /** Turns of the head waiting for the tick that reports them ({@link #look}). */
     private final java.util.List<CompletableFuture<Boolean>> turns = new java.util.ArrayList<>();
+    /** Where the head is turning to while nothing steers ({@link #look}): yaw, pitch; or {@code null}. */
+    private float[] lookTo;
+    /** How near {@link #lookTo} is near enough, radians. */
+    private double lookWithin;
+    /** Ticks the head has been turning to {@link #lookTo}. */
+    private int lookTicks;
+    /** The longest a turn of the head is waited for. */
+    private static final int LOOK_MAX_TICKS = 90;
 
     /**
      * Who moves the body by core: where its reports go, and who is shown it. A headless client's
@@ -123,17 +131,19 @@ public final class Body {
     }
 
     /**
-     * Turns the head, and the body with it, to a look - when nothing steers: no move under way or
-     * queued, no keys held. The next tick's report carries it; the future says whether it went.
+     * Turns the head to a look - when nothing steers: no move under way or queued, no keys held - a
+     * tick at a time as {@link Neck} turns it, the body following. The future says whether it got
+     * within {@code within} radians of it, and that tick went out; a move or held keys that start
+     * steering meanwhile end it with {@code false}.
      */
-    synchronized CompletableFuture<Boolean> look(float yaw, float pitch) {
+    synchronized CompletableFuture<Boolean> look(float yaw, float pitch, double within) {
         if (driver.get() == null || state == null || physics.surroundings().settings() == null
                 || current != null || !queue.isEmpty() || held != null) {
             return CompletableFuture.completedFuture(false);
         }
-        state.yaw = yaw;
-        state.pitch = pitch;
-        state.bodyYaw = yaw;
+        lookTo = new float[] {yaw, pitch};
+        lookWithin = Math.max(Neck.LEAST, within);
+        lookTicks = 0;
         CompletableFuture<Boolean> done = new CompletableFuture<>();
         turns.add(done);
         wake();
@@ -244,6 +254,7 @@ public final class Body {
     synchronized void takeOver(double x, double y, double z, float yaw, float pitch, float bodyYaw,
                                boolean onGround, boolean flying) {
         stop();
+        lookTo = null;
         answerTurns(false);
         state = new BodyState();
         state.x = x;
@@ -313,6 +324,7 @@ public final class Body {
     /** The session went away. */
     synchronized void reset() {
         stop();
+        lookTo = null;
         answerTurns(false);
         state = null;
         lastStates = null;
@@ -383,16 +395,31 @@ public final class Body {
             }
             Controls controls = controls();
             boolean steered = current != null || held != null;
+            boolean turning = !steered && lookTo != null;
             lastControls = controls;
             BodyState before = state.copy();
             boolean moved = physics.step(state, controls, effects.get());
+            if (turning) {
+                // Standing, the body comes round after the head, as it does with keys in.
+                double d = Math.IEEEremainder(state.yaw - state.bodyYaw, 2 * Math.PI);
+                state.bodyYaw = (float) (state.bodyYaw + Math.max(-Tuning.BODY_TURN, Math.min(Tuning.BODY_TURN, d)));
+            }
             boolean changed = moved && changed(before, state);
             MovementStates states = states(state, controls);
             if (moved) {
                 // The client reports every tick, standing still too.
                 send(c, states);
             }
-            answerTurns(moved && !steered);
+            if (!turns.isEmpty() || lookTo != null) {
+                if (!moved || steered) {
+                    lookTo = null;
+                    answerTurns(false);
+                } else if (lookTo == null || ++lookTicks >= LOOK_MAX_TICKS
+                        || Neck.apart(state.yaw, state.pitch, lookTo[0], lookTo[1]) <= lookWithin + 1e-6) {
+                    lookTo = null;
+                    answerTurns(true);
+                }
+            }
             c.ticked(state);
             ticks++;
             next = baseNanos + ticks * TICK_NANOS - System.nanoTime();
@@ -416,10 +443,13 @@ public final class Body {
                 }
             }
             // Another move waiting: go through this one's point instead of stopping on it.
-            current.pilot().through(!queue.isEmpty());
+            Queued after = queue.peekFirst();
+            current.pilot().through(after != null);
+            current.pilot().ahead(after == null ? null : after.pilot().move().to());
             Controls k = current.pilot().next(state);
             if (k != null) {
-                return k;
+                return Neck.follow(state, k, current.pilot().lookYaw(), current.pilot().lookPitch(),
+                        current.pilot().carriesKeys());
             }
             current.done().complete(current.pilot().result());
             current = null;
@@ -428,7 +458,9 @@ public final class Body {
             return held;
         }
         // No keys: a body in flight stays in flight, as the client's does until flying is toggled off.
-        return new Controls(0, 0, state.yaw, state.pitch, false, false, false, false, state.flying);
+        float[] look = lookTo == null ? new float[] {state.yaw, state.pitch}
+                : Neck.turn(state.yaw, state.pitch, lookTo[0], lookTo[1]);
+        return new Controls(0, 0, look[0], look[1], false, false, false, false, state.flying);
     }
 
     private static boolean changed(BodyState a, BodyState b) {
@@ -531,11 +563,13 @@ public final class Body {
         MoveResult last = new MoveResult(MoveResult.Status.ARRIVED, new Vec3(s.x, s.y, s.z));
         for (int i = 0; i < moves.size(); i++) {
             Pilot p = new Pilot(moves.get(i), physics, i + 1 < moves.size());
+            p.ahead(i + 1 < moves.size() ? moves.get(i + 1).to() : null);
             while (true) {
                 Controls k = p.next(s);
                 if (k == null) {
                     break;
                 }
+                k = Neck.follow(s, k, p.lookYaw(), p.lookPitch(), p.carriesKeys());
                 boolean wasGround = s.onGround;
                 physics.step(s, k, effects);
                 if (!wasGround && s.onGround && s.landingSpeed > hurtSpeed && !s.inFluid && !s.rolling) {

@@ -423,7 +423,8 @@ public class MeridianCoreModule implements ProxyModule {
         // On core's own services only - movement, the world, the hands - for any module that
         // takes the player somewhere or puts them to work (a miner, a builder).
         meridian.core.impl.navigation.Walker walker = new meridian.core.impl.navigation.Walker(
-                movement, world, interactionControl, ctx.offloadExecutor(), ctx.getLogger());
+                movement, world, interactionControl,
+                () -> playerState.stats().getOrDefault("Stamina", Double.NaN), ctx.offloadExecutor(), ctx.getLogger());
         ctx.services().provide(meridian.core.api.Navigator.class, walker);
         meridian.core.impl.navigation.WorkerImpl worker = new meridian.core.impl.navigation.WorkerImpl(
                 movement, world, interactionControl, entityTracker, walker, containers, playerState,

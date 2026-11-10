@@ -25,7 +25,7 @@ import meridian.core.api.Worker;
  */
 public final class NavigationPanel {
 
-    private static final String USAGE = "goto <x y z> [radius] | plan <x y z> [radius] | cancel";
+    private static final String USAGE = "goto <x y z> [radius] | plan <x y z> [radius] | trace <x y z> [radius] | cancel";
 
     private final Navigator navigator;
     private final Worker worker;
@@ -157,6 +157,8 @@ public final class NavigationPanel {
                 worker.cancel();
                 yield navigator.goTo(goal).thenApply(NavigationPanel::result);
             }
+            case "trace" -> CompletableFuture.supplyAsync(() -> navigator instanceof Walker w
+                    ? w.trace(goal) : Map.of("error", "not core's walker"));
             case "plan" -> CompletableFuture.supplyAsync(() -> {
                 List<Navigator.Step> steps = navigator.plan(goal);
                 Map<String, Object> out = new LinkedHashMap<>();

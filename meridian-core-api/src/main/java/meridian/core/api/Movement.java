@@ -176,12 +176,34 @@ public interface Movement {
     }
 
     /**
+     * Turns the head to a look as {@link #look(Look)} does, a tick at a time the way a player turns
+     * with a mouse - fast, then slowing - and done once it is within {@code within} radians of it:
+     * a head need not end on the very middle of what it looks at.
+     *
+     * @return as {@link #look(Look)}: {@code true} once the head got there and that tick went out
+     */
+    default CompletableFuture<Boolean> look(Look look, double within) {
+        return look(look);
+    }
+
+    /**
      * Turns the head to look at {@code point} from the eyes - {@link Capabilities#eyeHeight} over
      * the feet - as {@link #look} does. A point straight over or under the eyes keeps the yaw.
      *
      * @return as {@link #look}; {@code false} as well when the point is where the eyes are
      */
     default CompletableFuture<Boolean> face(Vec3 point) {
+        return face(point, FACE_WITHIN);
+    }
+
+    /** How near a look at a point is near enough: half a degree. */
+    double FACE_WITHIN = Math.toRadians(0.5);
+
+    /**
+     * Turns the head to look at {@code point} as {@link #face(Vec3)} does, done once the look is
+     * within {@code within} radians of it.
+     */
+    default CompletableFuture<Boolean> face(Vec3 point, double within) {
         Vec3 feet = position();
         if (point == null || feet == null || !driving()) {
             return CompletableFuture.completedFuture(false);
@@ -196,19 +218,32 @@ public interface Movement {
         if (Math.abs(dx) < 1e-6 && Math.abs(dz) < 1e-6) {
             l = new Look(state().yaw(), l.pitch());
         }
-        return look(l);
+        return look(l, within);
     }
 
     /**
-     * Turns the head to look at the middle of a block - where a hit, a use or a dig on it aims - as
-     * {@link #look} does.
+     * Turns the head toward the middle of a block - where a hit, a use or a dig on it aims - as
+     * {@link #look} does, done once the look is on the block: within the angle of a little less
+     * than half a block from the eyes, so it stops short of the very middle.
      */
     default CompletableFuture<Boolean> face(BlockPos block) {
         if (block == null) {
             return CompletableFuture.completedFuture(false);
         }
-        return face(new Vec3(block.x() + 0.5, block.y() + 0.5, block.z() + 0.5));
+        Vec3 middle = new Vec3(block.x() + 0.5, block.y() + 0.5, block.z() + 0.5);
+        Vec3 feet = position();
+        if (feet == null) {
+            return face(middle);
+        }
+        double dx = middle.x() - feet.x();
+        double dy = middle.y() - (feet.y() + capabilities().eyeHeight());
+        double dz = middle.z() - feet.z();
+        double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        return face(middle, dist < 0.5 ? FACE_WITHIN : Math.max(FACE_WITHIN, Math.atan(FACE_BLOCK / dist)));
     }
+
+    /** How far from a block's middle a look at the block may end: a little less than half a block. */
+    double FACE_BLOCK = 0.35;
 
     /** Plays a move on a copy of the body as it is now, without moving it. */
     Prediction predict(Move move);

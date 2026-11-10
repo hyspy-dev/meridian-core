@@ -49,19 +49,43 @@ So nobody yanks the body from anyone else:
   - a walk, a step up or down included;
   - a jump up, a pull-up onto a ledge;
   - a drop the body survives unhurt, and a drop of any height into deep water;
-  - a running or sprinting jump over a gap: level, a block up or a block down;
+  - a sprinting jump over a gap after a run-up, see below;
   - into, through and out of water;
   - onto, along and off a ladder, a vine, a rope;
   - a flight.
+- **Leaps.** A jump over a gap along an axis, sprinted after a run-up: the level ground before the
+  gap, up to 4 blocks of it. The longer the run-up, the faster the take-off. How a leap flies after
+  each run-up, from a standstill, core works out with the body's own laws (`RunUps`). Across the
+  gap, the ground from 3 up to 2 down is either:
+  - come down on, when the feet are over its top as the body's front passes its near side;
+  - or taken by the hands: the body meets its wall short of the top, with the head no more than a
+    hand under it, and pulls up onto it.
+
+  So a gap of 5 is leapt with a run-up, a gap of 6 with a pull-up at the far side, and a ledge 2 up
+  over a gap of 2 with a pull-up.
 - **Doors.** A shut door on the level is a way through. It is opened first.
 - **Diagonals** are walks and swims only, and only where both corners leave room.
 - **Costs** are in seconds.
-  - A jump up and a pull-up are costed by length, not time: a block across plus the rise, at a run.
-    So a shorter way over a ledge wins over a longer way round it.
+  - A jump up, a pull-up and a leap are costed by length, not time: the blocks across plus the rise,
+    at a run. So a shorter way over a ledge or a gap wins over a longer way round it. A leap that
+    ends in a pull-up costs a little more.
   - The estimate is the straight distance at the body's fastest.
 - **Budget.** A search stops after 40,000 places or 1.5 s. When the budget runs out, or the world
   beyond is not sent yet, it gives the way to the nearest place to the goal it saw. The walker goes
   that far and looks again, the way Baritone plans in segments.
+
+## How a way is straightened and sprinted
+
+- **Straightened.** A run of walks over level ground becomes one straight line, from where the body
+  is or the last point kept, on to the farthest walk a straight line reaches. The whole body must go
+  over the same floor all the way, with nothing in the way, nothing that burns and no fluid. A corner
+  of the grid becomes a slant, and turns come fewer and gentler. The walk before a move of another
+  kind (a jump, a pull-up, a leap, a door) is kept, so that move starts where it was planned from.
+- **Sprinted.** A straight walk 6 blocks long or more is sprinted, as long as the stamina pays for
+  it. A sprint takes 1 stamina a second, and 4 are kept for the leaps' run-ups. While core does not
+  know the stamina, nothing is sprinted.
+- **Checked.** The straightened and sprinted way is played on a copy of the body too. If it would
+  not do, the way as found is gone instead.
 
 ## How a way is gone
 
@@ -77,6 +101,20 @@ So nobody yanks the body from anyone else:
   where the body is. A trip gives up after 12 such searches, or when a partial way gets no nearer
   than the one before.
 - **One trip at a time.** A new `goTo` ends the trip under way.
+- **The head.** It turns the way a player's does with a mouse: fast while it is far from where it
+  wants to look, slowing as it gets there, at most 9° a tick. It looks at the way 2 blocks ahead of
+  the body, so near a corner it starts turning toward the next move before the corner. The keys go
+  with the head: while it is still turning, the body goes where the move sends it, forward taking a
+  side key's share, as a player runs one way while the mouse swings the look round.
+- **Sprint in a leap** is held through the flight, as a player holds it. Let go in the air, the speed
+  falls to a run's, and a sprinting leap comes down a block short.
+
+## Where the head looks
+
+`Movement.look` and `Movement.face` turn the head the same way, a tick at a time. A look is done
+once the head is near enough (`look(look, within)`). `face(block)` is done once the look is on the
+block: within the angle of 0.35 of a block from its middle, so the head stops short of the very
+middle, as a player's does.
 
 ## How a block is broken (`Worker.dig`)
 
@@ -140,6 +178,7 @@ Core's panel has **Go to a point**:
 ```
 nav <conn> goto <x y z> [radius]   -> {status, at, moves, replans}
 nav <conn> plan <x y z> [radius]   -> the moves (kind, cell, gait), without moving
+nav <conn> trace <x y z> [radius]  -> the way as found, played on a copy of the body tick by tick
 nav <conn> cancel                  -> ends the trip and the work under way
 core <conn> placeat <x y z> [face] -> the held block into an empty cell (World.placeAt)
 core <conn> chest <x y z>          -> what core last saw in that container, and which was opened last
@@ -151,6 +190,9 @@ core <conn> besttool <x y z>       -> the hotbar slot that breaks that block bes
 
 - **Gliding** and **riding**.
 - **Hanging along a ledge** as a way of its own. The body can do it; the search does not plan it.
+- **Leaps on a slant.** A leap goes along an axis only.
+- **Curves.** A way is straight lines between points; the head's look ahead and the pass through each
+  point round the corners off.
 - **Breaking or building through what is in the way of a trip.** A way is found over the ground as
   it is.
 - **Tunnels.** A block deeper in the rock than a tool reaches from open ground is left.

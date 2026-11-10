@@ -78,9 +78,18 @@ final class PathFinder {
     private final meridian.core.api.World ground;
 
     PathFinder(Movement movement, meridian.core.api.World ground) {
+        this(movement, ground, () -> null);
+    }
+
+    PathFinder(Movement movement, meridian.core.api.World ground,
+               java.util.function.Supplier<meridian.core.impl.movement.RunUps> runUps) {
         this.movement = movement;
         this.ground = ground;
+        this.runUps = runUps;
     }
+
+    /** How a sprinting jump flies after a run-up; gives {@code null} where core does not work it out. */
+    private final java.util.function.Supplier<meridian.core.impl.movement.RunUps> runUps;
 
     /**
      * The way from the body at {@code (sx, sy, sz)} with the feet at {@code feet} to {@code goal},
@@ -132,7 +141,9 @@ final class PathFinder {
                 flights(n, caps, w, goal, next);
             }
             for (Node m : next) {
-                if (banned.contains(edge(n.x(), n.y(), n.z(), m.x(), m.y(), m.z(), m.kind()))) {
+                // From the block the move starts at: a leap's run-up goes before it.
+                Node from = m.parent() != null ? m.parent() : n;
+                if (banned.contains(edge(from.x(), from.y(), from.z(), m.x(), m.y(), m.z(), m.kind()))) {
                     continue;
                 }
                 long nk = key(m.x(), m.y(), m.z(), m.mode());
@@ -147,6 +158,104 @@ final class PathFinder {
             }
         }
         return new Way(steps(nearest), false);
+    }
+
+    // ------------------------------------------------------------------
+    // Straightened
+    // ------------------------------------------------------------------
+
+    /** How far apart the places a straight line over the ground is checked at are. */
+    private static final double ALONG = 0.2;
+    /** Room kept round the body's sides on a straight line. */
+    private static final double SIDE_ROOM = 0.05;
+
+    /**
+     * The way with its walks over level ground straightened: from where the body is, or the last
+     * point kept, on to the farthest walk of a run of them that a straight line reaches - the whole
+     * body over the same floor all the way, nothing in the way, nothing that burns, no fluid. A
+     * corner of the grid becomes a slant, and turns come fewer and gentler. The walk before a move
+     * of another kind - a jump, a pull-up, a leap, a door - is kept, so that move starts where it
+     * was planned from.
+     */
+    List<Step> straightened(Vec3 from, List<Step> steps) {
+        if (steps.size() < 2) {
+            return steps;
+        }
+        Movement.Capabilities caps = movement.capabilities();
+        World w = new World(movement, ground);
+        double half = caps.width() / 2 + SIDE_ROOM;
+        List<Step> out = new ArrayList<>(steps.size());
+        double ax = from.x();
+        double az = from.z();
+        double feet = from.y();
+        int i = 0;
+        while (i < steps.size()) {
+            Step st = steps.get(i);
+            if (!level(st, feet)) {
+                out.add(st);
+                ax = st.x() + 0.5;
+                az = st.z() + 0.5;
+                feet = st.feet();
+                i++;
+                continue;
+            }
+            int last = i;
+            for (int k = i + 1; k < steps.size() && level(steps.get(k), feet) && skippable(steps, k - 1); k++) {
+                if (!straight(w, ax, az, steps.get(k).x() + 0.5, steps.get(k).z() + 0.5, feet, half, caps.height())) {
+                    break;
+                }
+                last = k;
+            }
+            Step kept = steps.get(last);
+            out.add(kept);
+            ax = kept.x() + 0.5;
+            az = kept.z() + 0.5;
+            feet = kept.feet();
+            i = last + 1;
+        }
+        return out;
+    }
+
+    /** A walk on the level at {@code feet}, through no door. */
+    private static boolean level(Step s, double feet) {
+        return s.kind() == Kind.WALK && s.door() == null && Math.abs(s.feet() - feet) < 1e-3
+                && s.gait() != Gait.SPRINT;
+    }
+
+    /** A walk that may be left out of a straight line: one that a walk follows. */
+    private static boolean skippable(List<Step> steps, int i) {
+        return i + 1 < steps.size() && steps.get(i + 1).kind() == Kind.WALK && steps.get(i + 1).door() == null;
+    }
+
+    /** Whether the whole body goes along the line over the same floor, nothing in its way. */
+    private static boolean straight(World w, double x0, double z0, double x1, double z1, double feet, double half,
+                                    double height) {
+        double dx = x1 - x0;
+        double dz = z1 - z0;
+        double len = Math.hypot(dx, dz);
+        int n = Math.max(1, (int) Math.ceil(len / ALONG));
+        int y = (int) Math.floor(feet + 1e-3);
+        for (int t = 0; t <= n; t++) {
+            double px = x0 + dx * t / n;
+            double pz = z0 + dz * t / n;
+            if (!w.fits(px, feet, pz, height)) {
+                return false;
+            }
+            for (int c = 0; c < 4; c++) {
+                int cx = (int) Math.floor(px + ((c & 1) == 0 ? -half : half));
+                int cz = (int) Math.floor(pz + ((c & 2) == 0 ? -half : half));
+                OptionalDouble under = w.stand(cx, y, cz);
+                if (under.isEmpty() || Math.abs(under.getAsDouble() - feet) > 1e-3) {
+                    return false;
+                }
+                Movement.Cell at = w.cell(cx, y, cz);
+                Movement.Cell head = w.cell(cx, y + 1, cz);
+                if (at.hurts() || head.hurts() || at.fluid() != null || head.fluid() != null) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     /** The name of a move from one cell to another, for banning it. */
@@ -229,12 +338,141 @@ final class PathFinder {
         }
     }
 
+    /** The widest gap a leap is looked for over, blocks. */
+    private static final int MAX_GAP = 7;
+    /** A leap is planned to come down at least this far onto the far side. */
+    private static final double LEAP_MARGIN = 0.2;
+    /** How far under a ledge's top the head may be for the hands to take it ({@code MANTLE_OVER_HEAD}). */
+    private static final double GRAB_UNDER = 0.157;
+    /** ... planned with the head this much higher than that. */
+    private static final double GRAB_MARGIN = 0.1;
+    /** What a pull-up at the end of a leap costs more: the hands could slip. */
+    private static final double GRAB_COST = 0.6;
+
     /**
-     * Running jumps over a gap along an axis: no ground under the cells between, room for the arc
-     * over them, ground across - level, a block up or down - within what a running jump carries,
-     * else what a sprinting one does.
+     * Sprinting jumps over a gap along an axis, after a run-up: the level ground ahead up to the gap,
+     * up to {@link meridian.core.impl.movement.RunUps#MOST} blocks of it, sprinted along - the longer
+     * the run-up, the faster the take-off. No ground under the blocks between, room for the arc over
+     * (and under) them. Across, the ground from three up to two down:
+     * <ul>
+     *   <li>come down on, when the feet are over its top as the body's front passes its near side;</li>
+     *   <li>or its ledge taken by the hands, when the body meets its wall short of the top with the
+     *       head no more than a hand under it - then pulled up onto.</li>
+     * </ul>
+     * Where core does not work out the run-ups, the running and sprinting jumps from the block the
+     * body is on, as {@link Movement.Capabilities} gives them.
      */
     private void leaps(Node n, Movement.Capabilities caps, World w, Goal goal, List<Node> out) {
+        meridian.core.impl.movement.RunUps ru = runUps.get();
+        if (ru == null) {
+            standingLeaps(n, caps, w, goal, out);
+            return;
+        }
+        double height = caps.height();
+        for (int i = 0; i < 4; i++) {
+            int[] d = DIRS[i];
+            // The run-up: the level ground ahead, up to the gap.
+            int run = 0;
+            boolean level = true;
+            while (run <= ru.most()) {
+                int cx = n.x() + d[0] * (run + 1);
+                int cz = n.z() + d[1] * (run + 1);
+                OptionalDouble at = w.stand(cx, n.y(), cz);
+                if (at.isEmpty()) {
+                    break;
+                }
+                if (Math.abs(at.getAsDouble() - n.feet()) > 1e-3 || burns(w, cx, n.y(), cz)) {
+                    level = false;
+                    break;
+                }
+                run++;
+            }
+            if (!level || run > ru.most()) {
+                continue;
+            }
+            int tx = n.x() + d[0] * run;
+            int tz = n.z() + d[1] * run;
+            for (int gap = 1; gap <= MAX_GAP; gap++) {
+                int gx = tx + d[0] * gap;
+                int gz = tz + d[1] * gap;
+                if (!w.fits(gx + 0.5, n.feet(), gz + 0.5, height + 1) || w.stand(gx, n.y(), gz).isPresent()) {
+                    break;
+                }
+                int lx = tx + d[0] * (gap + 1);
+                int lz = tz + d[1] * (gap + 1);
+                int up = Math.max(1, (int) Math.floor(caps.mantleHeight() + 1e-6));
+                for (int dy = up; dy >= -2; dy--) {
+                    OptionalDouble stand = w.stand(lx, n.y() + dy, lz);
+                    if (stand.isEmpty()) {
+                        continue;
+                    }
+                    double feet = stand.getAsDouble();
+                    double rise = feet - n.feet();
+                    double over = ru.feetWhenFrontAt(run, gap + LEAP_MARGIN);
+                    boolean lands = !Double.isNaN(over) && over >= rise + 0.02;
+                    double atWall = ru.feetWhenFrontAt(run, gap);
+                    boolean grabs = !lands && caps.mantleHeight() > 0 && rise <= caps.mantleHeight() + 1e-6
+                            && !Double.isNaN(atWall) && atWall < rise
+                            && atWall + height >= rise - GRAB_UNDER + GRAB_MARGIN;
+                    if (!lands && !grabs) {
+                        break;
+                    }
+                    if (!arcRoom(w, ru, run, tx, tz, d, gap, n.feet(), rise, height)) {
+                        break;
+                    }
+                    if (lands && rise > 0 && !w.fits(lx + 0.5, n.feet(), lz + 0.5, height + rise + 0.5)) {
+                        break;
+                    }
+                    // The run-up's blocks, sprinted along, then the leap.
+                    Node from = n;
+                    double g = n.g();
+                    for (int j = 1; j <= run; j++) {
+                        int cx = n.x() + d[0] * j;
+                        int cz = n.z() + d[1] * j;
+                        g += 1.0 / caps.runSpeed();
+                        from = new Node(cx, n.y(), cz, Mode.GROUND, n.feet(), g, guess(cx, n.y(), cz, goal, caps), from,
+                                Kind.WALK, Gait.SPRINT);
+                    }
+                    boolean running = run == 0 && lands && rise <= 1 && rise >= -2
+                            && gap + (rise > 0 ? 0.6 : 0) <= caps.runLeap() - 0.2;
+                    // By length, as climbs are: the gap and the landing's block, and what is climbed.
+                    double cost = (gap + 1 + Math.max(rise, 0)) / caps.runSpeed() + 0.4 + (grabs ? GRAB_COST : 0);
+                    out.add(new Node(lx, n.y() + dy, lz, Mode.GROUND, feet, g + cost,
+                            guess(lx, n.y() + dy, lz, goal, caps), from, Kind.LEAP, running ? Gait.RUN : Gait.SPRINT));
+                    break;
+                }
+            }
+        }
+    }
+
+    /** Something that burns where the body would be. */
+    private static boolean burns(World w, int x, int y, int z) {
+        return w.cell(x, y, z).hurts() || w.cell(x, y + 1, z).hurts();
+    }
+
+    /**
+     * Room for the body over the gap's blocks along the flight - down to where the feet go on it,
+     * when that is under the edge, and up over the landing's top.
+     */
+    private static boolean arcRoom(World w, meridian.core.impl.movement.RunUps ru, int run, int tx, int tz, int[] d,
+                                   int gap, double feet, double rise, double height) {
+        for (int j = 1; j <= gap; j++) {
+            double y = ru.feetWhenFrontAt(run, Math.min(j + 1.0, gap));
+            double low = Math.min(0, Double.isNaN(y) ? rise : Math.min(y, j == gap ? rise : y)) - 0.1;
+            double top = Math.max(1, Math.max(rise, 0) + 0.2) + height;
+            if (!w.fits(tx + d[0] * j + 0.5, feet + low, tz + d[1] * j + 0.5, top - low)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Running jumps over a gap along an axis from the block the body is on: no ground under the
+     * cells between, room for the arc over them, ground across - level, a block up or down - within
+     * what a running jump carries, else what a sprinting one does.
+     */
+    private void standingLeaps(Node n, Movement.Capabilities caps, World w, Goal goal, List<Node> out) {
         double far = caps.sprintLeap() > 0 ? caps.sprintLeap() : caps.runLeap();
         if (far < 1.5) {
             return;

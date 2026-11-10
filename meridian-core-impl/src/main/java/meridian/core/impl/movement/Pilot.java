@@ -12,6 +12,10 @@ import meridian.core.api.Vec3;
  * toward the target, run, jump at the edge, hold on to the ledge and pull up, let go of forward in
  * time to stop on the spot. Closed-loop: a push, a step it did not plan for or a slower ground just
  * changes the next tick's keys. It gives up when the body stops getting nearer.
+ *
+ * <p>Where the head looks is its own ({@link #lookYaw}): along the way, and ahead of the point when
+ * the next move's is near, so it starts turning before the corner. {@link Neck} turns it there a
+ * tick at a time and carries the keys along.
  */
 final class Pilot {
 
@@ -25,6 +29,8 @@ final class Pilot {
     private static final int STUCK_TICKS = 75;
     /** The longest a move may take. */
     private static final int MAX_TICKS = 60 * 30;
+    /** The head looks at the way this far ahead of the body, round the corner into the next move. */
+    static final double LOOK_AHEAD = 2.0;
 
     private final Move move;
     private final Physics physics;
@@ -43,6 +49,11 @@ final class Pilot {
     /** Gone past the point this tick: facing on the way the move went, backing onto it. */
     private boolean back;
     private MoveResult result;
+    /** The next move's point, when one follows. */
+    private Vec3 ahead;
+    /** Where the head wants to look this tick. */
+    private float lookYaw;
+    private float lookPitch;
 
     Pilot(Move move, Physics physics, boolean through) {
         this.move = move;
@@ -52,6 +63,29 @@ final class Pilot {
 
     void through(boolean through) {
         this.through = through;
+    }
+
+    /** The point of the move after this one, or {@code null}. */
+    void ahead(Vec3 ahead) {
+        this.ahead = ahead;
+    }
+
+    /** Where the head wants to look, as of the last {@link #next}: yaw. */
+    float lookYaw() {
+        return lookYaw;
+    }
+
+    /** ... and pitch: level. */
+    float lookPitch() {
+        return lookPitch;
+    }
+
+    /**
+     * Whether the keys go along the ground whichever way the head looks ({@link Neck#follow}). Not
+     * on a ladder, where forward is up.
+     */
+    boolean carriesKeys() {
+        return move.kind() != Kind.CLIMB;
     }
 
     Move move() {
@@ -83,6 +117,8 @@ final class Pilot {
         }
         float yaw = back ? meridian.core.api.Look.yawAlong(-dx, -dz)
                 : flat > 1e-3 ? meridian.core.api.Look.yawAlong(dx, dz) : s.yaw;
+        lookYaw = back ? yaw : look(s, to, flat, yaw);
+        lookPitch = 0;
         if (!s.onGround) {
             leftGround = true;
         }
@@ -103,9 +139,10 @@ final class Pilot {
             bestRise = Math.abs(dy);
             better = true;
         }
-        if (better) {
+        if (better || s.mantling) {
+            // Held still on a pull-up is not stuck: the count starts again once it is up.
             sinceBetter = 0;
-        } else if (++sinceBetter > STUCK_TICKS && !s.mantling) {
+        } else if (++sinceBetter > STUCK_TICKS) {
             return done(MoveResult.Status.BLOCKED, s);
         }
         // A move that needed the ground and landed somewhere else is over.
@@ -133,6 +170,26 @@ final class Pilot {
         };
     }
 
+    /**
+     * Where the head looks: at the way {@link #LOOK_AHEAD} ahead of the body - toward the point, and
+     * once that is nearer, as far again along the way to the next one.
+     */
+    private float look(BodyState s, Vec3 to, double flat, float yaw) {
+        if (ahead == null || flat >= LOOK_AHEAD || move.kind() == Kind.CLIMB) {
+            return yaw;
+        }
+        double nx = ahead.x() - to.x();
+        double nz = ahead.z() - to.z();
+        double next = Math.hypot(nx, nz);
+        if (next < 1e-3) {
+            return yaw;
+        }
+        double on = Math.min(LOOK_AHEAD - flat, next);
+        double px = to.x() + nx / next * on - s.x;
+        double pz = to.z() + nz / next * on - s.z;
+        return Math.hypot(px, pz) < 1e-3 ? yaw : meridian.core.api.Look.yawAlong(px, pz);
+    }
+
     /** The moves over ground and through the air, where a point gone past is backed onto. */
     private static boolean backs(Kind kind) {
         return kind == Kind.WALK || kind == Kind.DROP || kind == Kind.JUMP || kind == Kind.LEAP
@@ -149,7 +206,9 @@ final class Pilot {
         return switch (move.kind()) {
             case FLY -> dist < (through ? 0.6 : 0.35);
             // In the water near is enough; out of it, onto a bank, the body has to have come down.
-            case SWIM -> (s.inFluid && !s.onGround && dist < 0.6) || (s.onGround && flat < near && Math.abs(dy) < 0.6);
+            // On a bank it has to have stopped, as on any ground: a jump out lands still moving.
+            case SWIM -> (s.inFluid && !s.onGround && dist < 0.6) || (s.onGround && flat < near && Math.abs(dy) < 0.6
+                    && (through || s.inFluid || Math.hypot(s.vx, s.vz) < 0.4));
             case CLIMB -> flat < Math.max(near, 0.2) && Math.abs(dy) < 0.3 && (s.onGround || s.climbing);
             case MANTLE -> !s.mantling && s.onGround && flat < near && Math.abs(dy) < 0.3
                     && (through || Math.hypot(s.vx, s.vz) < 0.4);
@@ -241,7 +300,9 @@ final class Pilot {
         }
         boolean hold = !s.onGround && s.vy > 0;
         double f = leftGround && s.onGround ? forward(s, flat) : s.onGround ? 1 : airForward(s, flat);
-        return new Controls(key(f), 0, yaw, 0, edge || hold, false, sprint && s.onGround && !back, false, false);
+        // Sprint held through the flight, as a player holds it: let go in the air, the speed falls
+        // to a run's within the sprint's easing out, and a sprinting leap comes down a block short.
+        return new Controls(key(f), 0, yaw, 0, edge || hold, false, sprint && !back, false, false);
     }
 
     private Controls mantle(BodyState s, float yaw, double flat, double dy) {
