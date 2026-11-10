@@ -76,6 +76,11 @@ final class BodyState {
     double airKeySpeed;
     /** This air segment began with a jump. */
     boolean jumped;
+    /**
+     * A jump left this tick: the client shows it jumping from that tick on, though the speed it
+     * reports then is still the ground's (the recording of 08.11.2026).
+     */
+    boolean tookOff;
     /** Where the feet left the ground. */
     double takeoffY;
     /** How fast it fell the last tick before landing - what the server takes fall damage from. */
@@ -158,6 +163,7 @@ final class BodyState {
         c.airKeyTicks = airKeyTicks;
         c.airKeySpeed = airKeySpeed;
         c.jumped = jumped;
+        c.tookOff = tookOff;
         c.takeoffY = takeoffY;
         c.landingSpeed = landingSpeed;
         c.wasFalling = wasFalling;

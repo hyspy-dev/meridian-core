@@ -246,8 +246,9 @@ final class Pilot {
 
     private Controls mantle(BodyState s, float yaw, double flat, double dy) {
         if (s.mantling) {
-            // Pulled up: held still for a second.
-            return new Controls(0, 0, yaw, 0, false, false, false, false, false);
+            // Pulled up: held still for a second, forward still held - as a player does (recorded),
+            // and the others are shown a pull-up, not a player standing on the ledge.
+            return new Controls(1, 0, yaw, 0, false, false, false, false, false);
         }
         if (leftGround && s.onGround && Math.abs(move.to().y() - s.y) < 0.3) {
             // Up: onto the point.

@@ -443,7 +443,8 @@ public final class Body {
      * blocks stopped any of it.
      */
     private void send(Driver c, MovementStates states) {
-        double[] velocity = reportV;
+        // Pulled up onto a ledge, the client reports no speed from the pull-up's own tick (recorded).
+        double[] velocity = state.mantling ? new double[] {0, 0, 0} : reportV;
         reportV = new double[] {state.mvx, state.mvy, state.mvz};
         boolean any = sentPos == null || sentPos[0] != state.x || sentPos[1] != state.y || sentPos[2] != state.z
                 || sentLook == null || sentLook[0] != state.yaw || sentLook[1] != state.pitch

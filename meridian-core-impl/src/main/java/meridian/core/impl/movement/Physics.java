@@ -78,6 +78,7 @@ final class Physics {
         double feet0 = s.y;
         double vy0 = s.totalY();
         boolean ground0 = s.onGround;
+        s.tookOff = false;
 
         // --- the keys ------------------------------------------------------------
         double tf = clamp(k.forward(), -1, 1);
@@ -542,6 +543,7 @@ final class Physics {
             s.jumpBuffer = 0;
             s.jumping = true;
             s.jumped = true;
+            s.tookOff = true;
             s.sliding = false;
             s.slideTicks = -1;
             s.airKeyTicks = -1;
@@ -636,6 +638,7 @@ final class Physics {
             s.vy = fall(p.jumpForce, p, place.terminalMul());
             s.jumping = true;
             s.jumped = true;
+            s.tookOff = true;
         } else {
             double vy = fall(s.vy, p, place.terminalMul());
             if (s.jumping && !k.jump() && vy0 > 0) {
@@ -790,6 +793,7 @@ final class Physics {
             s.wasClimbing = false;
             s.jumping = true;
             s.jumped = true;
+            s.tookOff = true;
             s.climbSide = 0;
             return;
         }
@@ -960,6 +964,8 @@ final class Physics {
         s.y = top;
         s.z = pz;
         s.vx = s.vy = s.vz = 0;
+        // The client reports no speed from the pull-up's tick on (recorded).
+        s.mvx = s.mvy = s.mvz = 0;
         s.pushes.clear();
         s.mantling = true;
         s.mantleTicks = Tuning.MANTLE_FREEZE_TICKS;
@@ -997,8 +1003,10 @@ final class Physics {
             return;
         }
         if (s.jumped) {
-            s.jumping = s.jumping && vy0 > 0;
-            s.falling = vy0 <= 0;
+            // From the jump's own tick on, whose speed at the start is still the ground's.
+            boolean rising = vy0 > 0 || s.tookOff;
+            s.jumping = s.jumping && rising;
+            s.falling = !rising;
         } else {
             boolean pushed = !s.pushes.carried.isEmpty() || vy0 > 0;
             boolean was = s.falling;
