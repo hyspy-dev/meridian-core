@@ -31,6 +31,15 @@ final class Pilot {
     private static final int MAX_TICKS = 60 * 30;
     /** The head looks at the way this far ahead of the body, round the corner into the next move. */
     static final double LOOK_AHEAD = 2.0;
+    /**
+     * A walk shorter than this, with no move after it, leaves the head where it is: a step to stand
+     * on a point, taken sideways or back as a player does, the look kept on what it is on.
+     */
+    static final double STILL_UNDER = 1.2;
+    /** While the body goes somewhere the head keeps its pitch, brought no lower than this... */
+    static final double PITCH_LOW = Math.toRadians(-35);
+    /** ... and no higher than this: it looks where it looked, not up at the horizon. */
+    static final double PITCH_HIGH = Math.toRadians(15);
 
     private final Move move;
     private final Physics physics;
@@ -51,6 +60,8 @@ final class Pilot {
     private MoveResult result;
     /** The next move's point, when one follows. */
     private Vec3 ahead;
+    /** How far the move went across, at its first tick; {@code NaN} before it. */
+    private double length = Double.NaN;
     /** Where the head wants to look this tick. */
     private float lookYaw;
     private float lookPitch;
@@ -70,12 +81,17 @@ final class Pilot {
         this.ahead = ahead;
     }
 
+    /** A short step on its own: the head stays as it is. */
+    private boolean still() {
+        return move.kind() == Kind.WALK && ahead == null && length < STILL_UNDER;
+    }
+
     /** Where the head wants to look, as of the last {@link #next}: yaw. */
     float lookYaw() {
         return lookYaw;
     }
 
-    /** ... and pitch: level. */
+    /** ... and pitch: as it was, within a band - looking neither at the feet nor at the sky. */
     float lookPitch() {
         return lookPitch;
     }
@@ -117,8 +133,16 @@ final class Pilot {
         }
         float yaw = back ? meridian.core.api.Look.yawAlong(-dx, -dz)
                 : flat > 1e-3 ? meridian.core.api.Look.yawAlong(dx, dz) : s.yaw;
-        lookYaw = back ? yaw : look(s, to, flat, yaw);
-        lookPitch = 0;
+        if (Double.isNaN(length)) {
+            length = flat;
+        }
+        if (still()) {
+            lookYaw = s.yaw;
+            lookPitch = s.pitch;
+        } else {
+            lookYaw = back ? yaw : look(s, to, flat, yaw);
+            lookPitch = (float) Math.max(PITCH_LOW, Math.min(PITCH_HIGH, s.pitch));
+        }
         if (!s.onGround) {
             leftGround = true;
         }

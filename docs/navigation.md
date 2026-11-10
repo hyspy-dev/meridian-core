@@ -106,6 +106,10 @@ So nobody yanks the body from anyone else:
   the body, so near a corner it starts turning toward the next move before the corner. The keys go
   with the head: while it is still turning, the body goes where the move sends it, forward taking a
   side key's share, as a player runs one way while the mouse swings the look round.
+  - A short step on its own (under 1.2 blocks, no move after it) leaves the head where it is: the
+    body steps sideways or back, and the look stays on what it is on.
+  - Going somewhere, the head keeps its pitch, within -35° to 15°: it looks neither at the feet nor
+    up at the horizon for no reason.
 - **Sprint in a leap** is held through the flight, as a player holds it. Let go in the air, the speed
   falls to a run's, and a sprinting leap comes down a block short.
 
