@@ -46,13 +46,13 @@ public final class WorldImpl implements World {
     public WorldImpl(ChunkTracker chunks, WorldStateImpl worldState, Terrain terrain,
                      EntityTrackerImpl entities, InventoryTracker inventory,
                      InteractionControl interactions, MovementControlImpl movement,
-                     Scheduler scheduler, DoubleSupplier eyeHeight) {
+                     Scheduler scheduler, DoubleSupplier eyeHeight, ItemRegistry items) {
         this.chunks = chunks;
         this.worldState = worldState;
         this.terrain = terrain;
         this.interactions = interactions;
         this.scheduler = scheduler;
-        this.player = new PlayerImpl(entities, inventory, interactions, movement, eyeHeight);
+        this.player = new PlayerImpl(entities, inventory, interactions, movement, eyeHeight, items, worldState);
         // Late binding — PlayerImpl needs us for lookedAtBlock's raycast.
         // Doing this after the fields are assigned keeps the leaked-this
         // window as narrow as possible.

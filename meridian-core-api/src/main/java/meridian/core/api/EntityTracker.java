@@ -52,6 +52,15 @@ public interface EntityTracker {
     Optional<String> entityModelAssetId(int entityId);
 
     /**
+     * The item a dropped item on the ground is - the id of the stack its {@code Item} component
+     * carries - or empty for an entity that is no dropped item. The server takes it away once it is
+     * picked up.
+     */
+    default Optional<String> itemOf(int entityId) {
+        return Optional.empty();
+    }
+
+    /**
      * Nameplate text shown above the entity — the player's username for players,
      * or a custom display name for named entities. Populated from observed
      * {@code NameplateUpdate} components.

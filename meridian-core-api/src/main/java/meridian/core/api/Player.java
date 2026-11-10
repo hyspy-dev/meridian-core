@@ -69,6 +69,20 @@ public interface Player {
     int hotbarSlotOf(String substring);
 
     /**
+     * The hotbar slot holding what breaks {@code block} best, by the server's rule: a tool whose
+     * spec names the block's gather type (stone, soil, wood...) at no less than the block's quality,
+     * the strongest of them, the faster on a tie. With no such tool, an item that is no tool does
+     * what a bare hand does, while a weapon, a builder tool or a tool for other blocks breaks
+     * nothing at all: held, an empty slot (or an item that is no tool) is the one to take.
+     *
+     * @return the slot to hold, or {@code -1} when the one held does as well as any - nothing better
+     *         in the hotbar - or the block takes no breaking at all
+     */
+    default int bestToolSlot(BlockView block) {
+        return -1;
+    }
+
+    /**
      * Switches the active hotbar slot, forging a {@code SwapFrom} interaction —
      * the same one the client sends when the player scrolls the hotbar. The
      * server runs interactions against the item physically in the active slot,

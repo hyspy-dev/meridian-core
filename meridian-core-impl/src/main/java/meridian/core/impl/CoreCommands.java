@@ -28,7 +28,7 @@ import meridian.core.api.World;
  */
 final class CoreCommands {
 
-    static final String USAGE = "pos | block <x y z> | known <x y z> | find <name-contains> [radius] [limit] | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
+    static final String USAGE = "pos | block <x y z> | reach [item] | besttool <x y z> | known <x y z> | find <name-contains> [radius] [limit] | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
             + "use|plant|water <x y z> | hit|dig <x y z> [times] | break <x y z> [maxSwings] | place <x y z> [face] [orient] | "
             + "entities [range] [players] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | dodge | assets | asset <path> | "
             + "movement | body | stand <x y z> | surface <x z> [wait <s>] | safe <x y z> [radius] | hurts <x y z> | move <walk|jump|mantle|drop|leap|swim|climb|fly> <x y z> [walk|run|sprint] | "
@@ -143,6 +143,23 @@ final class CoreCommands {
             case "plant" -> after(interactions().plantOnBlock(at(args, 1)).thenApply(List::of), Face.UP.from(at(args, 1)));
             case "water" -> after(interactions().waterBlock(at(args, 1)).thenApply(List::of), at(args, 1));
             case "dig" -> after(repeat(times(args, 4), () -> interactions().digSwing(at(args, 1))), at(args, 1));
+            case "reach" -> {
+                // How far a dig with an item reaches (the held one without an id).
+                String item = args.size() > 1 ? args.get(1) : world().player().map(Player::heldItem).orElse(null);
+                java.util.OptionalDouble r = interactions().digReach(item);
+                Map<String, Object> out = new LinkedHashMap<>();
+                out.put("item", item == null ? "" : item);
+                out.put("reach", r.isPresent() ? r.getAsDouble() : -1);
+                yield CompletableFuture.completedFuture(out);
+            }
+            case "besttool" -> {
+                // The hotbar slot that breaks the block at x y z best.
+                BlockPos p = at(args, 1);
+                Map<String, Object> out = new LinkedHashMap<>();
+                out.put("slot", world().player().map(pl -> pl.bestToolSlot(world().blockAt(p.x(), p.y(), p.z()).type()))
+                        .orElse(-1));
+                yield CompletableFuture.completedFuture(out);
+            }
             case "break" -> {
                 BlockPos p = at(args, 1);
                 yield interactions().breakBlock(p, args.size() > 4 ? Integer.parseInt(args.get(4)) : 20)
@@ -580,6 +597,7 @@ final class CoreCommands {
         e.put("distance", Math.round(distance * 100) / 100.0);
         tracker.entityModelAssetId(id).ifPresent(m -> e.put("model", m));
         tracker.nameplateOf(id).ifPresent(n -> e.put("name", n));
+        tracker.itemOf(id).ifPresent(i -> e.put("item", i));
         if (tracker.isPlayer(id)) {
             e.put("player", true);
         }

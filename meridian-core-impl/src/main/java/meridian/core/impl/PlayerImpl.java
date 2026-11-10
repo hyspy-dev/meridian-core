@@ -1,9 +1,15 @@
 package meridian.core.impl;
 
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import meridian.core.api.Block;
 import meridian.core.api.BlockPos;
+import meridian.core.api.BlockView;
+import meridian.protocol.BlockBreaking;
+import meridian.protocol.BlockType;
+import meridian.protocol.ItemBase;
+import meridian.protocol.ItemToolSpec;
 import meridian.core.api.InteractionControl;
 import meridian.core.api.InteractionOutcome;
 import meridian.core.api.Player;
@@ -38,18 +44,23 @@ final class PlayerImpl implements Player {
     private final MovementControlImpl movement;
     /** The eyes above the feet: the player's model's (core's movement keeps it). */
     private final java.util.function.DoubleSupplier eyeHeight;
+    /** The server's items and block types - what tool gathers what. */
+    private final ItemRegistry items;
+    private final WorldStateImpl worldState;
     /** Set by {@link WorldImpl} after the world finishes building; needed
      *  to scan blocks for {@link #lookedAtBlock}. */
     private volatile World world;
 
     PlayerImpl(EntityTrackerImpl entities, InventoryTracker inventory,
                InteractionControl interactions, MovementControlImpl movement,
-               java.util.function.DoubleSupplier eyeHeight) {
+               java.util.function.DoubleSupplier eyeHeight, ItemRegistry items, WorldStateImpl worldState) {
         this.entities = entities;
         this.inventory = inventory;
         this.interactions = interactions;
         this.movement = movement;
         this.eyeHeight = eyeHeight;
+        this.items = items;
+        this.worldState = worldState;
     }
 
     /** Late binding from {@link WorldImpl} once its own fields are set. */
@@ -154,6 +165,65 @@ final class PlayerImpl implements Player {
     @Override
     public int hotbarSlotOf(String substring) {
         return inventory.findHotbarSlot(substring);
+    }
+
+    @Override
+    public int bestToolSlot(BlockView block) {
+        // The server's getSpecPowerDamageBlock: the spec of the block's gather type, at no less than
+        // its quality, gives the power; a weapon or a builder tool gathers nothing.
+        BlockType type = block == null ? null : worldState.blockTypeById(block.id());
+        BlockBreaking breaking = type == null || type.gathering == null ? null : type.gathering.breaking;
+        if (breaking == null || breaking.gatherType == null) {
+            return -1;
+        }
+        Map<Integer, String> hotbar = new java.util.TreeMap<>(inventory.hotbarItems());
+        int best = -1;
+        float bestPower = 0;
+        float bestSpeed = 0;
+        for (Map.Entry<Integer, String> e : hotbar.entrySet()) {
+            ItemBase item = items.item(e.getValue()).orElse(null);
+            if (item == null || item.weapon != null || item.builderToolData != null || item.tool == null
+                    || item.tool.specs == null) {
+                continue;
+            }
+            for (ItemToolSpec spec : item.tool.specs) {
+                if (spec == null || !breaking.gatherType.equals(spec.gatherType)) {
+                    continue;
+                }
+                if (spec.quality >= breaking.quality && (spec.power > bestPower
+                        || (spec.power == bestPower && best >= 0 && item.tool.speed > bestSpeed))) {
+                    best = e.getKey();
+                    bestPower = spec.power;
+                    bestSpeed = item.tool.speed;
+                }
+                break;
+            }
+        }
+        if (best >= 0 || breaksAsHand(items.item(hotbar.get(inventory.activeHotbarSlot())).orElse(null))) {
+            return best;
+        }
+        // No tool for it, and what is held does not break it at all - a weapon, a builder tool, a
+        // tool for other blocks: the bare hand, or an item that is no tool, does what a hand does.
+        for (int slot = 0; slot < inventory.hotbarCapacity(); slot++) {
+            if (!hotbar.containsKey(slot)) {
+                return slot;
+            }
+        }
+        for (Map.Entry<Integer, String> e : hotbar.entrySet()) {
+            if (breaksAsHand(items.item(e.getValue()).orElse(null))) {
+                return e.getKey();
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Whether an item breaks blocks as the bare hand does - the server's default spec for the gather
+     * type: no item, or one that is neither a tool, a weapon nor a builder tool. A tool breaks only
+     * the blocks its own specs name.
+     */
+    private static boolean breaksAsHand(ItemBase item) {
+        return item == null || (item.tool == null && item.weapon == null && item.builderToolData == null);
     }
 
     @Override

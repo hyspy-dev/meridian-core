@@ -15,6 +15,7 @@ import java.util.concurrent.RejectedExecutionException;
 import meridian.api.module.Scheduler;
 import meridian.api.packet.PacketHandler;
 import meridian.api.session.ProxySession;
+import meridian.protocol.packets.inventory.SetActiveSlot;
 import meridian.core.api.BlockPos;
 import meridian.core.api.Face;
 import meridian.core.api.InteractionControl;
@@ -68,6 +69,8 @@ import org.slf4j.LoggerFactory;
  */
 public final class InteractionControlImpl implements InteractionControl {
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
+    /** The hotbar's inventory-section id (server {@code InventoryComponent.HOTBAR_SECTION_ID}). */
+    private static final int HOTBAR_SECTION = -1;
 
     /** What the simulator should build for the chain's {@code interactionData}. */
     private enum DataKind { NONE, BLOCK, PLACEMENT }
@@ -780,6 +783,53 @@ public final class InteractionControlImpl implements InteractionControl {
     private static final Duration BREAK_SETTLE = Duration.ofMillis(500);
 
     @Override
+    public java.util.OptionalDouble digReach(String itemId) {
+        String item = itemId == null || itemId.isEmpty() ? null : itemId;
+        OptionalInt rootId = resolveRoot(InteractionType.Primary, item);
+        CompiledInteraction root = rootId.isEmpty() ? null : compileRoot(rootId.getAsInt());
+        if (root == null) {
+            return java.util.OptionalDouble.empty();
+        }
+        // A BreakBlock in the swing breaks the block aimed at (a pickaxe's); with none, what breaks
+        // blocks is a sweep the server makes (a shovel's, whose HitBlock forks break them) - only
+        // as far as it reaches. A sweep beside a BreakBlock hits entities only.
+        boolean aimed = false;
+        double sweep = Double.MAX_VALUE;
+        for (FlatOp op : root.ops()) {
+            if (op instanceof FlatOp.Node n) {
+                if (n.interaction() instanceof meridian.protocol.BreakBlockInteraction) {
+                    aimed = true;
+                } else if (n.interaction() instanceof SelectInteraction sel) {
+                    double r = selectorReach(sel.selector);
+                    if (r > 0) {
+                        sweep = Math.min(sweep, r);
+                    }
+                }
+            }
+        }
+        if (!aimed && sweep < Double.MAX_VALUE) {
+            return java.util.OptionalDouble.of(sweep);
+        }
+        GameMode own = entities.selfGameMode();
+        GameMode mode = own != null ? own : GameMode.Adventure;
+        double use = items.useDistance(item, mode);
+        return java.util.OptionalDouble.of(mode == GameMode.Creative ? Math.max(use, CREATIVE_REACH) : use);
+    }
+
+    /** How far from where it starts a selector takes things in; 0 when it does not say. */
+    private static double selectorReach(meridian.protocol.Selector selector) {
+        return switch (selector) {
+            case meridian.protocol.HorizontalSelector h -> h.endDistance;
+            case meridian.protocol.StabSelector st -> st.endDistance;
+            case meridian.protocol.AOECircleSelector c -> c.range;
+            case meridian.protocol.AOECylinderSelector c -> c.range;
+            case meridian.protocol.DonutSelector d -> d.maxRadius;
+            case meridian.protocol.RaycastSelector r -> r.distance;
+            case null, default -> 0;
+        };
+    }
+
+    @Override
     public CompletableFuture<Boolean> breakBlock(BlockPos pos, int maxSwings) {
         if (pos == null || maxSwings < 1 || session == null) {
             return CompletableFuture.completedFuture(false);
@@ -1300,7 +1350,25 @@ public final class InteractionControlImpl implements InteractionControl {
         // slot it leaves: its header was taken at its start.)
         inventory.observeActiveSlots(slot, inventory.activeUtilitySlot(),
                 inventory.activeToolsSlot());
+        // The server tells a client nothing of a slot it changed (it sends SetActiveSlot only to
+        // correct one): a game behind the session is put on the slot the server is now on, so the
+        // hand it shows, and the chains it sends next, match.
+        if (!headless(session)) {
+            SetActiveSlot onClient = new SetActiveSlot();
+            onClient.inventorySectionId = HOTBAR_SECTION;
+            onClient.activeSlot = slot;
+            session.sendToClient(onClient);
+        }
         return Started.of(run);
+    }
+
+    /** Whether no game is behind the session - then core is the client. */
+    private static boolean headless(ProxySession session) {
+        try {
+            return session != null && session.headless() != null;
+        } catch (NoSuchMethodError olderProxy) {
+            return false;
+        }
     }
 
     // ------------------------------------------------------------------

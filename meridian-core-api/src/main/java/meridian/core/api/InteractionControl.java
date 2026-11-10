@@ -162,6 +162,18 @@ public interface InteractionControl {
     }
 
     /**
+     * How far from the eyes a dig with this item breaks blocks. A tool whose dig is a sweep the
+     * server makes itself - a shovel's, a short arc in front - breaks only what the sweep takes in,
+     * as far as its far end; any other breaks the block it is aimed at, within the use distance of
+     * the player's game mode. An empty or {@code null} item is the bare hand.
+     *
+     * @return the distance; empty when core does not know the item's swing
+     */
+    default java.util.OptionalDouble digReach(String itemId) {
+        return java.util.OptionalDouble.empty();
+    }
+
+    /**
      * Forges one attack on an entity: the held item's {@code Primary} swing, reporting the
      * entity as what it hit. The server takes a player's entity hits from the client and runs
      * the item's hit (its damage, knockback, effects) on the entity - as when the player clicks

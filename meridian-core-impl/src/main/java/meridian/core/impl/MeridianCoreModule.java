@@ -358,7 +358,7 @@ public class MeridianCoreModule implements ProxyModule {
         // writing its own logic.
         WorldImpl world = new WorldImpl(
                 chunkTracker, worldState, terrain, entityTracker, inventoryTracker, interactionControl,
-                movementControl, ctx.scheduler(), movement::eyeHeight);
+                movementControl, ctx.scheduler(), movement::eyeHeight, itemRegistry);
         ctx.services().provide(World.class, world);
 
         // --- Chat: telling the player what happened ---------------------------

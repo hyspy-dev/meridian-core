@@ -17,6 +17,7 @@ import meridian.protocol.EntityEffectUpdate;
 import meridian.protocol.EntityEffectsUpdate;
 import meridian.protocol.InteractionType;
 import meridian.protocol.InteractionsUpdate;
+import meridian.protocol.ItemUpdate;
 import meridian.protocol.ModelTransform;
 import meridian.protocol.ModelUpdate;
 import meridian.protocol.NameplateUpdate;
@@ -76,6 +77,8 @@ final class EntityTrackerImpl implements EntityTracker {
      * last model; none for a model without one.
      */
     private final Map<Integer, double[]> hitboxes = new ConcurrentHashMap<>();
+    /** The stack's item id of each dropped item on the ground ({@code Item} component). */
+    private final Map<Integer, String> items = new ConcurrentHashMap<>();
     private volatile int localId = Integer.MIN_VALUE;
     private volatile Vec3 localPos;
     /** Look orientation of the local player, radians. */
@@ -105,6 +108,7 @@ final class EntityTrackerImpl implements EntityTracker {
                 interactions.remove(id);
                 effects.remove(id);
                 hitboxes.remove(id);
+                items.remove(id);
             }
         }
         if (packet.updates != null) {
@@ -153,6 +157,9 @@ final class EntityTrackerImpl implements EntityTracker {
                     } else if (component instanceof NameplateUpdate nameplate
                             && nameplate.text != null && !nameplate.text.isEmpty()) {
                         nameplates.put(update.networkId, nameplate.text);
+                    } else if (component instanceof ItemUpdate item && item.item != null
+                            && item.item.itemId != null && !item.item.itemId.isEmpty()) {
+                        items.put(update.networkId, item.item.itemId);
                     } else if (component instanceof PlayerSkinUpdate) {
                         // Only players carry a skin component — definitive
                         // player marker, independent of the model path.
@@ -286,6 +293,11 @@ final class EntityTrackerImpl implements EntityTracker {
     @Override
     public Optional<String> entityModelAssetId(int entityId) {
         return Optional.ofNullable(modelAssetIds.get(entityId));
+    }
+
+    @Override
+    public Optional<String> itemOf(int entityId) {
+        return Optional.ofNullable(items.get(entityId));
     }
 
     @Override
