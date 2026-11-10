@@ -17,6 +17,10 @@ final class Pilot {
 
     private static final double ARRIVE = 0.08;
     private static final double PASS = 0.45;
+    /** Nearer than this the way to the point is not taken as the move's heading: the aim swings. */
+    private static final double HEADING_FROM = 0.5;
+    /** A point gone past by no more than this is backed onto, not turned round to. */
+    private static final double BACK_UP_TO = 1.5;
     /** Ticks without getting nearer before the move is given up. */
     private static final int STUCK_TICKS = 75;
     /** The longest a move may take. */
@@ -33,6 +37,11 @@ final class Pilot {
     private double bestRise = Double.MAX_VALUE;
     private boolean leftGround;
     private boolean jumped;
+    /** Which way the move goes, across: toward the point while it was still ahead; 0, 0 before. */
+    private double headX;
+    private double headZ;
+    /** Gone past the point this tick: facing on the way the move went, backing onto it. */
+    private boolean back;
     private MoveResult result;
 
     Pilot(Move move, Physics physics, boolean through) {
@@ -64,7 +73,16 @@ final class Pilot {
         double dy = to.y() - s.y;
         double flat = Math.hypot(dx, dz);
         double dist = Math.sqrt(flat * flat + dy * dy);
-        float yaw = flat > 1e-3 ? meridian.core.api.Look.yawAlong(dx, dz) : s.yaw;
+        // Gone past the point (a drop carries on): back onto it, as a player does, looking on the
+        // way the move went - not turned round to it. Seen from a game's body, the camera.
+        back = backs(move.kind()) && (headX != 0 || headZ != 0) && dx * headX + dz * headZ < 0
+                && flat < BACK_UP_TO;
+        if (!back && flat > HEADING_FROM) {
+            headX = dx / flat;
+            headZ = dz / flat;
+        }
+        float yaw = back ? meridian.core.api.Look.yawAlong(-dx, -dz)
+                : flat > 1e-3 ? meridian.core.api.Look.yawAlong(dx, dz) : s.yaw;
         if (!s.onGround) {
             leftGround = true;
         }
@@ -100,8 +118,9 @@ final class Pilot {
         boolean sprint = gait == Gait.SPRINT;
         boolean walk = gait == Gait.WALK;
         return switch (move.kind()) {
-            case WALK -> new Controls(forward(s, flat), 0, yaw, 0, false, false, sprint, walk, s.flying);
-            case DROP -> new Controls(forward(s, flat), 0, yaw, 0, false, false, sprint && s.onGround, walk, s.flying);
+            case WALK -> new Controls(key(forward(s, flat)), 0, yaw, 0, false, false, sprint && !back, walk, s.flying);
+            case DROP -> new Controls(key(forward(s, flat)), 0, yaw, 0, false, false, sprint && s.onGround && !back,
+                    walk, s.flying);
             case JUMP -> jump(s, yaw, flat, dy, sprint, walk);
             case LEAP -> leap(s, yaw, flat, sprint || gait == Gait.RUN);
             case MANTLE -> mantle(s, yaw, flat, dy);
@@ -112,6 +131,17 @@ final class Pilot {
             case FLY -> new Controls(flat > 0.3 ? Math.min(1, flat) : 0, 0, yaw, 0, dy > 0.25, dy < -0.25, sprint, false,
                     true);
         };
+    }
+
+    /** The moves over ground and through the air, where a point gone past is backed onto. */
+    private static boolean backs(Kind kind) {
+        return kind == Kind.WALK || kind == Kind.DROP || kind == Kind.JUMP || kind == Kind.LEAP
+                || kind == Kind.MANTLE;
+    }
+
+    /** The forward key toward the point: the back key while backing onto it. */
+    private double key(double towardPoint) {
+        return back ? -towardPoint : towardPoint;
     }
 
     private boolean arrived(BodyState s, double flat, double dy, double dist) {
@@ -132,14 +162,16 @@ final class Pilot {
      * Forward, or not, or back, this tick, to stop on the point - the way a player does it. With
      * the key in, the speed goes to v' = 0.82·v + 0.18·S (S the asked-for speed one ramp step on);
      * let go, it dies by the ground's drag d, carrying v·dt·d/(1−d) more. Press while even a press
-     * now stops short of the point; tap back when letting go would carry past it.
+     * now stops short of the point; tap back when letting go would carry past it. In the air it
+     * steers to come down on the point, going through it or not: a drop at a run carries a block
+     * past it otherwise.
      */
     private double forward(BodyState s, double flat) {
-        if (through) {
-            return 1;
-        }
         if (!s.onGround) {
             return airForward(s, flat);
+        }
+        if (through) {
+            return 1;
         }
         meridian.protocol.MovementSettings p = physics.surroundings().settings();
         double d = physics.groundDrag(s);
@@ -198,7 +230,7 @@ final class Pilot {
         }
         boolean hold = !s.onGround && s.vy > 0;
         double f = leftGround && s.onGround ? forward(s, flat) : s.onGround ? 1 : airForward(s, flat);
-        return new Controls(f, 0, yaw, 0, press || hold, false, sprint, walk, false);
+        return new Controls(key(f), 0, yaw, 0, press || hold, false, sprint && !back, walk, false);
     }
 
     private Controls leap(BodyState s, float yaw, double flat, boolean sprint) {
@@ -209,7 +241,7 @@ final class Pilot {
         }
         boolean hold = !s.onGround && s.vy > 0;
         double f = leftGround && s.onGround ? forward(s, flat) : s.onGround ? 1 : airForward(s, flat);
-        return new Controls(f, 0, yaw, 0, edge || hold, false, sprint && s.onGround, false, false);
+        return new Controls(key(f), 0, yaw, 0, edge || hold, false, sprint && s.onGround && !back, false, false);
     }
 
     private Controls mantle(BodyState s, float yaw, double flat, double dy) {
@@ -219,7 +251,7 @@ final class Pilot {
         }
         if (leftGround && s.onGround && Math.abs(move.to().y() - s.y) < 0.3) {
             // Up: onto the point.
-            return new Controls(forward(s, flat), 0, yaw, 0, false, false, false, false, false);
+            return new Controls(key(forward(s, flat)), 0, yaw, 0, false, false, false, false, false);
         }
         // Jump at the wall and keep moving into it: the hands take the ledge as the head passes it.
         boolean press = s.onGround && flat < 1.2;
