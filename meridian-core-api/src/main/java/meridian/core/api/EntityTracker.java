@@ -1,5 +1,10 @@
 package meridian.core.api;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
@@ -47,6 +52,28 @@ public interface EntityTracker {
     Optional<String> entityModelAssetId(int entityId);
 
     /**
+     * The item a dropped item on the ground is - the id of the stack its {@code Item} component
+     * carries - or empty for an entity that is no dropped item. The server takes it away once it is
+     * picked up.
+     */
+    default Optional<String> itemOf(int entityId) {
+        return Optional.empty();
+    }
+
+    /** How many items a dropped item on the ground is - its stack's size; {@code 0} for anything else. */
+    default int itemQuantityOf(int entityId) {
+        return 0;
+    }
+
+    /**
+     * Where core first saw the entity since it came into view - for an item just dropped, where it
+     * fell from, however far it rolled or fell since. Empty for one core does not track.
+     */
+    default Optional<Vec3> firstSeenAt(int entityId) {
+        return Optional.empty();
+    }
+
+    /**
      * Nameplate text shown above the entity — the player's username for players,
      * or a custom display name for named entities. Populated from observed
      * {@code NameplateUpdate} components.
@@ -82,6 +109,91 @@ public interface EntityTracker {
      * itself. Empty if nothing is tracked or the player position is unknown.
      */
     OptionalInt nearestEntity();
+
+    /**
+     * The entities within {@code range} of the local player, nearest first, the player itself left
+     * out - measured from the player's feet to where each entity stands. Empty while the player's
+     * position is unknown.
+     *
+     * @param range       how far out, in blocks
+     * @param playersOnly only {@linkplain #isPlayer players}
+     * @return network ids, nearest first
+     */
+    default List<Integer> nearby(double range, boolean playersOnly) {
+        Optional<Vec3> me = localPosition();
+        if (me.isEmpty() || !(range >= 0)) {
+            return List.of();
+        }
+        OptionalInt self = localEntityId();
+        double rangeSq = range * range;
+        Map<Integer, Double> found = new HashMap<>();
+        for (int id : trackedEntities()) {
+            if (self.isPresent() && self.getAsInt() == id || playersOnly && !isPlayer(id)) {
+                continue;
+            }
+            Optional<Vec3> at = positionOf(id);
+            if (at.isEmpty()) {
+                continue;
+            }
+            double dSq = at.get().distanceSqTo(me.get());
+            if (dSq <= rangeSq) {
+                found.put(id, dSq);
+            }
+        }
+        List<Integer> out = new ArrayList<>(found.keySet());
+        out.sort(Comparator.<Integer>comparingDouble(found::get).thenComparingInt(id -> id));
+        return out;
+    }
+
+    /**
+     * A name to show for an entity: its {@linkplain #nameplateOf nameplate} (a player's name, a
+     * named NPC's), else its species from {@linkplain #entityModelAssetId its model}
+     * ({@code Sheep}), else the last part of its {@linkplain #entityTypeOf model path} - the folder
+     * when the file is the shared {@code Model} mesh - else {@code "?"}.
+     */
+    default String labelOf(int entityId) {
+        Optional<String> nameplate = nameplateOf(entityId);
+        if (nameplate.isPresent() && !nameplate.get().isBlank()) {
+            return nameplate.get();
+        }
+        Optional<String> asset = entityModelAssetId(entityId);
+        if (asset.isPresent() && !asset.get().isBlank()) {
+            return lastName(asset.get());
+        }
+        Optional<String> type = entityTypeOf(entityId);
+        return type.isPresent() && !type.get().isBlank() ? lastName(type.get()) : "?";
+    }
+
+    /**
+     * The readable last part of a model path: {@code Creatures/Cow/Model.blockymodel} is
+     * {@code Cow}, {@code Characters/Player.blockymodel} is {@code Player}, {@code Sheep} is itself.
+     */
+    private static String lastName(String path) {
+        String[] parts = path.split("/");
+        int last = parts.length - 1;
+        String name = parts[last];
+        int dot = name.lastIndexOf('.');
+        if (dot > 0) {
+            name = name.substring(0, dot);
+        }
+        if ((name.isEmpty() || name.equalsIgnoreCase("Model")) && last >= 1) {
+            name = parts[last - 1];
+        }
+        return name;
+    }
+
+    /**
+     * The box the server collides entity {@code entityId} by, where it stands now: its model's
+     * hitbox as the server sent it, sized by the entity's own scale the way the server sizes it,
+     * around its {@linkplain #positionOf position} (the feet). Standing - a crouch or a seat lowers
+     * the real box, which the server does not say.
+     *
+     * <p>Empty until the server has sent the entity's model with a hitbox, and for a model that has
+     * none. A core too old to tell answers empty.
+     */
+    default Optional<Box> boundsOf(int entityId) {
+        return Optional.empty();
+    }
 
     /**
      * Network id of the entity the local player is looking at — the tracked

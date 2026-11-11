@@ -37,6 +37,9 @@ import org.slf4j.LoggerFactory;
  * full-rebuild packets (frozen UI, flickering world). Instead, every override
  * change marks its id dirty and schedules a single coalesced flush, so a whole
  * {@code refresh()} collapses into <em>one</em> {@code UpdateBlockTypes(AddOrUpdate)}.
+ * That one carries only the ids whose look actually changed: each dirty id's new view is
+ * measured against what the client holds ({@link #shown}), so a rule set again, or replaced by
+ * one that touches the same few types, sends those few - not the whole catalog.
  * The emit goes through {@link ProxySession#sendToClient}, which bypasses the
  * handler chain so the MONITOR observer never re-ingests it.
  *
@@ -44,6 +47,44 @@ import org.slf4j.LoggerFactory;
  * {@link #ghostBlock} need chunk tracking and are not implemented yet.
  */
 public final class WorldStateImpl implements WorldState {
+    /** An item id's categories, from the server's item catalog - what a block view lists. */
+    private volatile java.util.function.Function<String, java.util.List<String>> itemCategories =
+            BlockViewImpl.NO_ITEMS;
+
+    /** Where a block's item categories come from: the item catalog. */
+    void itemCategories(java.util.function.Function<String, java.util.List<String>> lookup) {
+        itemCategories = lookup == null ? BlockViewImpl.NO_ITEMS : lookup;
+    }
+
+    java.util.function.Function<String, java.util.List<String>> itemCategories() {
+        return itemCategories;
+    }
+
+    /** Each block type's flip type by name, from the game's files ({@link BlockFlips}). */
+    private volatile java.util.function.Function<String, meridian.core.api.Rotation.Flip> flips =
+            BlockViewImpl.NO_FLIPS;
+
+    void flips(java.util.function.Function<String, meridian.core.api.Rotation.Flip> lookup) {
+        flips = lookup == null ? BlockViewImpl.NO_FLIPS : lookup;
+    }
+
+    java.util.function.Function<String, meridian.core.api.Rotation.Flip> flips() {
+        return flips;
+    }
+
+    /**
+     * The item catalog has arrived or changed: a block's {@link BlockView#categories()} can read
+     * otherwise now, so every rule runs again. The server sends the items just ahead of the block
+     * types (measured), so the load packet's rewrite already sees them; this covers an item update
+     * that comes later, which would leave a rule that tells blocks apart by kind judging by the
+     * old catalog. What it changes goes out as one emit, of what changed - usually nothing.
+     */
+    void itemsArrived() {
+        if (!rules.isEmpty()) {
+            markAllDirty();
+        }
+    }
+
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
 
     /** How long override changes are gathered before a single emit. */
@@ -56,6 +97,12 @@ public final class WorldStateImpl implements WorldState {
     private final Map<String, UnaryOperator<BlockView>> rules =
             java.util.Collections.synchronizedMap(new java.util.LinkedHashMap<>());
     private final Set<Integer> dirty = ConcurrentHashMap.newKeySet();
+    /**
+     * What the client holds for an id where that is not the server's truth: the view it was last
+     * sent, by the load packet's rewrite or by an emit. An id absent here shows the truth. What a
+     * change is measured against, so only the ids that look different afterwards go out.
+     */
+    private final Map<Integer, BlockType> shown = new ConcurrentHashMap<>();
     private final AtomicBoolean flushScheduled = new AtomicBoolean(false);
     private volatile ProxySession session;
     private volatile int maxId;
@@ -147,7 +194,7 @@ public final class WorldStateImpl implements WorldState {
                 }
             }
         }
-        return "default";
+        return BlockView.DEFAULT_STATE;
     }
 
     /**
@@ -165,9 +212,40 @@ public final class WorldStateImpl implements WorldState {
             // Read-only view — BlockViewImpl.with* clones before mutating, so
             // wrapping server-truth directly here is safe and avoids a deep clone
             // per block on every call.
-            out.add(new BlockViewImpl(e.getKey(), e.getValue()));
+            out.add(new BlockViewImpl(e.getKey(), e.getValue(), itemCategories, flips));
         }
         return List.copyOf(out);
+    }
+
+    /** Name &rarr; id, with the count of types it was built from: rebuilt when more types arrive. */
+    private record NameIndex(int from, Map<String, Integer> ids) {}
+
+    private volatile NameIndex idsByName = new NameIndex(-1, Map.of());
+
+    @Override
+    public java.util.OptionalInt blockId(String name) {
+        if (name == null) {
+            return java.util.OptionalInt.empty();
+        }
+        if (BlockView.EMPTY.equals(name)) {
+            return java.util.OptionalInt.of(0);
+        }
+        NameIndex index = idsByName;
+        int count = serverTruth.size();
+        if (index.from() != count) {
+            Map<String, Integer> built = new HashMap<>(count * 2);
+            for (Map.Entry<Integer, BlockType> e : serverTruth.entrySet()) {
+                String n = e.getValue().name;
+                // Two types of one name: the lower id, as the api's own answer has it.
+                if (n != null) {
+                    built.merge(n, e.getKey(), Math::min);
+                }
+            }
+            index = new NameIndex(count, Map.copyOf(built));
+            idsByName = index;
+        }
+        Integer id = index.ids().get(name);
+        return id == null ? java.util.OptionalInt.empty() : java.util.OptionalInt.of(id);
     }
 
     @Override
@@ -209,7 +287,7 @@ public final class WorldStateImpl implements WorldState {
      * {@code truth}: the view clones before it changes anything.
      */
     BlockType clientView(int id, BlockType truth) {
-        BlockView view = new BlockViewImpl(id, truth);
+        BlockView view = new BlockViewImpl(id, truth, itemCategories, flips);
         List<UnaryOperator<BlockView>> active;
         synchronized (rules) {
             active = new ArrayList<>(rules.values());
@@ -221,7 +299,26 @@ public final class WorldStateImpl implements WorldState {
         if (override != null) {
             view = override.apply(view);
         }
-        return ((BlockViewImpl) view).toBlockType();
+        BlockType seen = ((BlockViewImpl) view).toBlockType();
+        // A rule that rebuilt the type without changing how it looks has changed nothing.
+        return BlockViewImpl.sameLook(seen, truth) ? truth : seen;
+    }
+
+    /**
+     * The client has been given {@code seen} for {@code id} straight from the server's packet - the
+     * load rewrite - so that is what later changes are measured against.
+     */
+    void shownByServerPacket(int id, BlockType seen, BlockType truth) {
+        if (seen == null || seen == truth) {
+            shown.remove(id);
+        } else {
+            shown.put(id, seen);
+        }
+    }
+
+    /** The server took a type away; the client holds nothing of ours for it any more. */
+    void forgetShown(int id) {
+        shown.remove(id);
     }
 
     private void markAllDirty() {
@@ -265,7 +362,16 @@ public final class WorldStateImpl implements WorldState {
             BlockType truth = serverTruth.get(id);
             if (truth == null) continue;
             // Rules + the id's override; with neither this is server truth again.
-            changed.put(id, clientView(id, truth));
+            BlockType view = clientView(id, truth);
+            BlockType held = shown.get(id);
+            if (view == truth) {
+                if (held == null) continue;           // shows the truth, and stays so
+                shown.remove(id);
+            } else {
+                if (held != null && BlockViewImpl.sameLook(held, view)) continue;   // already so
+                shown.put(id, view);
+            }
+            changed.put(id, view);
         }
         if (changed.isEmpty()) return;
 

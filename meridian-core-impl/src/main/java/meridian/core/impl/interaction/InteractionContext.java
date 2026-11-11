@@ -41,6 +41,9 @@ import meridian.protocol.MovementStates;
  * @param interactionVars the held item's interaction variables — what
  *                        {@code ReplaceInteraction} resolves its replacement
  *                        root against (the server's {@code getInteractionVars})
+ * @param entity          the entity the action is aimed at — what a swing reports it hit and
+ *                        what a use acts on — or {@code null} when it is aimed at no entity
+ * @param effects         the player's and the target's active effects, as the walk sees them
  */
 record InteractionContext(InteractionType interactionType,
                           BlockPosition targetBlock,
@@ -53,7 +56,9 @@ record InteractionContext(InteractionType interactionType,
                           MovementStates movementStates,
                           GameMode gameMode,
                           Map<String, Integer> interactionVars,
-                          List<BlockPosition> hitBlocks) {
+                          List<BlockPosition> hitBlocks,
+                          EntityTarget entity,
+                          WalkEffects effects) {
 
     /** Context for a plain block interaction (harvest / use) — no placement. */
     static InteractionContext ofBlock(InteractionType type, BlockPosition block,
@@ -61,25 +66,38 @@ record InteractionContext(InteractionType interactionType,
                                       MovementStates movement, GameMode gameMode,
                                       Map<String, Integer> vars) {
         return new InteractionContext(type, block, blockType, blockId, null, face, null, -1,
-                movement, gameMode, vars, null);
+                movement, gameMode, vars, null, null, WalkEffects.NONE);
     }
 
     /** Copy carrying the placement {@code blockRotation} to send (orientation). */
     InteractionContext withBlockRotation(BlockRotation rotation) {
         return new InteractionContext(interactionType, targetBlock, targetBlockType, targetBlockId,
-                placeBlock, blockFace, rotation, placedBlockId, movementStates, gameMode, interactionVars, hitBlocks);
+                placeBlock, blockFace, rotation, placedBlockId, movementStates, gameMode, interactionVars, hitBlocks, entity, effects);
     }
 
     /** Copy with a different acting block — used to point each dig fork at its block. */
     InteractionContext withTarget(BlockPosition block) {
         return new InteractionContext(interactionType, block, targetBlockType, targetBlockId,
-                placeBlock, blockFace, blockRotation, placedBlockId, movementStates, gameMode, interactionVars, hitBlocks);
+                placeBlock, blockFace, blockRotation, placedBlockId, movementStates, gameMode, interactionVars, hitBlocks, entity, effects);
     }
 
     /** Copy carrying the area-dig target blocks ({@code SelectInteraction} forks one per block). */
+    /** The same context aimed at an entity - a swing that hits it, a use that acts on it. */
+    InteractionContext withEntity(EntityTarget target) {
+        return new InteractionContext(interactionType, targetBlock, targetBlockType, targetBlockId,
+                placeBlock, blockFace, blockRotation, placedBlockId, movementStates, gameMode, interactionVars, hitBlocks, target,
+                effects.withTarget(target == null ? null : target.effects()));
+    }
+
+    /** The same context with these effects - a walk's own copy, or the player's as last seen. */
+    InteractionContext withEffects(WalkEffects fx) {
+        return new InteractionContext(interactionType, targetBlock, targetBlockType, targetBlockId,
+                placeBlock, blockFace, blockRotation, placedBlockId, movementStates, gameMode, interactionVars, hitBlocks, entity, fx);
+    }
+
     InteractionContext withHitBlocks(List<BlockPosition> blocks) {
         return new InteractionContext(interactionType, targetBlock, targetBlockType, targetBlockId,
-                placeBlock, blockFace, blockRotation, placedBlockId, movementStates, gameMode, interactionVars, blocks);
+                placeBlock, blockFace, blockRotation, placedBlockId, movementStates, gameMode, interactionVars, blocks, entity, effects);
     }
 
     /**
@@ -98,7 +116,7 @@ record InteractionContext(InteractionType interactionType,
                                     target.y + normalY(face),
                                     target.z + normalZ(face));
         return new InteractionContext(type, target, targetType, blockId, placed, face, rotation, -1,
-                movement, gameMode, vars, null);
+                movement, gameMode, vars, null, null, WalkEffects.NONE);
     }
 
     // Face normals, matching the server (Vector3iUtil / BlockFace.getDirection):

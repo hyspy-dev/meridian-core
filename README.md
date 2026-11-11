@@ -92,11 +92,20 @@ nobody is providing them.
   follow-cam, entity POV) via the same packets Hytale's own server commands use.
   Backs [meridian-camera-tweaks](../meridian-camera-tweaks).
 - **`DebugRender`** - boxes and lines in the world.
+- **`ClientSpoof`** - what the client is shown of itself (a held game mode, flight, full stamina,
+  a hidden death) and what the server is told of its movement (the flying / swimming flags, no
+  fall speed). Core applies it inside its own rewriters after reading the truth, so every other
+  service keeps the server's values. Backs [meridian-client-control](../meridian-client-control).
 
 **Acting**
 
 - **`InteractionControl`** - forging the interaction chains the server expects, so a
   module can dig, place or use something the way the client would have.
+- **`Navigator`** - takes the player somewhere: a way found over the ground and gone move by move.
+- **`Worker`** - breaks a block: the best tool, a place within its reach, what is in the way first.
+  It also picks up the drops. Both are in [docs/navigation.md](docs/navigation.md), with core's
+  "Go to a point" panel and the `nav` command. They back
+  [meridian-auto-miner](../meridian-navigation).
 - **`SelectionBus`** - who is selecting what.
 
 meridian-core is **consumer-driven**: services are added one at a time when a real

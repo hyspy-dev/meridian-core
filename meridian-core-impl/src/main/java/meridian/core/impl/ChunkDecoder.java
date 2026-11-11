@@ -1,5 +1,7 @@
 package meridian.core.impl;
 
+import meridian.core.api.WorldChunks;
+
 /**
  * Decodes the block-id array out of a {@code SetChunk.data} payload.
  *
@@ -134,6 +136,160 @@ final class ChunkDecoder {
         return new Section(ids, any ? rotations : null, fillers);
     }
 
+    // ------------------------------------------------------------------
+    // The palettes as they are packed - for WorldChunks.decode
+    // ------------------------------------------------------------------
+
+    /**
+     * A section's three palettes with their internal ids kept, as {@link WorldChunks#decode} hands
+     * them out. A payload that ends early gives empty palettes for what is missing.
+     */
+    static WorldChunks.Section rawSection(byte[] data) {
+        if (data == null || data.length < 1) {
+            return new WorldChunks.Section(RawPalette.NONE, RawPalette.NONE, RawPalette.NONE);
+        }
+        RawPalette blocks = RawPalette.read(data, 0);
+        RawPalette fillers = blocks.end < data.length ? RawPalette.read(data, blocks.end) : RawPalette.NONE;
+        RawPalette rotations = fillers != RawPalette.NONE && fillers.end < data.length
+                ? RawPalette.read(data, fillers.end) : RawPalette.NONE;
+        return new WorldChunks.Section(blocks, fillers, rotations);
+    }
+
+    /** A fluid section's palette with its internal ids kept, and its levels as packed. */
+    static WorldChunks.FluidSection rawFluids(byte[] data) {
+        if (data == null || data.length < 1) {
+            return new WorldChunks.FluidSection(RawPalette.NONE, null);
+        }
+        RawPalette fluids = RawPalette.read(data, 0);
+        int at = fluids.end;
+        if (at >= data.length || data[at] == 0 || at + 1 + LEVEL_BYTES > data.length) {
+            return new WorldChunks.FluidSection(fluids, null);
+        }
+        byte[] levels = new byte[LEVEL_BYTES];
+        System.arraycopy(data, at + 1, levels, 0, LEVEL_BYTES);
+        return new WorldChunks.FluidSection(fluids, levels);
+    }
+
+    /**
+     * One palette read in place: its entries copied out, its cells read from the payload on demand
+     * (the payload is the packet's own, which nobody may change).
+     */
+    static final class RawPalette implements WorldChunks.Palette {
+
+        static final RawPalette NONE = new RawPalette(null, EMPTY, new int[0], new int[0], new int[0], 0, 0);
+
+        private final byte[] data;
+        private final int kind;
+        private final int[] internal;
+        private final int[] values;
+        private final int[] counts;
+        private final int body;
+        /** Where the next palette starts. */
+        final int end;
+        /** Internal id → value, built when a cell's value is first asked for. */
+        private volatile int[] lookup;
+
+        private RawPalette(byte[] data, int kind, int[] internal, int[] values, int[] counts, int body, int end) {
+            this.data = data;
+            this.kind = kind;
+            this.internal = internal;
+            this.values = values;
+            this.counts = counts;
+            this.body = body;
+            this.end = end;
+        }
+
+        /** The palette whose type byte is at {@code offset}. */
+        static RawPalette read(byte[] data, int offset) {
+            int kind = data[offset] & 0xFF;
+            if (kind == EMPTY) {
+                return new RawPalette(null, EMPTY, new int[0], new int[0], new int[0], 0, offset + 1);
+            }
+            if (kind != HALF_BYTE && kind != BYTE && kind != SHORT) {
+                throw new IllegalArgumentException("unknown palette type " + kind);
+            }
+            int at = offset + 1;
+            int size = u16(data, at);
+            at += 2;
+            int idBytes = kind == SHORT ? 2 : 1;
+            int[] internal = new int[size];
+            int[] values = new int[size];
+            int[] counts = new int[size];
+            for (int i = 0; i < size; i++) {
+                internal[i] = idBytes == 2 ? u16(data, at) : data[at] & 0xFF;
+                values[i] = i32(data, at + idBytes);
+                counts[i] = u16(data, at + idBytes + 4);
+                at += idBytes + 4 + 2;
+            }
+            int bodyBytes = kind == HALF_BYTE ? SECTION_BLOCKS / 2 : kind == BYTE ? SECTION_BLOCKS : SECTION_BLOCKS * 2;
+            if (at + bodyBytes > data.length) {
+                throw new IllegalArgumentException("palette body runs past the payload");
+            }
+            return new RawPalette(data, kind, internal, values, counts, at, at + bodyBytes);
+        }
+
+        @Override public int kind() { return kind; }
+        @Override public int size() { return internal.length; }
+        @Override public int internalId(int entry) { return internal[entry]; }
+        @Override public int value(int entry) { return values[entry]; }
+        @Override public int count(int entry) { return counts[entry]; }
+
+        @Override
+        public int internalAt(int cell) {
+            return switch (kind) {
+                // Two cells a byte, the earlier one in the high half (the server's getNibble).
+                case HALF_BYTE -> (data[body + (cell >> 1)] >> ((1 - (cell & 1)) * 4)) & 0x0F;
+                case BYTE -> data[body + cell] & 0xFF;
+                case SHORT -> u16(data, body + cell * 2);   // little-endian on the wire
+                default -> 0;
+            };
+        }
+
+        @Override
+        public int valueAt(int cell) {
+            return kind == EMPTY ? 0 : lookup()[internalAt(cell)];
+        }
+
+        /** Internal id → value, built once. */
+        private int[] lookup() {
+            int[] map = lookup;
+            if (map == null) {
+                map = new int[kind == SHORT ? 65536 : kind == BYTE ? 256 : 16];
+                for (int i = 0; i < internal.length; i++) {
+                    map[internal[i]] = values[i];
+                }
+                lookup = map;
+            }
+            return map;
+        }
+
+        /** Every cell's value into {@code out} - an empty palette leaves it as it is (all nought). */
+        void fill(int[] out) {
+            if (kind == EMPTY) {
+                return;
+            }
+            int[] map = lookup();
+            switch (kind) {
+                case HALF_BYTE -> {
+                    for (int i = 0; i < SECTION_BLOCKS; i++) {
+                        int b = data[body + (i >> 1)] & 0xFF;
+                        out[i] = map[(i & 1) == 0 ? b >> 4 : b & 0x0F];
+                    }
+                }
+                case BYTE -> {
+                    for (int i = 0; i < SECTION_BLOCKS; i++) {
+                        out[i] = map[data[body + i] & 0xFF];
+                    }
+                }
+                default -> {
+                    for (int i = 0; i < SECTION_BLOCKS; i++) {
+                        out[i] = map[u16(data, body + i * 2)];
+                    }
+                }
+            }
+        }
+    }
+
     private static boolean allZero(int[] values) {
         for (int v : values) {
             if (v != 0) {
@@ -145,66 +301,15 @@ final class ChunkDecoder {
 
     /**
      * Decodes the palette whose type byte sits at {@code offset}, into {@code out} when it is not
-     * {@code null}, and returns the offset just past it.
+     * {@code null}, and returns the offset just past it - the one palette reader ({@link RawPalette}),
+     * each cell's internal id mapped to the value its entry stands for.
      */
     private static int decodeTyped(byte[] data, int offset, int[] out) {
-        int type = data[offset] & 0xFF;
-        return switch (type) {
-            case 0 -> offset + 1;                            // Empty: the type byte, nothing else
-            case 1 -> decodePalette(data, offset + 1, out, 4);
-            case 2 -> decodePalette(data, offset + 1, out, 8);
-            case 3 -> decodePalette(data, offset + 1, out, 16);
-            default -> throw new IllegalArgumentException("unknown palette type " + type);
-        };
-    }
-
-    /**
-     * Decodes one palette into {@code blocks}, or only steps over it when that is {@code null}.
-     *
-     * @param idBits internal-id width: 4 (HalfByte), 8 (Byte) or 16 (Short)
-     * @return the offset just past the palette
-     */
-    private static int decodePalette(byte[] data, int offset, int[] blocks, int idBits) {
-        int count = u16(data, offset);
-        offset += 2;
-
-        // entry: internalId (idBits, but min 1 byte) + externalId (int) + count (short)
-        int idBytes = idBits == 16 ? 2 : 1;
-        int entrySize = idBytes + 4 + 2;
-        int[] internalToExternal = new int[idBits == 16 ? 65536 : (1 << idBits)];
-        for (int i = 0; i < count; i++) {
-            int base = offset + i * entrySize;
-            int internalId = idBytes == 2 ? u16(data, base) : (data[base] & 0xFF);
-            int externalId = i32(data, base + idBytes);
-            internalToExternal[internalId] = externalId;
+        RawPalette palette = RawPalette.read(data, offset);
+        if (out != null) {
+            palette.fill(out);
         }
-        offset += count * entrySize;
-
-        int arrayBytes = idBits == 4 ? SECTION_BLOCKS / 2 : idBits == 8 ? SECTION_BLOCKS : SECTION_BLOCKS * 2;
-        if (blocks == null) {
-            return offset + arrayBytes;
-        }
-        switch (idBits) {
-            case 4 -> {
-                for (int i = 0; i < SECTION_BLOCKS; i++) {
-                    int b = data[offset + (i >> 1)] & 0xFF;
-                    int nibble = (i & 1) == 0 ? (b >> 4) : (b & 0x0F);
-                    blocks[i] = internalToExternal[nibble];
-                }
-            }
-            case 8 -> {
-                for (int i = 0; i < SECTION_BLOCKS; i++) {
-                    blocks[i] = internalToExternal[data[offset + i] & 0xFF];
-                }
-            }
-            case 16 -> {
-                for (int i = 0; i < SECTION_BLOCKS; i++) {
-                    blocks[i] = internalToExternal[u16(data, offset + i * 2)];
-                }
-            }
-            default -> throw new IllegalArgumentException("bad idBits " + idBits);
-        }
-        return offset + arrayBytes;
+        return palette.end;
     }
 
     /** Unsigned little-endian 16-bit. */

@@ -3,7 +3,6 @@ package meridian.core.impl;
 import java.util.List;
 import meridian.api.session.ProxySession;
 import meridian.core.api.PastePreview;
-import meridian.protocol.packets.interface_.BlockChange;
 import meridian.protocol.packets.player.HideTriggerVolumePastePrefabPreview;
 import meridian.protocol.packets.player.ShowTriggerVolumePastePrefabPreview;
 import org.joml.Vector3f;
@@ -33,23 +32,11 @@ final class PastePreviewImpl implements PastePreview {
         if (live == null) {
             return;
         }
-        BlockChange[] changes = new BlockChange[blocks.size()];
-        for (int i = 0; i < changes.length; i++) {
-            Change c = blocks.get(i);
-            changes[i] = new BlockChange(c.dx(), c.dy(), c.dz(), c.blockId(), (byte) c.rotation());
-        }
         ShowTriggerVolumePastePrefabPreview pkt = new ShowTriggerVolumePastePrefabPreview();
         pkt.position = new Vector3f(anchorX, anchorY, anchorZ);
-        pkt.blocksChange = changes;
+        pkt.blocksChange = Changes.blocks(blocks);
         if (fluids != null && !fluids.isEmpty()) {
-            meridian.protocol.packets.interface_.FluidChange[] wet =
-                    new meridian.protocol.packets.interface_.FluidChange[fluids.size()];
-            for (int i = 0; i < wet.length; i++) {
-                FluidChange f = fluids.get(i);
-                wet[i] = new meridian.protocol.packets.interface_.FluidChange(
-                        f.dx(), f.dy(), f.dz(), f.fluidId(), (byte) f.level());
-            }
-            pkt.fluidsChange = wet;
+            pkt.fluidsChange = Changes.fluids(fluids);
         }
         pkt.biomeTint = BIOME_TINT;
         pkt.waterTint = WATER_TINT;

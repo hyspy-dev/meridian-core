@@ -7,9 +7,11 @@ import java.util.function.IntFunction;
 import meridian.protocol.ApplyForceInteraction;
 import meridian.protocol.ChainingInteraction;
 import meridian.protocol.ChargingInteraction;
+import meridian.protocol.DamageEntityInteraction;
 import meridian.protocol.FirstClickInteraction;
 import meridian.protocol.Interaction;
 import meridian.protocol.MovementConditionInteraction;
+import meridian.protocol.PlaceModeSelectInteraction;
 import meridian.protocol.SerialInteraction;
 import meridian.protocol.SimpleInteraction;
 import org.slf4j.Logger;
@@ -95,6 +97,10 @@ final class InteractionFlattener {
             compileApplyForce(force, nodeId, depth);
         } else if (node instanceof MovementConditionInteraction move) {
             compileMovementCondition(move, nodeId, depth);
+        } else if (node instanceof PlaceModeSelectInteraction placeMode) {
+            compilePlaceModeSelect(placeMode, nodeId, depth);
+        } else if (node instanceof DamageEntityInteraction damage) {
+            compileDamageEntity(damage, nodeId, depth);
         } else if (node instanceof FirstClickInteraction fc) {
             compileBranching(fc, nodeId, fc.click, fc.held, depth);
         } else if (node instanceof SimpleInteraction si) {
@@ -103,10 +109,6 @@ final class InteractionFlattener {
         } else {
             // Base compile() = a single leaf operation.
             addOperation(node, nodeId);
-            if ("DamageEntityInteraction".equals(node.getClass().getSimpleName())) {
-                log.warn("meridian-core: DamageEntityInteraction node {} flattened as leaf "
-                        + "(combat compile not ported)", nodeId);
-            }
         }
     }
 
@@ -177,6 +179,95 @@ final class InteractionFlattener {
         resolveLabel(labels[keys.size()]);
         if (node.failed != Integer.MIN_VALUE) {
             compileNode(node.failed, depth + 1);
+        }
+        resolveLabel(end);
+    }
+
+    /**
+     * {@code PlaceModeSelectInteraction}: one operation with a label per creative place mode
+     * (Default, Replace, Retype, Extrude, SurfaceDraw, FastPlace), the Default branch inline after
+     * it, then each mode that has its own branch - a mode without one shares Default's label - and
+     * finally {@code next}. At run time it jumps to the mode's branch (see the simulator).
+     */
+    private void compilePlaceModeSelect(PlaceModeSelectInteraction node, int nodeId, int depth) {
+        OpLabel[] labels = new OpLabel[PLACE_MODES];
+        addOperation(node, nodeId, labels);          // the array is filled in below, as the server's
+        OpLabel end = new OpLabel();
+        labels[0] = labelHere();
+        compileNode(node.defaultInteractions, depth + 1);
+        jump(end);
+        placeModeBranch(labels, 1, node.replaceInteractions, end, depth);
+        placeModeBranch(labels, 2, node.retypeInteractions, end, depth);
+        placeModeBranch(labels, 3, node.extrudeInteractions, end, depth);
+        placeModeBranch(labels, 4, node.surfaceDrawInteractions, end, depth);
+        placeModeBranch(labels, 5, node.fastPlaceInteractions, end, depth);
+        resolveLabel(end);
+        if (node.next != Integer.MIN_VALUE) {
+            compileNode(node.next, depth + 1);
+        }
+    }
+
+    /** The labels a {@code PlaceModeSelectInteraction} operation carries, one per place mode. */
+    static final int PLACE_MODES = 6;
+
+    private void placeModeBranch(OpLabel[] labels, int index, int branch, OpLabel end, int depth) {
+        if (branch == Integer.MIN_VALUE) {
+            labels[index] = labels[0];
+            return;
+        }
+        labels[index] = labelHere();
+        compileNode(branch, depth + 1);
+        jump(end);
+    }
+
+    /** A label at the next operation - the server's {@code createLabel()}. */
+    private OpLabel labelHere() {
+        OpLabel label = new OpLabel();
+        resolveLabel(label);
+        return label;
+    }
+
+    /** The labels of a {@code DamageEntityInteraction} operation, before its angled and targeted ones. */
+    static final int DAMAGE_FAILED = 0;
+    static final int DAMAGE_SUCCESS = 1;
+    static final int DAMAGE_BLOCKED = 2;
+
+    /**
+     * {@code DamageEntityInteraction}: one operation with a label for Failed, Success and Blocked,
+     * then one per angled damage and one per targeted damage (keys sorted, as the server sorts
+     * them), each branch inline in that order and ending in a jump past them all. An angled or
+     * targeted branch without a {@code next} of its own runs the interaction's {@code next}. The
+     * server picks the branch by how the hit went (see the simulator).
+     */
+    private void compileDamageEntity(DamageEntityInteraction node, int nodeId, int depth) {
+        meridian.protocol.AngledDamage[] angled = node.angledDamage != null
+                ? node.angledDamage : new meridian.protocol.AngledDamage[0];
+        List<String> targeted = new ArrayList<>(node.targetedDamage != null
+                ? node.targetedDamage.keySet() : java.util.Set.of());
+        java.util.Collections.sort(targeted);
+        OpLabel[] labels = new OpLabel[3 + angled.length + targeted.size()];
+        addOperation(node, nodeId, labels);          // the array is filled in below, as the server's
+        OpLabel end = new OpLabel();
+        labels[DAMAGE_FAILED] = labelHere();
+        compileNode(node.failed, depth + 1);
+        jump(end);
+        labels[DAMAGE_SUCCESS] = labelHere();
+        compileNode(node.next, depth + 1);
+        jump(end);
+        labels[DAMAGE_BLOCKED] = labelHere();
+        compileNode(node.blocked, depth + 1);
+        jump(end);
+        int at = 3;
+        for (meridian.protocol.AngledDamage a : angled) {
+            labels[at++] = labelHere();
+            compileNode(a.next != Integer.MIN_VALUE ? a.next : node.next, depth + 1);
+            jump(end);
+        }
+        for (String key : targeted) {
+            meridian.protocol.TargetedDamage t = node.targetedDamage.get(key);
+            labels[at++] = labelHere();
+            compileNode(t != null && t.next != Integer.MIN_VALUE ? t.next : node.next, depth + 1);
+            jump(end);
         }
         resolveLabel(end);
     }
