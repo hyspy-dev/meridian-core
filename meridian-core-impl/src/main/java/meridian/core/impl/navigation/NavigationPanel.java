@@ -27,7 +27,7 @@ public final class NavigationPanel {
 
     private static final String USAGE = "goto <x y z> [radius] | plan <x y z> [radius] | trace <x y z> [radius] | cancel"
             + " | place <x y z> <item> [rotation] | take <x y z> <item> <count> | deposit <x y z> <item> <count>"
-            + " | pillar <item> <blocks>";
+            + " | pillar <item> <blocks> | down <blocks> | pour|scoop <x y z> <item>";
 
     private final Navigator navigator;
     private final Worker worker;
@@ -147,6 +147,9 @@ public final class NavigationPanel {
             navigator.cancel();
             return CompletableFuture.completedFuture(Map.of("cancelled", true));
         }
+        if (what.equals("down") && args.size() >= 2) {
+            return worker.pillarDown(Integer.parseInt(args.get(1))).thenApply(o -> Map.of("outcome", o.name()));
+        }
         if (what.equals("pillar") && args.size() >= 3) {
             return worker.pillarUp(args.get(1), Integer.parseInt(args.get(2))).thenApply(o -> Map.of("outcome", o.name()));
         }
@@ -161,6 +164,13 @@ public final class NavigationPanel {
             }
             int rotation = args.size() > 5 ? Integer.parseInt(args.get(5)) : -1;
             return worker.place(cell, args.get(4), rotation).thenApply(o -> Map.of("outcome", o.name()));
+        }
+        if (what.equals("pour") || what.equals("scoop")) {
+            if (args.size() < 5) {
+                throw new IllegalArgumentException(USAGE);
+            }
+            return (what.equals("pour") ? worker.pour(cell, args.get(4)) : worker.scoop(cell, args.get(4)))
+                    .thenApply(o -> Map.of("outcome", o.name()));
         }
         if (what.equals("deposit")) {
             if (args.size() < 6) {

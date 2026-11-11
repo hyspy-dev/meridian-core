@@ -83,7 +83,9 @@ public interface Worker {
         /** Nothing beside the cell to place against. */
         NO_SUPPORT,
         /** The server did not put the block there. */
-        REFUSED
+        REFUSED,
+        /** A container was filled from a fluid. */
+        FILLED
     }
 
     /**
@@ -153,6 +155,40 @@ public interface Worker {
      *         {@link Outcome#REFUSED} when the server did not put it there
      */
     default CompletableFuture<Outcome> place(BlockPos cell, String itemId, int rotation) {
+        return CompletableFuture.completedFuture(Outcome.NOT_AVAILABLE);
+    }
+
+    /**
+     * Pours what the held container carries - a bucket of water - into the empty {@code cell}, as a
+     * player does: against a block beside it, from a place the body walks to, as {@link #place} puts a
+     * block. The container's item is taken into the hotbar as {@code place} takes a block.
+     *
+     * @return {@link Outcome#PLACED} once the fluid shows in the cell; else as {@link #place}
+     */
+    default CompletableFuture<Outcome> pour(BlockPos cell, String itemId) {
+        return CompletableFuture.completedFuture(Outcome.NOT_AVAILABLE);
+    }
+
+    /**
+     * Fills an empty container - a bucket - from the fluid in {@code cell}: from a place within the
+     * item's use reach, looking at the cell (the server takes the first source its ray along the look
+     * meets, which may be one in front of the cell).
+     *
+     * @return {@link Outcome#FILLED} once the container in the hand is its filled item; {@link Outcome#NO_ITEM},
+     *         {@link Outcome#NOTHING} (no fluid there), {@link Outcome#NO_PLACE},
+     *         {@link Outcome#UNREACHABLE}, {@link Outcome#REFUSED}
+     */
+    default CompletableFuture<Outcome> scoop(BlockPos cell, String itemId) {
+        return CompletableFuture.completedFuture(Outcome.NOT_AVAILABLE);
+    }
+
+    /**
+     * Comes down a pillar the body stands on: the block under the feet broken, the body dropping onto
+     * the next, {@code blocks} times - or until the block under the feet is no longer one it may break.
+     *
+     * @return {@link Outcome#BROKEN} once down; {@link Outcome#WOULD_NOT_BREAK} when a block did not go
+     */
+    default CompletableFuture<Outcome> pillarDown(int blocks) {
         return CompletableFuture.completedFuture(Outcome.NOT_AVAILABLE);
     }
 

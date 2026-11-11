@@ -199,8 +199,25 @@ tell its own drops however far they went since.
   (`InteractionControl.placeOnBlock(target, face, rotation)`).
 - It is `PLACED` once the block shows in the cell.
 
+- **Over an edge.** A side face the eyes are up to 0.6 behind, from above its top - the side of the
+  block at whose edge the body stands - is placed on as if seen: a player leans over the edge to
+  bridge.
+
 `Worker.pillarUp(item, blocks)` builds a pillar under the body, as a player does to get up high:
 looking down, a jump, and at the top of it a block put where the feet were, `blocks` times.
+`Worker.pillarDown(blocks)` comes down one: the block under the feet broken, the body dropping onto
+the next.
+
+## Buckets (`Worker.pour`, `Worker.scoop`)
+
+- `scoop(cell, item)` fills an empty bucket: from a place within its use reach with a clear line, the
+  head on the cell, the item used as the right button does in the open air. The server takes the
+  first source its own ray along the look meets, which may be one in front of the cell; it is filled
+  once the hand holds the filled item (`*Container_Bucket_State_Filled_Water`).
+- `pour(cell, item)` pours a filled one into an empty cell, against a block beside it, as `place`
+  puts a block; poured once the cell holds a fluid's source.
+
+A block put in a fluid's cell takes its place: that is how a fluid is shut out of a cell.
 
 ## How items come out of a chest (`Worker.take`)
 
@@ -236,6 +253,8 @@ nav <conn> trace <x y z> [radius]  -> the way as found, played on a copy of the 
 nav <conn> place <x y z> <item> [rotation]   -> Worker.place: {outcome}
 nav <conn> take|deposit <x y z> <item> <n>   -> Worker.take / Worker.deposit
 nav <conn> pillar <item> <blocks>            -> Worker.pillarUp
+nav <conn> down <blocks>                     -> Worker.pillarDown
+nav <conn> pour|scoop <x y z> <item>         -> Worker.pour / Worker.scoop
 nav <conn> cancel                  -> ends the trip and the work under way
 core <conn> placeat <x y z> [face] -> the held block into an empty cell (World.placeAt)
 core <conn> chest <x y z>          -> what core last saw in that container, and which was opened last

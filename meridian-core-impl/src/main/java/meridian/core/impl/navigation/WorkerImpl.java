@@ -165,7 +165,31 @@ public final class WorkerImpl implements Worker {
         if (cell == null || itemId == null || itemId.isEmpty()) {
             return CompletableFuture.completedFuture(Outcome.NOTHING);
         }
-        return held(id -> placeNow(id, cell, itemId, rotation), Outcome.NOT_AVAILABLE);
+        return held(id -> placeNow(id, cell, itemId, rotation, false), Outcome.NOT_AVAILABLE);
+    }
+
+    @Override
+    public CompletableFuture<Outcome> pour(BlockPos cell, String itemId) {
+        if (cell == null || itemId == null || itemId.isEmpty()) {
+            return CompletableFuture.completedFuture(Outcome.NOTHING);
+        }
+        return held(id -> placeNow(id, cell, itemId, -1, true), Outcome.NOT_AVAILABLE);
+    }
+
+    @Override
+    public CompletableFuture<Outcome> scoop(BlockPos cell, String itemId) {
+        if (cell == null || itemId == null || itemId.isEmpty()) {
+            return CompletableFuture.completedFuture(Outcome.NOTHING);
+        }
+        return held(id -> scoopNow(id, cell, itemId), Outcome.NOT_AVAILABLE);
+    }
+
+    @Override
+    public CompletableFuture<Outcome> pillarDown(int blocks) {
+        if (blocks < 1) {
+            return CompletableFuture.completedFuture(Outcome.NOTHING);
+        }
+        return held(id -> pillarDownNow(id, blocks), Outcome.NOT_AVAILABLE);
     }
 
     @Override
@@ -1087,7 +1111,7 @@ public final class WorkerImpl implements Worker {
     /** A place to put a block from: where to stand, which block to place it against and on which face. */
     private record PlaceStand(BlockPos cell, boolean here, BlockPos against, Face face, Vec3 aim, double cost) {}
 
-    private Outcome placeNow(int id, BlockPos cell, String itemId, int rotation) throws Exception {
+    private Outcome placeNow(int id, BlockPos cell, String itemId, int rotation, boolean fluid) throws Exception {
         if (!world.known(cell.x(), cell.y(), cell.z())) {
             return Outcome.NOTHING;
         }
@@ -1144,7 +1168,8 @@ public final class WorkerImpl implements Worker {
                     .get(2, TimeUnit.SECONDS);
             interactions.placeOnBlock(st.against(), st.face(), rotation).get(10, TimeUnit.SECONDS);
             for (long waited = 0; waited < PLACE_WAIT_MS; waited += 50) {
-                if (!world.blockAt(cell.x(), cell.y(), cell.z()).isAir()) {
+                if (fluid ? source(world.fluidCellAt(cell.x(), cell.y(), cell.z()))
+                        : !world.blockAt(cell.x(), cell.y(), cell.z()).isAir()) {
                     return Outcome.PLACED;
                 }
                 Thread.sleep(50);
@@ -1238,6 +1263,143 @@ public final class WorkerImpl implements Worker {
         return Outcome.PLACED;
     }
 
+    /**
+     * A container filled from the fluid in the cell: walked within its use reach with a clear line, the
+     * head turned onto the cell, the item used; filled once the fluid is gone from the cell.
+     */
+    private Outcome scoopNow(int id, BlockPos cell, String itemId) throws Exception {
+        if (!source(world.fluidCellAt(cell.x(), cell.y(), cell.z()))) {
+            return Outcome.NOTHING;
+        }
+        Player player = world.player().orElse(null);
+        if (player == null) {
+            return Outcome.NOT_AVAILABLE;
+        }
+        int slot = hotbarSlotWith(player, itemId);
+        if (slot < 0) {
+            slot = intoHotbar(player, itemId);
+            if (slot < 0) {
+                return Outcome.NO_ITEM;
+            }
+        }
+        double reach = Math.max(1.0, interactions.useReach(itemId).orElse(DEFAULT_REACH) - REACH_MARGIN);
+        Vec3 aim = centre(cell);
+        Vec3 me = movement.position();
+        if (me == null) {
+            return Outcome.NOT_AVAILABLE;
+        }
+        int[] here = Walker.cellOf(me);
+        double eyeH = movement.capabilities().eyeHeight();
+        BlockPos best = null;
+        boolean bestHere = false;
+        double bestCost = Double.MAX_VALUE;
+        int r = (int) Math.ceil(reach);
+        for (int dy = -r - 1; dy <= r; dy++) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    BlockPos at = new BlockPos(cell.x() + dx, cell.y() + dy, cell.z() + dz);
+                    OptionalDouble feet = movement.standAt(at);
+                    if (feet.isEmpty() || at.equals(cell)) {
+                        continue;
+                    }
+                    boolean isHere = at.x() == here[0] && at.y() == here[1] && at.z() == here[2];
+                    Vec3 eye = isHere ? new Vec3(me.x(), me.y() + eyeH, me.z())
+                            : new Vec3(at.x() + 0.5, feet.getAsDouble() + eyeH, at.z() + 0.5);
+                    if (distSq(eye, aim) > reach * reach) {
+                        continue;
+                    }
+                    List<BlockPos> in = obstaclesTo(eye, cell, aim);
+                    if (in == null || !in.isEmpty()) {
+                        continue;
+                    }
+                    double cost = Math.sqrt(distSq(me, eye)) - (isHere ? 2 : 0);
+                    if (cost < bestCost) {
+                        bestCost = cost;
+                        best = at;
+                        bestHere = isHere;
+                    }
+                }
+            }
+        }
+        if (best == null) {
+            return Outcome.NO_PLACE;
+        }
+        if (!bestHere) {
+            NavResult nav = navigator.goTo(Goal.at(best)).get(3, TimeUnit.MINUTES);
+            if (!live(id)) {
+                return Outcome.INTERRUPTED;
+            }
+            if (nav.status() != NavResult.Status.ARRIVED) {
+                return Outcome.UNREACHABLE;
+            }
+        }
+        if (player.activeHotbarSlot() != slot) {
+            interactions.switchHotbarSlot(slot).get(5, TimeUnit.SECONDS);
+        }
+        Vec3 eye = eye();
+        double d = eye == null ? 1 : Math.sqrt(distSq(eye, aim));
+        // The server takes the fluid its own ray from the eyes along the look meets: onto the middle.
+        movement.face(aim, Math.max(Movement.FACE_WITHIN, Math.atan(0.15 / Math.max(d, 0.5)))).get(2, TimeUnit.SECONDS);
+        Thread.sleep(100);
+        // The right button in the open air: the server's own ray along the look finds the fluid.
+        interactions.useItem().get(10, TimeUnit.SECONDS);
+        // Filled once the container in the hand is another item (its filled state) - the server takes
+        // the first source its ray meets, which need not be this very cell.
+        for (long waited = 0; waited < PLACE_WAIT_MS; waited += 50) {
+            String now = player.hotbarItem(slot);
+            if (now != null && !now.equals(itemId)) {
+                return Outcome.FILLED;
+            }
+            Thread.sleep(50);
+        }
+        return Outcome.REFUSED;
+    }
+
+    /** A fluid's source - what a bucket takes and leaves - not its flow. */
+    private static boolean source(meridian.core.api.FluidCell f) {
+        return f != null && f.name() != null && f.name().endsWith("_Source");
+    }
+
+    /**
+     * Down a pillar: looking at the block under the feet, it is broken, the body drops onto the next;
+     * {@code blocks} times, or until the block under the feet is not one to break.
+     */
+    private Outcome pillarDownNow(int id, int blocks) throws Exception {
+        for (int i = 0; i < blocks; i++) {
+            if (!live(id)) {
+                return Outcome.INTERRUPTED;
+            }
+            Vec3 at = movement.position();
+            if (at == null || !movement.onGround()) {
+                return Outcome.NO_PLACE;
+            }
+            int[] c = Walker.cellOf(at);
+            BlockPos under = new BlockPos(c[0], c[1] - 1, c[2]);
+            Block b = world.blockAt(under.x(), under.y(), under.z());
+            if (b.isAir() || nearLava(under) || world.blockAt(under.x(), under.y() - 1, under.z()).isAir()) {
+                // Nothing to break, lava beside, or nothing under it to come down on: done here.
+                return i == 0 ? Outcome.NOTHING : Outcome.BROKEN;
+            }
+            equip(under, new Rules(Access.ANY, Tools.BEST));
+            movement.face(new Vec3(under.x() + 0.5, under.y() + 1.0, under.z() + 0.5), Math.toRadians(8))
+                    .get(2, TimeUnit.SECONDS);
+            if (!breakOne(under)) {
+                return Outcome.WOULD_NOT_BREAK;
+            }
+            for (long waited = 0; waited < PILLAR_JUMP_MS; waited += 20) {
+                Vec3 p = movement.position();
+                if (p != null && movement.onGround() && p.y() <= under.y() + 0.01) {
+                    break;
+                }
+                Thread.sleep(20);
+            }
+        }
+        return Outcome.BROKEN;
+    }
+
+    /** How far behind a side face the eyes may be, over the edge above it, to place a block on it. */
+    static final double BRIDGE_LEAN = 0.6;
+
     /** The faces of a cell a block placed into it may lean on, in the order a builder tries them. */
     private static final Face[] PLACE_AGAINST = {Face.DOWN, Face.NORTH, Face.SOUTH, Face.EAST, Face.WEST, Face.UP};
 
@@ -1286,7 +1448,10 @@ public final class WorkerImpl implements Worker {
                                 against.z() + 0.5 + face.dz * 0.49);
                         double toEye = face.dx * (eye.x() - aim.x()) + face.dy * (eye.y() - aim.y())
                                 + face.dz * (eye.z() - aim.z());
-                        if (toEye <= 0.05 || distSq(eye, aim) > reach * reach) {
+                        // Over an edge, looking down at the side of the block the body stands at the
+                        // edge of - a bridge's next block: the face is seen leaning over it.
+                        boolean overEdge = face.dy == 0 && toEye > -BRIDGE_LEAN && eye.y() > against.y() + 1.0;
+                        if ((toEye <= 0.05 && !overEdge) || distSq(eye, aim) > reach * reach) {
                             continue;                       // the face is turned away, or out of reach
                         }
                         List<BlockPos> in = obstaclesTo(eye, against, aim);
