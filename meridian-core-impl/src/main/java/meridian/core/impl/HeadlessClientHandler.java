@@ -9,7 +9,10 @@ import meridian.protocol.Asset;
 import meridian.protocol.Direction;
 import meridian.protocol.ModelTransform;
 import meridian.protocol.Position;
+import meridian.protocol.ComponentUpdate;
 import meridian.protocol.TeleportAck;
+import meridian.protocol.TransformUpdate;
+import meridian.protocol.packets.entities.EntityUpdates;
 import meridian.protocol.packets.connection.Ping;
 import meridian.protocol.packets.connection.Pong;
 import meridian.protocol.packets.connection.PongType;
@@ -107,8 +110,47 @@ final class HeadlessClientHandler implements PacketHandler {
             log.info("meridian-core: headless {} - entity {}, ready for gameplay", client.username(), id.clientId);
         } else if (packet instanceof ClientTeleport teleport) {
             acknowledge(client, teleport);
+        } else if (packet instanceof EntityUpdates updates && position == null && pose.localPosition().isEmpty()) {
+            spawn(client, updates);
         }
         return Action.FORWARD;
+    }
+
+    /**
+     * 0.5.9: the server puts a player into the world with no teleport - the game takes where it
+     * stands from its own entity's transform. The bot does the same, once, and says so with a
+     * movement there, which is how core learns where it is.
+     */
+    private void spawn(HeadlessClient client, EntityUpdates updates) {
+        int self = pose.localEntityId().orElse(Integer.MIN_VALUE);
+        if (self == Integer.MIN_VALUE || updates.updates == null) {
+            return;
+        }
+        for (var update : updates.updates) {
+            if (update == null || update.networkId != self || update.updates == null) {
+                continue;
+            }
+            for (ComponentUpdate component : update.updates) {
+                if (component instanceof TransformUpdate t && t.transform != null && t.transform.position != null) {
+                    ModelTransform m = t.transform;
+                    position = new Position(m.position.x, m.position.y, m.position.z);
+                    if (m.bodyOrientation != null) {
+                        body = m.bodyOrientation;
+                    }
+                    if (m.lookOrientation != null) {
+                        look = m.lookOrientation;
+                    }
+                    ClientMovement here = new ClientMovement();
+                    here.absolutePosition = new Position(position.x, position.y, position.z);
+                    here.bodyOrientation = body;
+                    here.lookOrientation = look;
+                    client.sendAsClient(here);
+                    log.info("meridian-core: headless {} - in the world at {}, {}, {} (no teleport on 0.5.9)",
+                            client.username(), position.x, position.y, position.z);
+                    return;
+                }
+            }
+        }
     }
 
     /** Moves to where the teleport says, then says so with its id - the position must match it. */
