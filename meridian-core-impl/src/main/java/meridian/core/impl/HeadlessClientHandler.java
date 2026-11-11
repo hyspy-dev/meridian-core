@@ -101,6 +101,7 @@ final class HeadlessClientHandler implements PacketHandler {
             ready.readyForChunks = true;
             ready.readyForGameplay = false;
             client.sendAsClient(ready);
+            placed = false;       // 0.5.9: placed in the new world with no teleport, see spawn()
             log.info("meridian-core: headless {} - joining world {}, ready for chunks", client.username(), join.worldUuid);
         } else if (packet instanceof SetClientId id) {
             ClientReady ready = new ClientReady();
@@ -110,16 +111,19 @@ final class HeadlessClientHandler implements PacketHandler {
             log.info("meridian-core: headless {} - entity {}, ready for gameplay", client.username(), id.clientId);
         } else if (packet instanceof ClientTeleport teleport) {
             acknowledge(client, teleport);
-        } else if (packet instanceof EntityUpdates updates && position == null && pose.localPosition().isEmpty()) {
+        } else if (packet instanceof EntityUpdates updates && !placed) {
             spawn(client, updates);
         }
         return Action.FORWARD;
     }
 
+    /** Whether the bot knows where it stands in the world it joined last (0.5.9, see spawn()). */
+    private volatile boolean placed;
+
     /**
      * 0.5.9: the server puts a player into the world with no teleport - the game takes where it
-     * stands from its own entity's transform. The bot does the same, once, and says so with a
-     * movement there, which is how core learns where it is.
+     * stands from its own entity's transform - in every world it joins. The bot does the same, once
+     * per join, and says so with a movement there, which is how core learns where it is.
      */
     private void spawn(HeadlessClient client, EntityUpdates updates) {
         int self = pose.localEntityId().orElse(Integer.MIN_VALUE);
@@ -145,6 +149,7 @@ final class HeadlessClientHandler implements PacketHandler {
                     here.bodyOrientation = body;
                     here.lookOrientation = look;
                     client.sendAsClient(here);
+                    placed = true;
                     log.info("meridian-core: headless {} - in the world at {}, {}, {} (no teleport on 0.5.9)",
                             client.username(), position.x, position.y, position.z);
                     return;
@@ -155,6 +160,7 @@ final class HeadlessClientHandler implements PacketHandler {
 
     /** Moves to where the teleport says, then says so with its id - the position must match it. */
     private void acknowledge(HeadlessClient client, ClientTeleport teleport) {
+        placed = true;
         ModelTransform t = teleport.modelTransform;
         meridian.core.api.Vec3 me = pose.localPosition().orElse(null);
         Position at = me != null ? new Position(me.x(), me.y(), me.z())
