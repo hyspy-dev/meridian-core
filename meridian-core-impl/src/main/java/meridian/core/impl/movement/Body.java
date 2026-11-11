@@ -215,8 +215,18 @@ public final class Body {
      * answer, a teleport core made). Takes the body's place from it.
      */
     synchronized void sentByOther(ClientMovement m) {
-        if (m.absolutePosition == null || ownReport(m.absolutePosition)) {
+        // The answer to a server teleport is never the body's own report, even where it lands on a
+        // place the body reported once - a teleport back to where it stood: taken for its own, the
+        // body would stay where it was while the server has it at the teleport.
+        if (m.absolutePosition == null) {
             return;
+        }
+        if (ownReport(m.absolutePosition)) {
+            if (m.teleportAck == null) {
+                return;
+            }
+            log.info("meridian-core: the answer to teleport {} lands where the body reported once ({}, {}, {}) - taken",
+                    m.teleportAck, m.absolutePosition.x, m.absolutePosition.y, m.absolutePosition.z);
         }
         if (state == null) {
             state = new BodyState();

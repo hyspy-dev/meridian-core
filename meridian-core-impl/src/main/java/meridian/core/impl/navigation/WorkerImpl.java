@@ -252,8 +252,193 @@ public final class WorkerImpl implements Worker {
                 return Outcome.BROKEN;
             }
         }
+        // No place on open ground to break it from: a tunnel to it, the body's height, through the rock.
+        if (!got && live(id) && access.within() == null && access.wayIn()) {
+            Outcome t = tunnel(id, target, rules, broken);
+            if (t != null) {
+                return t;
+            }
+        }
         return !live(id) ? Outcome.INTERRUPTED : got ? Outcome.WOULD_NOT_BREAK
                 : placed ? Outcome.UNREACHABLE : Outcome.NO_PLACE;
+    }
+
+    // ------------------------------------------------------------------
+    // A tunnel to a block deep in the rock
+    // ------------------------------------------------------------------
+
+    /** The longest tunnel dug to one block, in moves. */
+    static final int TUNNEL_MOST = 48;
+    /** The most places a tunnel is looked for through. */
+    static final int TUNNEL_NODES = 30_000;
+    /** What a block to break costs a tunnel, against 1 for a move. */
+    static final double TUNNEL_PER_BLOCK = 1.5;
+    /** ... and sand or gravel over what is broken, which would come down into it. */
+    static final double TUNNEL_FALLING = 6.0;
+
+    /** One move of a tunnel: the blocks to break, then the place to go to. */
+    private record TunnelStep(BlockPos to, List<BlockPos> breaks) {}
+
+    private record TunnelNode(BlockPos at, double g, double f, int depth, TunnelNode parent, List<BlockPos> breaks) {}
+
+    /**
+     * Digs a tunnel to a block no place on open ground reaches, then breaks it: the blocks of each
+     * move broken, then the move made. {@code null} when there is no tunnel to it.
+     */
+    private Outcome tunnel(int id, BlockPos target, Rules rules, List<BlockPos> broken) throws Exception {
+        List<TunnelStep> plan = tunnelPlan(target);
+        if (plan == null) {
+            return null;
+        }
+        log.info("meridian-core: a tunnel of {} move(s), {} block(s) to break, to {}", plan.size(),
+                plan.stream().mapToInt(st -> st.breaks().size()).sum(), text(target));
+        for (TunnelStep st : plan) {
+            for (BlockPos c : st.breaks()) {
+                if (!live(id)) {
+                    return Outcome.INTERRUPTED;
+                }
+                if (world.blockAt(c.x(), c.y(), c.z()).isAir()) {
+                    continue;
+                }
+                if (nearLava(c)) {
+                    return Outcome.LAVA;
+                }
+                if (!breakInReach(c, rules, broken)) {
+                    return Outcome.WOULD_NOT_BREAK;
+                }
+            }
+            NavResult r = navigator.goTo(Goal.at(st.to())).get(1, TimeUnit.MINUTES);
+            if (!live(id)) {
+                return Outcome.INTERRUPTED;
+            }
+            if (r.status() != NavResult.Status.ARRIVED) {
+                log.info("meridian-core: the tunnel to {} did not go on at {} ({})", text(target), text(st.to()),
+                        r.status());
+                return Outcome.UNREACHABLE;
+            }
+        }
+        return breakFromHere(id, target, rules, List.of(), broken) ? Outcome.BROKEN : Outcome.WOULD_NOT_BREAK;
+    }
+
+    /**
+     * A tunnel to the block: from where the body stands, moves along the axes - level, a step up, a
+     * step down - each through a way the body's height, breaking what is there, to a place with the
+     * block beside it at the feet or the head, or over the head. A move costs 1 and each block to break
+     * {@link #TUNNEL_PER_BLOCK} more; sand or gravel over what is broken costs {@link #TUNNEL_FALLING}.
+     * Not dug: a cell with a fluid, one next to lava, one nothing in the hotbar breaks, one core does
+     * not know, the block itself; nothing is dug under the feet. {@code null} when there is no tunnel
+     * within {@link #TUNNEL_MOST} moves.
+     */
+    private List<TunnelStep> tunnelPlan(BlockPos target) {
+        Vec3 me = movement.position();
+        Player player = world.player().orElse(null);
+        if (me == null || player == null || !movement.onGround()) {
+            return null;
+        }
+        int[] c = Walker.cellOf(me);
+        BlockPos start = new BlockPos(c[0], c[1], c[2]);
+        java.util.PriorityQueue<TunnelNode> open = new java.util.PriorityQueue<>(
+                (a, b) -> Double.compare(a.f(), b.f()));
+        Map<BlockPos, Double> best = new HashMap<>();
+        Map<BlockPos, Boolean> clear = new HashMap<>();
+        open.add(new TunnelNode(start, 0, tunnelGuess(start, target), 0, null, List.of()));
+        best.put(start, 0.0);
+        int[][] dirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        int seen = 0;
+        while (!open.isEmpty() && seen++ < TUNNEL_NODES) {
+            TunnelNode n = open.poll();
+            if (n.g() > best.getOrDefault(n.at(), Double.MAX_VALUE)) {
+                continue;
+            }
+            BlockPos a = n.at();
+            int hx = Math.abs(a.x() - target.x()) + Math.abs(a.z() - target.z());
+            if ((hx == 1 && (target.y() == a.y() || target.y() == a.y() + 1))
+                    || (hx == 0 && target.y() == a.y() + 2)) {
+                List<TunnelStep> out = new ArrayList<>();
+                for (TunnelNode k = n; k.parent() != null; k = k.parent()) {
+                    out.add(0, new TunnelStep(k.at(), k.breaks()));
+                }
+                return out;
+            }
+            if (n.depth() >= TUNNEL_MOST) {
+                continue;
+            }
+            for (int[] d : dirs) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    int x = a.x() + d[0];
+                    int z = a.z() + d[1];
+                    int y = a.y() + dy;
+                    List<BlockPos> cells = new ArrayList<>();
+                    if (dy > 0) {
+                        cells.add(new BlockPos(a.x(), a.y() + 2, a.z()));     // room to jump
+                    } else if (dy < 0) {
+                        cells.add(new BlockPos(x, a.y() + 1, z));              // the head, stepping down
+                    }
+                    cells.add(new BlockPos(x, y + 1, z));
+                    cells.add(new BlockPos(x, y, z));
+                    BlockPos floor = new BlockPos(x, y - 1, z);
+                    if (!world.known(floor.x(), floor.y(), floor.z()) || !movement.cell(floor).solid()
+                            || floor.equals(target)) {
+                        continue;
+                    }
+                    List<BlockPos> breaks = new ArrayList<>();
+                    double extra = 0;
+                    boolean ok = true;
+                    for (BlockPos cell : cells) {
+                        Boolean pass = clear.computeIfAbsent(cell, k -> tunnelCell(k, target, player));
+                        if (pass == null || !pass) {
+                            ok = false;
+                            break;
+                        }
+                        if (!world.blockAt(cell.x(), cell.y(), cell.z()).isAir()) {
+                            breaks.add(cell);
+                        }
+                    }
+                    if (!ok) {
+                        continue;
+                    }
+                    if (!breaks.isEmpty()) {
+                        BlockPos top = cells.get(0).y() >= cells.get(1).y() ? cells.get(0) : cells.get(1);
+                        Block over = world.blockAt(top.x(), top.y() + 1, top.z());
+                        String name = over.isAir() || over.type() == null ? null : over.type().name();
+                        if (name != null && (name.contains("Sand") || name.contains("Gravel"))) {
+                            extra += TUNNEL_FALLING;
+                        }
+                    }
+                    BlockPos to = new BlockPos(x, y, z);
+                    double g = n.g() + 1 + TUNNEL_PER_BLOCK * breaks.size() + extra;
+                    if (g < best.getOrDefault(to, Double.MAX_VALUE)) {
+                        best.put(to, g);
+                        open.add(new TunnelNode(to, g, g + tunnelGuess(to, target), n.depth() + 1, n, breaks));
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Whether a tunnel may go through the cell: air with no fluid, or a block the hotbar breaks that is
+     * not the target, with no fluid and no lava beside it.
+     */
+    private Boolean tunnelCell(BlockPos cell, BlockPos target, Player player) {
+        if (cell.equals(target) || !world.known(cell.x(), cell.y(), cell.z())) {
+            return false;
+        }
+        Movement.Cell m = movement.cell(cell);
+        if (m.fluid() != null || m.hurts()) {
+            return false;
+        }
+        Block b = world.blockAt(cell.x(), cell.y(), cell.z());
+        if (b.isAir()) {
+            return true;
+        }
+        return player.bestToolSlot(b.type()) >= 0 && !nearLava(cell);
+    }
+
+    private static double tunnelGuess(BlockPos at, BlockPos target) {
+        return Math.max(0, Math.abs(at.x() - target.x()) + Math.abs(at.z() - target.z()) - 1)
+                + Math.max(0, Math.abs(at.y() - target.y()) - 1);
     }
 
     /**
@@ -512,6 +697,10 @@ public final class WorkerImpl implements Worker {
                 x += Integer.signum(ddx);
             } else {
                 z += Integer.signum(ddz);
+            }
+            // Walked in after the drop: the way needs a floor all along.
+            if (!world.known(x, y - 1, z) || !movement.cell(new BlockPos(x, y - 1, z)).solid()) {
+                return null;
             }
             cells.add(new BlockPos(x, y + 1, z));
             cells.add(new BlockPos(x, y, z));

@@ -159,6 +159,13 @@ middle, as a player's does.
   - `Access.inside(box)`: only blocks inside the box. A selection is dug from inside itself.
   - `Access.ANY`: anything on the line from the eyes. For a block in the rock, also a way in the
     body's height, so the body can walk in after the drop.
+- **A tunnel.** With `Access.ANY`, a block no place on open ground reaches is dug to: a tunnel the
+  body's height from where it stands, along the axes - level, a step up, a step down - to a place
+  with the block beside it at the feet or the head, or over the head. A move costs 1, a block to break
+  1.5 more, sand or gravel over what is broken 6 more. A cell with a fluid, next to lava, or that
+  nothing in the hotbar breaks is not dug, nor anything under the feet; at most 48 moves. Each
+  move's blocks are broken, then the move made. A way in broken from a place outside needs a floor
+  all along, or it is not taken.
 - **Left.** These outcomes leave the block where it is:
   - `LAVA`: lava is next to the block, or next to the way in.
   - `NO_PLACE`: no place to break it from.
@@ -217,6 +224,5 @@ core <conn> besttool <x y z>       -> the hotbar slot that breaks that block bes
   point round the corners off.
 - **Breaking or building through what is in the way of a trip.** A way is found over the ground as
   it is.
-- **Tunnels.** A block deeper in the rock than a tool reaches from open ground is left.
 - **Placing with a given rotation**, and getting blocks from the backpack into the hotbar. Both are
   for building a blueprint.
