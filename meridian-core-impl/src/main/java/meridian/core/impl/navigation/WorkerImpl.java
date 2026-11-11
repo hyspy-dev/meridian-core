@@ -24,6 +24,7 @@ import meridian.protocol.packets.inventory.SmartMoveItemStack;
 import meridian.protocol.packets.window.CloseWindow;
 import meridian.core.api.BlockPos;
 import meridian.core.api.EntityTracker;
+import meridian.core.api.Face;
 import meridian.core.api.Goal;
 import meridian.core.api.InteractionControl;
 import meridian.core.api.Movement;
@@ -157,6 +158,30 @@ public final class WorkerImpl implements Worker {
         }
         Set<Integer> these = new HashSet<>(items);
         return held(id -> collect(id, (e, at) -> these.contains(e)), 0);
+    }
+
+    @Override
+    public CompletableFuture<Outcome> place(BlockPos cell, String itemId, int rotation) {
+        if (cell == null || itemId == null || itemId.isEmpty()) {
+            return CompletableFuture.completedFuture(Outcome.NOTHING);
+        }
+        return held(id -> placeNow(id, cell, itemId, rotation), Outcome.NOT_AVAILABLE);
+    }
+
+    @Override
+    public CompletableFuture<Outcome> pillarUp(String itemId, int blocks) {
+        if (itemId == null || itemId.isEmpty() || blocks < 1) {
+            return CompletableFuture.completedFuture(Outcome.NOTHING);
+        }
+        return held(id -> pillarNow(id, itemId, blocks), Outcome.NOT_AVAILABLE);
+    }
+
+    @Override
+    public CompletableFuture<Map<String, Integer>> take(BlockPos chest, Map<String, Integer> items) {
+        if (chest == null || items == null || items.isEmpty()) {
+            return CompletableFuture.completedFuture(Map.of());
+        }
+        return held(id -> takeNow(id, chest, items), Map.of());
     }
 
     @Override
@@ -1008,32 +1033,9 @@ public final class WorkerImpl implements Worker {
                 || !world.known(chest.x(), chest.y(), chest.z()) || world.blockAt(chest.x(), chest.y(), chest.z()).isAir()) {
             return Map.of();
         }
-        Vec3 eye = eye();
-        if (eye == null) {
-            return Map.of();
-        }
-        Player player = world.player().orElse(null);
-        double reach = Math.max(1.0, interactions.useReach(player == null ? null : player.heldItem())
-                .orElse(DEFAULT_REACH) - REACH_MARGIN);
-        if (distSq(eye, centre(chest)) > reach * reach) {
-            NavResult r = navigator.goTo(Goal.near(chest, 2)).get(3, TimeUnit.MINUTES);
-            if (!live(id) || r.status() != NavResult.Status.ARRIVED) {
-                return Map.of();
-            }
-        }
         Map<String, Integer> before = held();
-        movement.face(chest).get(2, TimeUnit.SECONDS);
-        int window = containers.windowAt(chest);
+        int window = openContainer(id, chest);
         if (window < 0) {
-            containers.reaching(chest);
-            interactions.useOnBlock(chest).get(10, TimeUnit.SECONDS);
-            for (long waited = 0; waited < WINDOW_WAIT_MS && window < 0; waited += 100) {
-                Thread.sleep(100);
-                window = containers.windowAt(chest);
-            }
-        }
-        if (window < 0) {
-            log.info("meridian-core: the container at {} did not open", text(chest));
             return Map.of();
         }
         try {
@@ -1073,6 +1075,375 @@ public final class WorkerImpl implements Worker {
         } finally {
             close(s, window);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Placing a block
+    // ------------------------------------------------------------------
+
+    /** How long a placed block is waited for to show. */
+    static final long PLACE_WAIT_MS = 1500;
+
+    /** A place to put a block from: where to stand, which block to place it against and on which face. */
+    private record PlaceStand(BlockPos cell, boolean here, BlockPos against, Face face, Vec3 aim, double cost) {}
+
+    private Outcome placeNow(int id, BlockPos cell, String itemId, int rotation) throws Exception {
+        if (!world.known(cell.x(), cell.y(), cell.z())) {
+            return Outcome.NOTHING;
+        }
+        if (!world.blockAt(cell.x(), cell.y(), cell.z()).isAir()) {
+            return Outcome.OCCUPIED;
+        }
+        Player player = world.player().orElse(null);
+        if (player == null) {
+            return Outcome.NOT_AVAILABLE;
+        }
+        int slot = hotbarSlotWith(player, itemId);
+        if (slot < 0) {
+            slot = intoHotbar(player, itemId);
+            if (slot < 0) {
+                return Outcome.NO_ITEM;
+            }
+        }
+        List<Face> sides = new ArrayList<>();
+        for (Face f : PLACE_AGAINST) {
+            BlockPos b = f.from(cell);
+            if (world.known(b.x(), b.y(), b.z()) && !world.blockAt(b.x(), b.y(), b.z()).isAir()
+                    && movement.cell(b).solid()) {
+                sides.add(f);
+            }
+        }
+        if (sides.isEmpty()) {
+            return Outcome.NO_SUPPORT;
+        }
+        double reach = Math.max(1.0, interactions.useReach(itemId).orElse(DEFAULT_REACH) - REACH_MARGIN);
+        Set<BlockPos> tried = new HashSet<>();
+        boolean got = false;
+        for (int attempt = 0; attempt < STAND_TRIES && live(id); attempt++) {
+            PlaceStand st = placeStand(cell, sides, reach, tried);
+            if (st == null) {
+                break;
+            }
+            tried.add(st.cell());
+            if (!st.here()) {
+                NavResult r = navigator.goTo(Goal.at(st.cell())).get(3, TimeUnit.MINUTES);
+                if (!live(id)) {
+                    return Outcome.INTERRUPTED;
+                }
+                if (r.status() != NavResult.Status.ARRIVED) {
+                    continue;
+                }
+            }
+            got = true;
+            if (player.activeHotbarSlot() != slot) {
+                interactions.switchHotbarSlot(slot).get(5, TimeUnit.SECONDS);
+            }
+            Vec3 eye = eye();
+            double d = eye == null ? 1 : Math.sqrt(distSq(eye, st.aim()));
+            movement.face(st.aim(), Math.max(Movement.FACE_WITHIN, Math.atan(0.2 / Math.max(d, 0.5))))
+                    .get(2, TimeUnit.SECONDS);
+            interactions.placeOnBlock(st.against(), st.face(), rotation).get(10, TimeUnit.SECONDS);
+            for (long waited = 0; waited < PLACE_WAIT_MS; waited += 50) {
+                if (!world.blockAt(cell.x(), cell.y(), cell.z()).isAir()) {
+                    return Outcome.PLACED;
+                }
+                Thread.sleep(50);
+            }
+            log.info("meridian-core: {} placed from {} against {} did not show", text(cell), text(st.cell()),
+                    text(st.against()));
+            return Outcome.REFUSED;
+        }
+        return !live(id) ? Outcome.INTERRUPTED : got ? Outcome.REFUSED
+                : tried.isEmpty() ? Outcome.NO_PLACE : Outcome.UNREACHABLE;
+    }
+
+    /** How long a jump of a pillar is waited for to clear the block it puts under the feet. */
+    static final long PILLAR_JUMP_MS = 1200;
+
+    /**
+     * A pillar under the body: each time, looking down, the jump held until the feet are over the cell
+     * they stood in, then a block put on the one under it - it lands under the feet - and the jump
+     * let go, the body coming down on it.
+     */
+    private Outcome pillarNow(int id, String itemId, int blocks) throws Exception {
+        Player player = world.player().orElse(null);
+        if (player == null) {
+            return Outcome.NOT_AVAILABLE;
+        }
+        int slot = hotbarSlotWith(player, itemId);
+        if (slot < 0) {
+            slot = intoHotbar(player, itemId);
+            if (slot < 0) {
+                return Outcome.NO_ITEM;
+            }
+        }
+        if (player.activeHotbarSlot() != slot) {
+            interactions.switchHotbarSlot(slot).get(5, TimeUnit.SECONDS);
+        }
+        for (int i = 0; i < blocks; i++) {
+            if (!live(id)) {
+                return Outcome.INTERRUPTED;
+            }
+            Vec3 at = movement.position();
+            if (at == null || !movement.onGround()) {
+                return Outcome.NO_PLACE;
+            }
+            int[] c = Walker.cellOf(at);
+            BlockPos feet = new BlockPos(c[0], c[1], c[2]);
+            BlockPos under = new BlockPos(c[0], c[1] - 1, c[2]);
+            BlockPos over = new BlockPos(c[0], c[1] + 2, c[2]);
+            if (!world.blockAt(over.x(), over.y(), over.z()).isAir() || world.blockAt(under.x(), under.y(), under.z()).isAir()) {
+                return Outcome.NO_PLACE;
+            }
+            if (player.hotbarItem(slot) == null || !itemId.equals(player.hotbarItem(slot))) {
+                return Outcome.NO_ITEM;
+            }
+            // Look down at the top of the block under the feet, then jump and hold it.
+            movement.face(new Vec3(under.x() + 0.5, under.y() + 1.0, under.z() + 0.5), Math.toRadians(8))
+                    .get(2, TimeUnit.SECONDS);
+            Movement.State st = movement.state();
+            movement.hold(new Movement.Controls(0, 0, st.yaw(), st.pitch(), true, false, false, false, false));
+            boolean over1 = false;
+            try {
+                for (long waited = 0; waited < PILLAR_JUMP_MS; waited += 10) {
+                    Vec3 p = movement.position();
+                    if (p != null && p.y() >= feet.y() + 1.02) {
+                        over1 = true;
+                        break;
+                    }
+                    Thread.sleep(10);
+                }
+                if (!over1) {
+                    return Outcome.NO_PLACE;
+                }
+                interactions.placeOnBlock(under, Face.UP, -1).get(10, TimeUnit.SECONDS);
+            } finally {
+                movement.hold(null);
+            }
+            boolean down = false;
+            for (long waited = 0; waited < PILLAR_JUMP_MS; waited += 20) {
+                Vec3 p = movement.position();
+                if (!world.blockAt(feet.x(), feet.y(), feet.z()).isAir() && movement.onGround() && p != null
+                        && p.y() >= feet.y() + 0.99) {
+                    down = true;
+                    break;
+                }
+                Thread.sleep(20);
+            }
+            if (!down) {
+                log.info("meridian-core: the pillar's block at {} did not land under the feet", text(feet));
+                return Outcome.REFUSED;
+            }
+        }
+        return Outcome.PLACED;
+    }
+
+    /** The faces of a cell a block placed into it may lean on, in the order a builder tries them. */
+    private static final Face[] PLACE_AGAINST = {Face.DOWN, Face.NORTH, Face.SOUTH, Face.EAST, Face.WEST, Face.UP};
+
+    /**
+     * Where to place a block into {@code cell} from: a place the body stands on, not in the cell (nor
+     * with its head there), the eyes within {@code reach} of the cell and of a face of a block beside
+     * it that is turned toward them, with a clear line to that face. Nearer the body first; where it
+     * stands is cheapest.
+     */
+    private PlaceStand placeStand(BlockPos cell, List<Face> sides, double reach, Set<BlockPos> tried) {
+        Vec3 me = movement.position();
+        if (me == null) {
+            return null;
+        }
+        int[] here = Walker.cellOf(me);
+        double eyeH = movement.capabilities().eyeHeight();
+        int r = (int) Math.ceil(reach);
+        Vec3 middle = centre(cell);
+        PlaceStand best = null;
+        for (int dy = -r - 1; dy <= r; dy++) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    BlockPos at = new BlockPos(cell.x() + dx, cell.y() + dy, cell.z() + dz);
+                    if (tried.contains(at)) {
+                        continue;
+                    }
+                    OptionalDouble feet = movement.standAt(at);
+                    if (feet.isEmpty()) {
+                        continue;
+                    }
+                    // The body is not where the block goes: its feet and its head are out of the cell.
+                    int foot = (int) Math.floor(feet.getAsDouble() + 1e-3);
+                    if (at.x() == cell.x() && at.z() == cell.z() && cell.y() >= foot - 1 && cell.y() <= foot + 1) {
+                        continue;
+                    }
+                    boolean isHere = at.x() == here[0] && at.y() == here[1] && at.z() == here[2];
+                    Vec3 eye = isHere ? new Vec3(me.x(), me.y() + eyeH, me.z())
+                            : new Vec3(at.x() + 0.5, feet.getAsDouble() + eyeH, at.z() + 0.5);
+                    if (distSq(eye, middle) > reach * reach) {
+                        continue;
+                    }
+                    for (Face toCell : sides) {
+                        BlockPos against = toCell.from(cell);
+                        Face face = opposite(toCell);
+                        Vec3 aim = new Vec3(against.x() + 0.5 + face.dx * 0.49, against.y() + 0.5 + face.dy * 0.49,
+                                against.z() + 0.5 + face.dz * 0.49);
+                        double toEye = face.dx * (eye.x() - aim.x()) + face.dy * (eye.y() - aim.y())
+                                + face.dz * (eye.z() - aim.z());
+                        if (toEye <= 0.05 || distSq(eye, aim) > reach * reach) {
+                            continue;                       // the face is turned away, or out of reach
+                        }
+                        List<BlockPos> in = obstaclesTo(eye, against, aim);
+                        if (in == null || !in.isEmpty()) {
+                            continue;
+                        }
+                        double cost = Math.sqrt(distSq(me, eye)) - (isHere ? 2 : 0)
+                                + (isHere ? 0 : PER_WALL_BETWEEN * solidBetween(me,
+                                        new Vec3(at.x() + 0.5, feet.getAsDouble(), at.z() + 0.5)))
+                                + Math.max(0, Math.sqrt(distSq(eye, middle)) - COMFORT) * PER_BLOCK_PAST
+                                + (toCell == Face.DOWN ? 0 : 0.3);
+                        if (best == null || cost < best.cost()) {
+                            best = new PlaceStand(at, isHere, against, face, aim, cost);
+                        }
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    private static Face opposite(Face f) {
+        return Face.ofDelta(-f.dx, -f.dy, -f.dz);
+    }
+
+    /** The hotbar slot holding exactly this item, or -1. */
+    private static int hotbarSlotWith(Player player, String itemId) {
+        for (int slot = 0; slot < 9; slot++) {
+            if (itemId.equals(player.hotbarItem(slot))) {
+                return slot;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Moves a stack of the item from the storage or the backpack into the hotbar, as a shift-click
+     * does; the hotbar slot it lands in, or -1 when the player carries none, or it did not come.
+     */
+    private int intoHotbar(Player player, String itemId) throws InterruptedException {
+        ProxySession s = session.get();
+        if (inventory == null || s == null) {
+            return -1;
+        }
+        for (String name : List.of("Storage", "Backpack")) {
+            PlayerState.Section section = inventory.inventories().get(name);
+            Integer sectionId = SECTIONS.get(name);
+            if (section == null || sectionId == null) {
+                continue;
+            }
+            for (Map.Entry<Integer, meridian.core.api.Containers.Item> e : section.items().entrySet()) {
+                meridian.core.api.Containers.Item item = e.getValue();
+                if (item == null || !itemId.equals(item.id())) {
+                    continue;
+                }
+                SmartMoveItemStack move = new SmartMoveItemStack();
+                move.fromSectionId = sectionId;
+                move.fromSlotId = e.getKey();
+                move.quantity = item.quantity();
+                move.moveType = SmartMoveType.PutInHotbarOrWindow;
+                s.sendToServer(move);
+                for (long waited = 0; waited < WINDOW_WAIT_MS; waited += 50) {
+                    int slot = hotbarSlotWith(player, itemId);
+                    if (slot >= 0) {
+                        return slot;
+                    }
+                    Thread.sleep(50);
+                }
+                return -1;
+            }
+        }
+        return -1;
+    }
+
+    // ------------------------------------------------------------------
+    // Taking from a container
+    // ------------------------------------------------------------------
+
+    private Map<String, Integer> takeNow(int id, BlockPos chest, Map<String, Integer> want) throws Exception {
+        ProxySession s = session.get();
+        if (containers == null || inventory == null || s == null
+                || !world.known(chest.x(), chest.y(), chest.z()) || world.blockAt(chest.x(), chest.y(), chest.z()).isAir()) {
+            return Map.of();
+        }
+        int window = openContainer(id, chest);
+        if (window < 0) {
+            return Map.of();
+        }
+        try {
+            Map<String, Integer> before = held();
+            meridian.core.api.Containers.Contents in = containers.at(chest);
+            Map<String, Integer> left = new HashMap<>(want);
+            if (in != null) {
+                for (Map.Entry<Integer, meridian.core.api.Containers.Item> slot : in.items().entrySet()) {
+                    meridian.core.api.Containers.Item item = slot.getValue();
+                    int need = item == null ? 0 : left.getOrDefault(item.id(), 0);
+                    if (need <= 0) {
+                        continue;
+                    }
+                    int n = Math.min(need, item.quantity());
+                    SmartMoveItemStack move = new SmartMoveItemStack();
+                    move.fromSectionId = window;
+                    move.fromSlotId = slot.getKey();
+                    move.quantity = n;
+                    move.moveType = SmartMoveType.PutInHotbarOrWindow;
+                    s.sendToServer(move);
+                    left.put(item.id(), need - n);
+                }
+            }
+            // What came out shows as what the player holds more of.
+            Map<String, Integer> got = Map.of();
+            for (long waited = 0; waited < WINDOW_WAIT_MS; waited += 100) {
+                Thread.sleep(100);
+                Map<String, Integer> now = moved(held(), before, want);
+                if (now.equals(got) && !now.isEmpty() && waited >= 500) {
+                    break;
+                }
+                got = now;
+            }
+            return got;
+        } finally {
+            close(s, window);
+        }
+    }
+
+    /**
+     * Walks to within the held item's use reach of the container and opens it, as a use does; the
+     * window's id, or -1 when it did not open (or the work was ended).
+     */
+    private int openContainer(int id, BlockPos chest) throws Exception {
+        Vec3 eye = eye();
+        if (eye == null) {
+            return -1;
+        }
+        Player player = world.player().orElse(null);
+        double reach = Math.max(1.0, interactions.useReach(player == null ? null : player.heldItem())
+                .orElse(DEFAULT_REACH) - REACH_MARGIN);
+        if (distSq(eye, centre(chest)) > reach * reach) {
+            NavResult r = navigator.goTo(Goal.near(chest, 2)).get(3, TimeUnit.MINUTES);
+            if (!live(id) || r.status() != NavResult.Status.ARRIVED) {
+                return -1;
+            }
+        }
+        movement.face(chest).get(2, TimeUnit.SECONDS);
+        int window = containers.windowAt(chest);
+        if (window < 0) {
+            containers.reaching(chest);
+            interactions.useOnBlock(chest).get(10, TimeUnit.SECONDS);
+            for (long waited = 0; waited < WINDOW_WAIT_MS && window < 0; waited += 100) {
+                Thread.sleep(100);
+                window = containers.windowAt(chest);
+            }
+        }
+        if (window < 0) {
+            log.info("meridian-core: the container at {} did not open", text(chest));
+        }
+        return window;
     }
 
     /** Closes a window the player has open: the server told, and a game shown it shut. */

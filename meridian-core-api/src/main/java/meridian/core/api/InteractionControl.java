@@ -92,6 +92,18 @@ public interface InteractionControl {
     CompletableFuture<InteractionOutcome> placeOnBlock(BlockPos target, Face face);
 
     /**
+     * Forges a block placement against {@code target}'s {@code face}, the placed block carrying the
+     * server's orientation number {@code rotation} (0 to 63: yaw, pitch and roll in quarter turns, as
+     * a prefab stores it) - the server keeps a placed block's rotation as it is sent. A negative
+     * {@code rotation} orients it as {@link #placeOnBlock(BlockPos, Face)} does.
+     *
+     * @return how the server ran the chain
+     */
+    default CompletableFuture<InteractionOutcome> placeOnBlock(BlockPos target, Face face, int rotation) {
+        return placeOnBlock(target, face);
+    }
+
+    /**
      * Forges a block placement against {@code target}'s {@code face} (the
      * geometry — which neighbour the block clicks and so which cell it lands in),
      * but oriented as if it had been placed against {@code orient}.

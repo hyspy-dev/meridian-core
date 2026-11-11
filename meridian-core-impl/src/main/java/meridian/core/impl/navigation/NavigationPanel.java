@@ -25,7 +25,9 @@ import meridian.core.api.Worker;
  */
 public final class NavigationPanel {
 
-    private static final String USAGE = "goto <x y z> [radius] | plan <x y z> [radius] | trace <x y z> [radius] | cancel";
+    private static final String USAGE = "goto <x y z> [radius] | plan <x y z> [radius] | trace <x y z> [radius] | cancel"
+            + " | place <x y z> <item> [rotation] | take <x y z> <item> <count> | deposit <x y z> <item> <count>"
+            + " | pillar <item> <blocks>";
 
     private final Navigator navigator;
     private final Worker worker;
@@ -145,11 +147,35 @@ public final class NavigationPanel {
             navigator.cancel();
             return CompletableFuture.completedFuture(Map.of("cancelled", true));
         }
+        if (what.equals("pillar") && args.size() >= 3) {
+            return worker.pillarUp(args.get(1), Integer.parseInt(args.get(2))).thenApply(o -> Map.of("outcome", o.name()));
+        }
         if (args.size() < 4) {
             throw new IllegalArgumentException(USAGE);
         }
         BlockPos cell = new BlockPos(Integer.parseInt(args.get(1)), Integer.parseInt(args.get(2)),
                 Integer.parseInt(args.get(3)));
+        if (what.equals("place")) {
+            if (args.size() < 5) {
+                throw new IllegalArgumentException(USAGE);
+            }
+            int rotation = args.size() > 5 ? Integer.parseInt(args.get(5)) : -1;
+            return worker.place(cell, args.get(4), rotation).thenApply(o -> Map.of("outcome", o.name()));
+        }
+        if (what.equals("deposit")) {
+            if (args.size() < 6) {
+                throw new IllegalArgumentException(USAGE);
+            }
+            return worker.deposit(cell, Map.of(args.get(4), Integer.parseInt(args.get(5))))
+                    .thenApply(m -> Map.of("put", m));
+        }
+        if (what.equals("take")) {
+            if (args.size() < 6) {
+                throw new IllegalArgumentException(USAGE);
+            }
+            return worker.take(cell, Map.of(args.get(4), Integer.parseInt(args.get(5))))
+                    .thenApply(m -> Map.of("taken", m));
+        }
         double radius = args.size() > 4 ? Double.parseDouble(args.get(4)) : 0;
         Goal goal = Goal.near(cell, radius);
         return switch (what) {

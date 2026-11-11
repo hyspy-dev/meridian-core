@@ -183,6 +183,31 @@ of the feet. A drop it cannot get to is left.
 says where core first saw an entity: for an item just dropped, where it fell from - so a module can
 tell its own drops however far they went since.
 
+## How a block is placed (`Worker.place`)
+
+`Worker.place(cell, item, rotation)` puts a block of the item into an empty cell:
+
+- **The item.** From the hotbar; one the hotbar has none of is moved in from the storage or the
+  backpack, as a shift-click does.
+- **Against what.** A block beside the cell - the one below first, then the four sides, then the one
+  above. A cell with none is `NO_SUPPORT`.
+- **Where from.** A place the body stands on, not in the cell nor with its head there, the eyes within
+  the item's use reach of the cell and of a face of that block turned toward them, with a clear
+  line to it. Nearer the body first.
+- **Turned.** The block carries the server's orientation number as given (0 to 63, as a prefab stores
+  it): the server keeps a placed block's rotation as it is sent
+  (`InteractionControl.placeOnBlock(target, face, rotation)`).
+- It is `PLACED` once the block shows in the cell.
+
+`Worker.pillarUp(item, blocks)` builds a pillar under the body, as a player does to get up high:
+looking down, a jump, and at the top of it a block put where the feet were, `blocks` times.
+
+## How items come out of a chest (`Worker.take`)
+
+The worker walks to the chest and opens it, moves the stacks of the items asked for into the
+player's inventory as a shift-click does (the hotbar, then the storage), and closes it. What came out
+is counted as what the player holds more of afterwards.
+
 ## How items go into a chest (`Worker.deposit`)
 
 The worker walks within the held item's use reach of the chest (`InteractionControl.useReach`,
@@ -208,6 +233,9 @@ Core's panel has **Go to a point**:
 nav <conn> goto <x y z> [radius]   -> {status, at, moves, replans}
 nav <conn> plan <x y z> [radius]   -> the moves (kind, cell, gait), without moving
 nav <conn> trace <x y z> [radius]  -> the way as found, played on a copy of the body tick by tick
+nav <conn> place <x y z> <item> [rotation]   -> Worker.place: {outcome}
+nav <conn> take|deposit <x y z> <item> <n>   -> Worker.take / Worker.deposit
+nav <conn> pillar <item> <blocks>            -> Worker.pillarUp
 nav <conn> cancel                  -> ends the trip and the work under way
 core <conn> placeat <x y z> [face] -> the held block into an empty cell (World.placeAt)
 core <conn> chest <x y z>          -> what core last saw in that container, and which was opened last
@@ -224,5 +252,3 @@ core <conn> besttool <x y z>       -> the hotbar slot that breaks that block bes
   point round the corners off.
 - **Breaking or building through what is in the way of a trip.** A way is found over the ground as
   it is.
-- **Placing with a given rotation**, and getting blocks from the backpack into the hotbar. Both are
-  for building a blueprint.

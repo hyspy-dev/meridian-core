@@ -1267,6 +1267,26 @@ public final class InteractionControlImpl implements InteractionControl {
                 forge(target, InteractionType.Secondary, DataKind.PLACEMENT, bf, null, ob));
     }
 
+    @Override
+    public CompletableFuture<InteractionOutcome> placeOnBlock(BlockPos target, Face face, int rotation) {
+        if (rotation < 0 || rotation > 63) {
+            return placeOnBlock(target, face);
+        }
+        BlockFace bf = toBlockFace(face);
+        // The forges run one at a time, in order: the rotation rides this one only.
+        return enqueueForge(() -> {
+            forcedRotation = rotation;
+            try {
+                return forge(target, InteractionType.Secondary, DataKind.PLACEMENT, bf, null, bf);
+            } finally {
+                forcedRotation = -1;
+            }
+        });
+    }
+
+    /** The orientation number the placement being forged carries as it is, or -1: worked out. */
+    private volatile int forcedRotation = -1;
+
     private static BlockFace toBlockFace(Face face) {
         return switch (face) {
             case UP -> BlockFace.Up;
@@ -1677,7 +1697,9 @@ public final class InteractionControlImpl implements InteractionControl {
             if (placedId < 0) {
                 placedId = items.blockIdOf(itemId).orElse(-1);
             }
-            ctx = ctx.withBlockRotation(placementRotationFor(placedId, itemId, orientFace));
+            int forced = forcedRotation;
+            ctx = ctx.withBlockRotation(forced >= 0 ? blockRotation(forced)
+                    : placementRotationFor(placedId, itemId, orientFace));
         }
         if (hitBlocks != null && !hitBlocks.isEmpty()) {
             List<BlockPosition> targets = new ArrayList<>(hitBlocks.size());

@@ -1,6 +1,7 @@
 package meridian.core.api;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -72,7 +73,17 @@ public interface Worker {
         /** Cancelled, or the player took the body back. */
         INTERRUPTED,
         /** The player cannot be moved here. */
-        NOT_AVAILABLE
+        NOT_AVAILABLE,
+        /** Placed. */
+        PLACED,
+        /** Something is in the cell to place into. */
+        OCCUPIED,
+        /** The player carries none of the item to place. */
+        NO_ITEM,
+        /** Nothing beside the cell to place against. */
+        NO_SUPPORT,
+        /** The server did not put the block there. */
+        REFUSED
     }
 
     /**
@@ -127,6 +138,46 @@ public interface Worker {
      * @return how many were picked up
      */
     CompletableFuture<Integer> pickUp(BlockBox area);
+
+    /**
+     * Puts a block of {@code itemId} into the empty {@code cell}, turned as {@code rotation} says (the
+     * server's orientation number, 0 to 63; negative: as a player's placing turns it). The item is
+     * taken into the hotbar from the storage or the backpack when the hotbar has none. The block is
+     * placed against one beside the cell - the one below first - from a place the body walks to
+     * with a clear line to that face, never one the block would land in.
+     *
+     * @return {@link Outcome#PLACED}; {@link Outcome#OCCUPIED} when something is in the cell;
+     *         {@link Outcome#NO_ITEM} when the player carries none; {@link Outcome#NO_SUPPORT}
+     *         when nothing is beside it to place against; {@link Outcome#NO_PLACE} /
+     *         {@link Outcome#UNREACHABLE} when there is no place to do it from or no way there;
+     *         {@link Outcome#REFUSED} when the server did not put it there
+     */
+    default CompletableFuture<Outcome> place(BlockPos cell, String itemId, int rotation) {
+        return CompletableFuture.completedFuture(Outcome.NOT_AVAILABLE);
+    }
+
+    /**
+     * Builds a pillar under the body, as a player does to get up high: looking down, a jump, and at
+     * the top of it a block of {@code itemId} put where the feet were; {@code blocks} times. The body
+     * ends on top of it, {@code blocks} higher.
+     *
+     * @return {@link Outcome#PLACED} once on top; {@link Outcome#NO_ITEM}, {@link Outcome#NO_PLACE}
+     *         (no room over the head, or not on the ground), {@link Outcome#REFUSED} when a block
+     *         did not land
+     */
+    default CompletableFuture<Outcome> pillarUp(String itemId, int blocks) {
+        return CompletableFuture.completedFuture(Outcome.NOT_AVAILABLE);
+    }
+
+    /**
+     * Takes items out of a container: walks to it, opens it, moves the stacks of these items into
+     * the player's inventory as a shift-click does, and closes it.
+     *
+     * @return how many of each came out - what the player holds more of afterwards
+     */
+    default CompletableFuture<Map<String, Integer>> take(BlockPos chest, Map<String, Integer> items) {
+        return CompletableFuture.completedFuture(Map.of());
+    }
 
     /**
      * Walks over these dropped items wherever they lie, nearest first, into each one's own cell, as
