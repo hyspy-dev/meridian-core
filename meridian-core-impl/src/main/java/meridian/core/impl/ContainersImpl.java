@@ -22,7 +22,7 @@ import org.slf4j.LoggerFactory;
  * all, and a window with no block to belong to is a chest whose contents are quietly lost. Both
  * are watched now, and the log says which one answered.
  */
-final class ContainersImpl implements Containers {
+public final class ContainersImpl implements Containers {
 
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
 
@@ -34,6 +34,8 @@ final class ContainersImpl implements Containers {
 
     /** The block the player is interacting with; the next container window belongs to it. */
     private volatile BlockPos target;
+    /** The container opened last. */
+    private volatile BlockPos last;
 
     @Override
     public void subscribe(Listener listener) {
@@ -55,6 +57,34 @@ final class ContainersImpl implements Containers {
     @Override
     public Map<BlockPos, Contents> all() {
         return Map.copyOf(seen);
+    }
+
+    @Override
+    public java.util.Optional<BlockPos> lastOpened() {
+        return java.util.Optional.ofNullable(last);
+    }
+
+    /** The id of the window open on the container at this block, or {@code -1} when none is. */
+    public int windowAt(BlockPos block) {
+        for (Map.Entry<Integer, BlockPos> e : windows.entrySet()) {
+            if (e.getValue().equals(block)) {
+                return e.getKey();
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Core is about to use this block itself - a forged use the handlers never see: a container that
+     * opens next belongs to it.
+     */
+    public void reaching(BlockPos block) {
+        target = block;
+    }
+
+    /** A window core closed itself, the server told by core. */
+    public void closed(int windowId) {
+        onClosed(windowId);
     }
 
     // ------------------------------------------------------------------
@@ -88,6 +118,7 @@ final class ContainersImpl implements Containers {
             return;
         }
         windows.put(windowId, block);
+        last = block;
         log.info("meridian-core: window {} ({}) opened at {} with {} item(s)",
                 windowId, type, block, items);
         if (contents != null) {
@@ -129,6 +160,7 @@ final class ContainersImpl implements Containers {
         windows.clear();
         seen.clear();
         target = null;
+        last = null;
     }
 
     /** The contents of a window, in the shape modules read. */

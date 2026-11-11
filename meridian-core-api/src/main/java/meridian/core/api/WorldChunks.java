@@ -40,8 +40,8 @@ public interface WorldChunks {
          * that rides another channel and races the chunks.
          *
          * <p>Which world comes next is not known yet: {@link #enterWorld} follows, once the join
-         * arrives. Anything held between the two belongs to the new world, so hold it rather than
-         * filing it under the old one.
+         * arrives. Nothing is delivered in between: what arrives meanwhile belongs to the new world,
+         * and core holds it and hands it on right after {@link #enterWorld}.
          */
         default void chunksCleared() {
         }
@@ -54,6 +54,11 @@ public interface WorldChunks {
          * two in the right order far more than it needs the name early.
          *
          * <p>Every id table from before is stale as of this call.
+         *
+         * <p>Nothing of a world reaches a listener before this names it - not the first burst,
+         * which races the join on its own channel, nor what follows a {@link #chunksCleared}: core
+         * holds those and delivers them, in order, straight after this call. So a listener can file
+         * every section under the world it was last told about.
          */
         default void enterWorld(UUID world) {
         }
@@ -112,4 +117,73 @@ public interface WorldChunks {
 
     /** Environment (biome) id &rarr; name, for this connection. */
     Map<Integer, String> environmentNames();
+
+    // ------------------------------------------------------------------
+    // A section as the server packed it
+    // ------------------------------------------------------------------
+
+    /**
+     * One palette of a section, as the server packs it: a table of entries - an internal id, the
+     * value it stands for, and how many cells hold it - and for every cell the internal id of its
+     * entry.
+     *
+     * <p>For code that keeps sections the way the server keeps them: a save copies each cell's
+     * internal id and writes the entries down in its own words. Anything that only wants to know
+     * what is where asks {@link World}. The values are this connection's numbers (a block id, a
+     * fluid id), or the filler offset and rotation index a cell carries.
+     *
+     * <p>Cells are numbered as everywhere in a section: {@code (y << 10) | (z << 5) | x}.
+     */
+    interface Palette {
+        /** The server's palette kinds ({@code PaletteType}): no entries, every cell value 0. */
+        int EMPTY = 0;
+        /** Internal ids of four bits, two cells to a byte. */
+        int HALF_BYTE = 1;
+        /** Internal ids of a byte. */
+        int BYTE = 2;
+        /** Internal ids of two bytes - a palette of more than 256 entries. */
+        int SHORT = 3;
+
+        /** Which of {@link #EMPTY}, {@link #HALF_BYTE}, {@link #BYTE}, {@link #SHORT} it is. */
+        int kind();
+
+        /** How many entries the table has. */
+        int size();
+
+        /** The internal id of an entry, {@code 0 <= entry < size()}. */
+        int internalId(int entry);
+
+        /** What an entry stands for. */
+        int value(int entry);
+
+        /** How many cells the server counted for an entry. */
+        int count(int entry);
+
+        /** The internal id a cell holds; {@code 0} in an {@link #EMPTY} palette. */
+        int internalAt(int cell);
+
+        /** The value a cell holds - its entry's {@link #value}; {@code 0} in an {@link #EMPTY} one. */
+        int valueAt(int cell);
+    }
+
+    /** A section's three palettes: the blocks, the filler offsets, the rotations. */
+    record Section(Palette blocks, Palette fillers, Palette rotations) {}
+
+    /**
+     * A section's fluids: the fluid palette, and the levels as the server packs them - a nibble a
+     * cell, the even cell in the <b>low</b> half - or {@code null} when every level is nought.
+     */
+    record FluidSection(Palette fluids, byte[] levels) {}
+
+    /**
+     * Reads a section's payload ({@link Listener#section}'s {@code data}) into its palettes, the
+     * internal ids kept. {@code null} - a section of pure air - gives three empty palettes. Pure:
+     * the same answer on any thread, the payload left as it was.
+     *
+     * @throws IllegalArgumentException for a payload that is not a section
+     */
+    Section decode(byte[] data);
+
+    /** The same for a fluid section's payload ({@link Listener#fluids}'s {@code data}). */
+    FluidSection decodeFluids(byte[] data);
 }

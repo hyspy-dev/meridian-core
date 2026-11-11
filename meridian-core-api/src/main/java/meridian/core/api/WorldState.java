@@ -2,6 +2,7 @@ package meridian.core.api;
 
 import java.time.Duration;
 import java.util.Collection;
+import java.util.OptionalInt;
 import java.util.function.UnaryOperator;
 
 /**
@@ -18,6 +19,28 @@ public interface WorldState {
 
     /** All block types known to the server. */
     Collection<BlockView> allBlockTypes();
+
+    /**
+     * The id this connection numbers a block type by, from its name ({@code "Rock_Stone"}), or
+     * empty when the catalog has no such type, or has not arrived yet. {@link BlockView#EMPTY} is
+     * {@code 0} always, before the catalog too. Each state of a block is a type of its own, under
+     * its own name.
+     */
+    default OptionalInt blockId(String name) {
+        if (name == null) {
+            return OptionalInt.empty();
+        }
+        if (BlockView.EMPTY.equals(name)) {
+            return OptionalInt.of(0);
+        }
+        int best = -1;
+        for (BlockView type : allBlockTypes()) {
+            if (name.equals(type.name()) && (best < 0 || type.id() < best)) {
+                best = type.id();
+            }
+        }
+        return best < 0 ? OptionalInt.empty() : OptionalInt.of(best);
+    }
 
     /** Server-truth block type at {@code pos}. */
     BlockView blockTypeAt(BlockPos pos);

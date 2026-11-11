@@ -1,8 +1,8 @@
 package meridian.core.impl;
 
 import java.time.Duration;
-import java.util.concurrent.atomic.AtomicInteger;
 import meridian.api.module.Scheduler;
+import meridian.api.session.HeadlessClient;
 import meridian.api.session.ProxySession;
 import meridian.protocol.Direction;
 import meridian.protocol.ModelTransform;
@@ -73,14 +73,22 @@ final class MovementControlImpl {
     private static final Duration TELEPORT_SPACING = Duration.ofMillis(20);
 
     private final Scheduler scheduler;
+    /** A game's body core holds: a teleport moves the body instead. */
+    interface HeldBody {
+        /** Puts the body there and says so; {@code false} when core does not hold it. */
+        boolean teleport(double x, double y, double z);
+    }
+
+    private volatile HeldBody heldBody;
     /** Main-channel session, captured by {@link ClientObserver} from C2S movement. */
     private volatile ProxySession session;
 
-    MovementControlImpl(Scheduler scheduler) {
+    MovementControlImpl(Scheduler scheduler, meridian.core.impl.movement.ClientTeleports teleports) {
         this.scheduler = scheduler;
+        this.teleports = teleports;
     }
-    /** Rolling teleport id for the forged {@code ClientTeleport}. */
-    private final AtomicInteger teleportId = new AtomicInteger();
+    /** Ids for the forged {@code ClientTeleport}s, clear of the server's; their acknowledgements stop at the proxy. */
+    private final meridian.core.impl.movement.ClientTeleports teleports;
     /** Last orientations the client reported — reused so a teleport keeps facing. */
     private volatile Direction lastBody;
     private volatile Direction lastLook;
@@ -96,6 +104,11 @@ final class MovementControlImpl {
     /** Constant shift added to every outgoing absolute; armed lazily in {@link #rewrite}. */
     private volatile double[] holdOffset;
 
+    /** Where a teleport goes while core holds a game's body. */
+    void heldBody(HeldBody body) {
+        this.heldBody = body;
+    }
+
     /** Captured from observed C2S movement; until one arrives teleport is a no-op. */
     void bind(ProxySession session) {
         this.session = session;
@@ -109,6 +122,22 @@ final class MovementControlImpl {
         ProxySession s = session;
         if (s == null) {
             log.warn("meridian-core: teleport requested but no client session yet — ignored");
+            return;
+        }
+        HeadlessClient bot = HeadlessClientHandler.headlessOf(s);
+        if (bot != null) {
+            // The same teleport for a headless client, with nothing in its way: no game whose view
+            // must move and no stream of old positions to outvote. The bot reports the target the
+            // way a client that walked there would. It does so as the client, through the
+            // client-to-server chain, so core's own pose follows it as well.
+            bot.sendAsClient(buildAbsolute(x, y, z));
+            log.info("meridian-core: headless {} - teleport -> ({}, {}, {})", bot.username(), x, y, z);
+            return;
+        }
+        HeldBody held = heldBody;
+        if (held != null && held.teleport(x, y, z)) {
+            // Core moves the body: it reports the place, and the game is shown it on the next tick.
+            log.info("meridian-core: teleport of the held body -> ({}, {}, {})", x, y, z);
             return;
         }
         // Move the player's own view with ClientTeleport — but repeated over
@@ -147,7 +176,7 @@ final class MovementControlImpl {
 
     /** Sends one {@code ClientTeleport} to the client at the target, keeping facing. */
     private void sendClientTeleport(ProxySession s, double x, double y, double z) {
-        byte id = (byte) teleportId.incrementAndGet();
+        byte id = teleports.ours();
         ModelTransform transform = new ModelTransform(
                 new Position(x, y, z),
                 lastBody != null ? lastBody.clone() : null,

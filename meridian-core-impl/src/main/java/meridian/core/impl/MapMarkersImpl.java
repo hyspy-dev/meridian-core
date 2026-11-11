@@ -18,6 +18,7 @@ import meridian.api.module.Scheduler;
 import meridian.api.packet.PacketHandler.Action;
 import meridian.api.session.ProxySession;
 import meridian.core.api.Chat;
+import meridian.core.api.GameAssets;
 import meridian.core.api.MapMarkers;
 import meridian.core.api.Marker;
 import meridian.core.api.MarkerCategory;
@@ -59,13 +60,17 @@ final class MapMarkersImpl implements MapMarkers {
     /** The server echoes back the coordinates we sent, so matching them closely is enough. */
     private static final double SAME_SPOT = 0.5;
     /** The server pins user markers at this height, whatever was asked for. */
-    private static final double MARKER_HEIGHT = 100;
+    private static final double MARKER_HEIGHT = MapMarkers.HEIGHT;
+    /** Where the game keeps its marker pictures. */
+    private static final String ICON_FOLDER = "Common/UI/WorldMap/MapMarkers/";
     /** How the server names the mark it leaves where a player died - one it will delete. */
     private static final String DEATH_PREFIX = "death-marker-";
     /** The picture of a respawn point - a bed - which, unlike a point of interest, has no id prefix. */
     private static final String RESPAWN_ICON = "Home.png";
 
     private final Logger log;
+    /** The game's own files, where the marker pictures are read from; null without one. */
+    private final GameAssets game;
     private final MarkerStoreImpl store;
     private final Scheduler scheduler;
     private final Chat chat;
@@ -99,7 +104,8 @@ final class MapMarkersImpl implements MapMarkers {
     private final ConcurrentLinkedQueue<PendingCreate> creates = new ConcurrentLinkedQueue<>();
 
     MapMarkersImpl(Logger log, MarkerStoreImpl store, Scheduler scheduler, Chat chat,
-                   SessionHolder mapSession, SessionHolder defaultSession) {
+                   SessionHolder mapSession, SessionHolder defaultSession, GameAssets game) {
+        this.game = game;
         this.log = log;
         this.store = store;
         this.scheduler = scheduler;
@@ -456,6 +462,17 @@ final class MapMarkersImpl implements MapMarkers {
     public void setFilter(Predicate<Marker> shown) {
         filter = shown;
         apply();
+    }
+
+    @Override
+    public Optional<byte[]> iconImage(String icon) {
+        GameAssets g = game;
+        // A plain file name only: the name is the server's or a module's, never a path to follow.
+        if (g == null || icon == null || icon.isEmpty() || icon.indexOf('/') >= 0
+                || icon.indexOf('\\') >= 0 || icon.contains("..")) {
+            return Optional.empty();
+        }
+        return g.read(ICON_FOLDER + icon);
     }
 
     @Override

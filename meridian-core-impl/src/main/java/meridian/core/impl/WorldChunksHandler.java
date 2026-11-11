@@ -7,7 +7,6 @@ import meridian.api.packet.Packet;
 import meridian.api.packet.PacketHandler;
 import meridian.api.session.ProxySession;
 import meridian.protocol.packets.assets.UpdateEnvironments;
-import meridian.protocol.packets.assets.UpdateFluids;
 import meridian.protocol.packets.player.JoinWorld;
 import meridian.protocol.packets.world.SetChunk;
 import meridian.protocol.packets.world.SetChunkEnvironments;
@@ -51,24 +50,10 @@ final class WorldChunksHandler implements PacketHandler {
             // a packet of its own, which is ordered against the chunks and so can be waited for;
             // this one has nothing of the kind, so the world turns over the moment it is named.
             chunks.onJoinWorld(j.worldUuid, false);
-        } else if (packet instanceof UpdateFluids u) {
-            chunks.onFluidCatalog(named(u));
         } else if (packet instanceof UpdateEnvironments u) {
             chunks.onEnvironmentCatalog(named(u));
         }
         return Action.FORWARD;
-    }
-
-    private static Map<Integer, String> named(UpdateFluids update) {
-        Map<Integer, String> out = new HashMap<>();
-        if (update.fluids != null) {
-            update.fluids.forEach((id, fluid) -> {
-                if (fluid != null && fluid.id != null) {
-                    out.put(id, fluid.id);
-                }
-            });
-        }
-        return out;
     }
 
     private static Map<Integer, String> named(UpdateEnvironments update) {

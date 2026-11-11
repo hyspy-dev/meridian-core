@@ -12,6 +12,30 @@ import java.util.function.UnaryOperator;
  * renamed protocol field never reaches a Layer-2 module.
  */
 public interface BlockView {
+
+    /**
+     * The name of block id {@code 0}: no block. The catalog lists air under it, and the prefab
+     * format writes it for a cell left empty.
+     */
+    String EMPTY = "Empty";
+
+    /** The name of block id {@code 1}: the server's stand-in for a block it does not know. */
+    String UNKNOWN = "Unknown";
+
+    /**
+     * The block-name generation this core's server writes - the stamp a save puts on block names
+     * so that a later game knows which renames they have already been through.
+     *
+     * <p>The server keeps its renames as numbered {@code BlockMigration} assets ({@code
+     * Server/Item/Block/Migrations/0.json ... 10.json} on 0.8.0-pre.4) and stamps what it writes with
+     * how many there are ({@code BlockMigration.getAssetMap().getAssetCount()}): a chunk section's
+     * first int, a prefab file's {@code blockIdVersion}. On load it applies every migration from the
+     * stamp upward, so a name stamped {@code 0} is put through every rename there ever was - names
+     * that are current today can come out as something else - while this stamp applies none on this
+     * server and only the newer ones on a later game.
+     */
+    int BLOCK_ID_VERSION = 11;
+
     int id();
 
     String name();
@@ -36,6 +60,37 @@ public interface BlockView {
     }
 
     /**
+     * The block this one is a state of, by id: the type its states were declared on. Its own id for
+     * a block without states, and for the declaring type itself. Two block types are one block in
+     * different states - an open door and a shut one, a lit lamp and a dark one - exactly when
+     * their {@code family()} is the same.
+     *
+     * <p>The server's rule ({@code BlockType.getDefaultStateKey}: the type a state was declared in),
+     * which it hands the client as the {@code "default"} entry of every state type's
+     * {@link #states()}. Not the names: a state type is called {@code *<block>_State_Definitions_<state>},
+     * but nothing stops another block's name from looking like that.
+     */
+    default int family() {
+        Integer declared = states().get(DEFAULT_STATE);
+        return declared != null && declared >= 0 ? declared : id();
+    }
+
+    /**
+     * Whether block {@code id} is this block - this very type, or another state of its family. Needs
+     * no catalog: a family's every member lists all the others in its {@link #states()}.
+     */
+    default boolean sameBlock(int id) {
+        return id == id() || id == family() || states().containsValue(id);
+    }
+
+    /**
+     * The state name the server gives a block that is no state of anything ({@code
+     * StateData.NULL_STATE_ID}): what {@link #state()} reports then, and the key under which a state
+     * type's {@link #states()} names the type it belongs to ({@link #family()}).
+     */
+    String DEFAULT_STATE = "default";
+
+    /**
      * Whether which way this block faces is part of what it is. False for a block that cannot be
      * turned, and for one the game turns at random as it is placed - two rocks facing different
      * ways are still the same rock.
@@ -44,6 +99,22 @@ public interface BlockView {
         return false;
     }
 
+    /**
+     * How this block folds a mirror back into a rotation ({@link Rotation#mirror(int, int,
+     * Rotation.Flip)}): the {@code FlipType} its asset declares, which the server never sends - so it
+     * is read from the game's own files ({@link GameAssets}), inheritance and states included.
+     * {@link Rotation.Flip#SYMMETRIC}, the server's default, for a block the installed game does not
+     * define (a mod's), with no game at hand, or from a core too old to know.
+     */
+    default Rotation.Flip flip() {
+        return Rotation.Flip.SYMMETRIC;
+    }
+
+    /**
+     * Whether a body collides with this block: its material is solid, the server's rule for what
+     * stops a player ({@code MATERIAL_SOLID}). Stone and a door are solid, and so is a fence, whose
+     * shape fills only part of the cell; grass and torches are not.
+     */
     boolean isSolid();
 
     boolean isVisible();
@@ -58,6 +129,26 @@ public interface BlockView {
      * as a model or not at all.
      */
     List<String> textures();
+
+    /**
+     * The categories of the item this block is, as the server's item catalog lists them
+     * ({@code Blocks.Ores}, {@code Blocks.Rocks}, {@code Blocks.Soils}) - what a module tells kinds of
+     * block apart by, a mod's blocks included, rather than by their names. Empty for a block that
+     * is no item, or before the catalog came.
+     */
+    default List<String> categories() {
+        return List.of();
+    }
+
+    /**
+     * What the block is gathered as when broken - the server's gather type: {@code Soils},
+     * {@code Rocks}, {@code SoftBlocks}, {@code OreCopper}... - the tools that break it are the ones
+     * whose specs name it ({@link Player#bestToolSlot}). {@code null} for a block that is not broken
+     * that way, or before the type came.
+     */
+    default String gatherType() {
+        return null;
+    }
 
     /**
      * Re-points every cube face at {@code remap.apply(path)}. A {@code null} result keeps
@@ -81,13 +172,21 @@ public interface BlockView {
      */
     BlockView withOpacity(Opacity opacity);
 
+    /**
+     * Makes the client collide with this block, or walk through it: its material set solid, or
+     * empty. The server keeps colliding by its own copy, so this changes only what the client
+     * predicts.
+     */
     BlockView withSolid(boolean solid);
 
     BlockView withVisible(boolean visible);
 
     /**
-     * Makes the block emit light of the given radius and colour
-     * (each channel 0–255). Used by, e.g., a night-vision module.
+     * Makes the block emit light of the given radius and colour. Each channel is 0..15, not
+     * 0..255: the server keeps a block's light as three 4-bit values (its asset's {@code "#RGB"},
+     * a {@code "#RRGGBB"} divided by 17) and floods it out one step a block, so the largest channel
+     * is how far it reaches and how bright it is. A value outside 0..15 is taken as the nearest end.
+     * Used by, e.g., a night-vision module.
      */
     BlockView withLight(int radius, int red, int green, int blue);
 

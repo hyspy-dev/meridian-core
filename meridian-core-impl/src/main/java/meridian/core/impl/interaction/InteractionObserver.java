@@ -11,7 +11,6 @@ import meridian.protocol.packets.interaction.SyncInteractionChain;
 import meridian.protocol.packets.interaction.SyncInteractionChains;
 import meridian.protocol.packets.player.ClientMovement;
 import meridian.protocol.packets.player.MouseInteraction;
-import meridian.protocol.packets.player.SetGameMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,8 +21,9 @@ import org.slf4j.LoggerFactory;
  * <p><b>Observe.</b> {@code MouseInteraction} carries the looked-at block;
  * {@code SyncInteractionChains} carries the player's own chains — the per-type
  * root ids and replay templates; {@code ClientMovement} carries the movement
- * state {@code ConditionInteraction} branches on; {@code SetGameMode} carries the
- * player's game mode ({@code ConditionInteraction.requiredGameMode}'s input).
+ * state {@code ConditionInteraction} branches on - as the server is told it, since this runs
+ * after core's movement rewriter. The game mode its {@code requiredGameMode} tests is the player
+ * state's ({@link EntityLookup#selfGameMode}).
  *
  * <p><b>Translate.</b> Every interaction {@code chainId} the player sends is
  * rewritten into the proxy-owned server-side space, and server-to-client
@@ -53,6 +53,8 @@ final class InteractionObserver implements PacketHandler {
         } else if (packet instanceof ClientMovement movement) {
             control.onMovementStates(movement.movementStates);
             control.onPlayerLook(movement.lookOrientation);
+        } else if (packet instanceof meridian.protocol.packets.player.SyncPlayerPreferences prefs) {
+            control.onPreferences(prefs);
         } else if (packet instanceof SyncInteractionChains chains && chains.updates != null) {
             boolean changed = false;
             for (SyncInteractionChain chain : chains.updates) {
@@ -106,11 +108,6 @@ final class InteractionObserver implements PacketHandler {
 
     @Override
     public Action handleS2C(ChannelHandlerContext ctx, Packet packet, ProxySession session) {
-        if (packet instanceof SetGameMode setGameMode) {
-            // The player's game mode — ConditionInteraction.requiredGameMode's input.
-            control.onGameMode(setGameMode.gameMode);
-            return Action.FORWARD;
-        }
         if (packet instanceof SyncInteractionChains chains && chains.updates != null) {
             List<SyncInteractionChain> kept = new ArrayList<>(chains.updates.length);
             boolean changed = false;
@@ -120,14 +117,17 @@ final class InteractionObserver implements PacketHandler {
                 }
                 if (control.nat().isForged(chain.chainId)) {
                     // The server's echo of a chain the proxy forged — the real
-                    // client never created it, so it must not see it. First, if it
-                    // carries the server's own area forks for a reactive dig swing,
-                    // answer them (the server hands us the HitBlock root here).
-                    control.onServerForkAnnounce(chain);
+                    // client never created it, so it must not see it. Core hears it
+                    // instead: the forks to answer, the path and states to follow.
+                    control.onServerEcho(chain);
                     log.info("meridian-core: NAT S2C dropped forged chain server={} (initial={})",
                             chain.chainId, chain.initial);
                     changed = true;
                     continue;
+                }
+                if (chain.chainId < 0 && headless(session)) {
+                    // A chain the server started for the player: a headless client answers it itself.
+                    control.onServerChain(chain);
                 }
                 int before = chain.chainId;
                 boolean chg = translateS2C(chain);
@@ -147,7 +147,11 @@ final class InteractionObserver implements PacketHandler {
             if (control.nat().isForged(cancel.chainId)) {
                 log.info("meridian-core: NAT S2C dropped cancel for forged chain server={}",
                         cancel.chainId);
+                control.onServerCancel(cancel);
                 return Action.DROP;
+            }
+            if (cancel.chainId < 0 && headless(session)) {
+                control.onServerCancel(cancel);
             }
             int translated = control.nat().toClient(cancel.chainId);
             log.info("meridian-core: NAT S2C cancel chain server={} -> client={}",
@@ -158,6 +162,15 @@ final class InteractionObserver implements PacketHandler {
             }
         }
         return Action.FORWARD;
+    }
+
+    /** Whether no game is behind the session - then core is the client. */
+    private static boolean headless(ProxySession session) {
+        try {
+            return session != null && session.headless() != null;
+        } catch (NoSuchMethodError olderProxy) {
+            return false;
+        }
     }
 
     /** Rewrites a chain's {@code chainId} (and any nested forks) back to client space. */

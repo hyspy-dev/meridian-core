@@ -107,15 +107,17 @@ public interface BuilderSelection {
          * The clipboard was turned around {@code axis}, about its anchor, by {@code degrees} - a
          * multiple of 90, signed the way the client sends it. The client turns what it shows under
          * the cursor by itself, then waits for the turned clipboard as the server would send it:
-         * answer with {@link #confirmTurn}.
+         * with a clipboard handed over as a {@link Clipboard} ({@link #setClipboard(Clipboard)})
+         * core has already sent it; with one handed over as lists, answer with {@link #confirmTurn}.
          */
-        void turned(Axis axis, int degrees);
+        default void turned(Axis axis, int degrees) {}
 
         /**
          * The clipboard was mirrored across {@code axis} through its anchor - the paste tool's flip
-         * key, which the client sends as a {@code /flip} command. Answer with {@link #confirmTurn}.
-         * The axis is the server's: the one the player looks along, or the one a typed direction
-         * names.
+         * key, which the client sends as a {@code /flip} command. With a {@link Clipboard} core has
+         * mirrored it and sent it, each block folded by its own {@link BlockView#flip()}; with lists,
+         * answer with {@link #confirmTurn}. The axis is the server's: the one the player looks
+         * along, or the one a typed direction names.
          */
         default void flipped(Axis axis) {}
 
@@ -132,12 +134,41 @@ public interface BuilderSelection {
          */
         default void copyAsked() {}
 
-        /** Every turn and flip so far was undone; hand the clipboard back with {@link #setClipboard}. */
-        void reset();
+        /**
+         * Every turn and flip so far was undone. With a {@link Clipboard} core has handed the
+         * unturned one back; with lists, hand it back with {@link #setClipboard}.
+         */
+        default void reset() {}
 
-        /** The player pasted: the clipboard's anchor goes at this block. */
-        void pasted(int x, int y, int z);
+        /**
+         * The player pasted: the clipboard's anchor goes at this block.
+         *
+         * @deprecated takes no clipboard; use {@link #pasted(int, int, int, Clipboard)}, which core
+         *             calls with the clipboard as it stood - turned and mirrored - when it was pasted
+         */
+        @Deprecated
+        default void pasted(int x, int y, int z) {}
+
+        /**
+         * The player pasted: {@code clipboard}'s anchor goes at this block. The clipboard is the one
+         * the paste tool showed: every turn and mirror so far applied, by core for a {@link
+         * Clipboard} handed over, as last confirmed for lists.
+         */
+        default void pasted(int x, int y, int z, Clipboard clipboard) {
+            pasted(x, y, z);
+        }
     }
+
+    /**
+     * Fills the game's own paste tool with a clipboard of ours, and lets core keep it turned: the
+     * tool's turns ({@code RotateBlock} as the paste tool has it by default, {@code NonUniform} -
+     * a block whose six faces are one texture keeps its facing), its mirror (each block folded by
+     * its own {@link BlockView#flip()}) and its reset are answered here as the server would answer
+     * them, and the clipboard as it stands goes to {@link PasteListener#pasted(int, int, int,
+     * Clipboard)}. Nothing reaches the server. {@code null} or an empty clipboard hands the tool back
+     * to the server's clipboard.
+     */
+    void setClipboard(Clipboard clipboard);
 
     /**
      * Fills the game's own paste tool with blocks of ours, so the player handles a blueprint with
@@ -188,4 +219,43 @@ public interface BuilderSelection {
 
     /** Called for what the player does with the paste tool while our clipboard is in it. */
     void onPaste(PasteListener listener);
+
+    // ------------------------------------------------------------------
+    // The game's prefab list, over prefabs of the module's own
+    // ------------------------------------------------------------------
+
+    /**
+     * Where the prefabs of {@link #openPrefabList} come from: their names, and what each is when the
+     * player looks at it or takes it. Called off the network thread; reading a file is fine.
+     */
+    interface PrefabSource {
+
+        /** The prefabs to list, by name, in the order to show them. */
+        List<String> names();
+
+        /** A prefab's blocks for the spinning preview beside the list; empty when it cannot be read. */
+        Optional<Clipboard> preview(String name);
+
+        /** The player loaded this prefab (double click, or Load): the window has closed. */
+        void load(String name);
+
+        /** The one row shown when there is nothing to list. */
+        default String emptyText() {
+            return "No prefabs yet";
+        }
+    }
+
+    /**
+     * Opens the game's own prefab list - {@code Pages/PrefabListPage.ui}, the window the paste tool's
+     * E opens for an editor - over prefabs of the module's own, driven the way the server drives it:
+     * a search field, one row per prefab, a click shows it spinning beside the list, a double click
+     * or Load hands it to {@link PrefabSource#load} and closes the window. Typically called from
+     * {@link PasteListener#listAsked}.
+     *
+     * @param title the path line at the top of the window
+     * @return whether a window opened - false with no client to show it to
+     */
+    default boolean openPrefabList(String title, PrefabSource source) {
+        return false;
+    }
 }

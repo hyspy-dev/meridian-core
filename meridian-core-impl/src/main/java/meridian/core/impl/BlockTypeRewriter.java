@@ -7,6 +7,7 @@ import meridian.api.packet.Packet;
 import meridian.api.packet.PacketHandler;
 import meridian.api.session.ProxySession;
 import meridian.protocol.BlockType;
+import meridian.protocol.UpdateType;
 import meridian.protocol.packets.assets.UpdateBlockTypes;
 
 /**
@@ -32,6 +33,10 @@ final class BlockTypeRewriter implements PacketHandler {
         if (!(packet instanceof UpdateBlockTypes update) || update.blockTypes == null) {
             return Action.FORWARD;
         }
+        if (update.type == UpdateType.Remove) {
+            update.blockTypes.keySet().forEach(worldState::forgetShown);
+            return Action.FORWARD;
+        }
         Map<Integer, BlockType> view = new HashMap<>(update.blockTypes.size());
         boolean changed = false;
         for (Map.Entry<Integer, BlockType> e : update.blockTypes.entrySet()) {
@@ -40,6 +45,8 @@ final class BlockTypeRewriter implements PacketHandler {
             if (seen != truth) {
                 changed = true;
             }
+            // What the client is about to hold: later changes are measured against it.
+            worldState.shownByServerPacket(e.getKey(), seen, truth);
             view.put(e.getKey(), seen);
         }
         if (!changed) {
