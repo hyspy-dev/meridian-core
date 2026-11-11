@@ -34,6 +34,8 @@ public final class InventoryTracker {
     private final Map<Integer, String> utility = new ConcurrentHashMap<>();
     private final Map<Integer, String> tools = new ConcurrentHashMap<>();
 
+    /** How many slots the hotbar has, as the server last said. */
+    private volatile int hotbarCapacity = 9;
     private volatile int activeHotbarSlot = 0;
     private volatile int activeUtilitySlot = 0;
     private volatile int activeToolsSlot = -1;
@@ -44,6 +46,9 @@ public final class InventoryTracker {
 
     void onInventory(UpdatePlayerInventory packet) {
         load(packet.hotbar, hotbar);
+        if (packet.hotbar != null && packet.hotbar.capacity > 0) {
+            hotbarCapacity = packet.hotbar.capacity;
+        }
         load(packet.utility, utility);
         load(packet.tools, tools);
         log.info("meridian-core: inventory — hotbar={} utility={} tools={} item(s)",
@@ -123,6 +128,16 @@ public final class InventoryTracker {
     /** Item id in hotbar {@code slot}, or {@code null} if empty. */
     public String hotbarItem(int slot) {
         return hotbar.get(slot);
+    }
+
+    /** How many slots the hotbar has. */
+    public int hotbarCapacity() {
+        return hotbarCapacity;
+    }
+
+    /** The hotbar as it stands: slot to item id, empty slots left out. */
+    public Map<Integer, String> hotbarItems() {
+        return Map.copyOf(hotbar);
     }
 
     /** First hotbar slot holding an item whose id contains {@code substring}, or -1. */

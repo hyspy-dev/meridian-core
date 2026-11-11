@@ -14,15 +14,23 @@ import meridian.protocol.packets.assets.UpdateUnarmedInteractions;
  */
 final class ItemRegistryObserver implements PacketHandler {
     private final ItemRegistry registry;
+    /** Told once the catalog has taken an update in. */
+    private final Runnable afterItems;
 
     ItemRegistryObserver(ItemRegistry registry) {
+        this(registry, () -> { });
+    }
+
+    ItemRegistryObserver(ItemRegistry registry, Runnable afterItems) {
         this.registry = registry;
+        this.afterItems = afterItems;
     }
 
     @Override
     public Action handleS2C(ChannelHandlerContext ctx, Packet packet, ProxySession session) {
         if (packet instanceof UpdateItems items) {
             registry.onUpdateItems(items);
+            afterItems.run();
         } else if (packet instanceof UpdateUnarmedInteractions unarmed) {
             registry.onUnarmedInteractions(unarmed);
         }

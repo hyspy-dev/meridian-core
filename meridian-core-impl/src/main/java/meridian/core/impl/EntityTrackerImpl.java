@@ -5,10 +5,19 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import meridian.core.api.Box;
 import meridian.core.api.EntityTracker;
+import meridian.core.api.Look;
 import meridian.core.api.Vec3;
 import meridian.protocol.ComponentUpdate;
+import meridian.core.impl.interaction.EntityTarget;
 import meridian.protocol.Direction;
+import meridian.protocol.EffectOp;
+import meridian.protocol.EntityEffectUpdate;
+import meridian.protocol.EntityEffectsUpdate;
+import meridian.protocol.InteractionType;
+import meridian.protocol.InteractionsUpdate;
+import meridian.protocol.ItemUpdate;
 import meridian.protocol.ModelTransform;
 import meridian.protocol.ModelUpdate;
 import meridian.protocol.NameplateUpdate;
@@ -57,6 +66,23 @@ final class EntityTrackerImpl implements EntityTracker {
      * {@link #types} map treats the model path.
      */
     private final Set<Integer> players = ConcurrentHashMap.newKeySet();
+    /** Which way each entity's body faces - what a hit on it reports. */
+    private final Map<Integer, Direction> bodies = new ConcurrentHashMap<>();
+    /** Each entity's own interaction roots by type ({@code Interactions}) - what a use on it runs. */
+    private final Map<Integer, Map<InteractionType, Integer>> interactions = new ConcurrentHashMap<>();
+    /** Each entity's active effects by index - added and removed as the server says. */
+    private final Map<Integer, Set<Integer>> effects = new ConcurrentHashMap<>();
+    /**
+     * Each entity's hitbox about its feet, sized as the server sizes it ({@link #hitbox}), from its
+     * last model; none for a model without one.
+     */
+    private final Map<Integer, double[]> hitboxes = new ConcurrentHashMap<>();
+    /** The stack's item id of each dropped item on the ground ({@code Item} component). */
+    private final Map<Integer, String> items = new ConcurrentHashMap<>();
+    /** ... and how many it is. */
+    private final Map<Integer, Integer> quantities = new ConcurrentHashMap<>();
+    /** Where each entity was first seen since it came into view: a drop's, where it fell from. */
+    private final Map<Integer, Vec3> firstSeen = new ConcurrentHashMap<>();
     private volatile int localId = Integer.MIN_VALUE;
     private volatile Vec3 localPos;
     /** Look orientation of the local player, radians. */
@@ -82,6 +108,13 @@ final class EntityTrackerImpl implements EntityTracker {
                 modelAssetIds.remove(id);
                 nameplates.remove(id);
                 players.remove(id);
+                bodies.remove(id);
+                interactions.remove(id);
+                effects.remove(id);
+                hitboxes.remove(id);
+                items.remove(id);
+                quantities.remove(id);
+                firstSeen.remove(id);
             }
         }
         if (packet.updates != null) {
@@ -92,9 +125,35 @@ final class EntityTrackerImpl implements EntityTracker {
                         Vec3 pos = positionOf(transform.transform);
                         if (pos != null) {
                             positions.put(update.networkId, pos);
+                            firstSeen.putIfAbsent(update.networkId, pos);
                         }
-                    } else if (component instanceof ModelUpdate modelUpdate
-                            && modelUpdate.model != null) {
+                        if (transform.transform != null && transform.transform.bodyOrientation != null) {
+                            bodies.put(update.networkId, transform.transform.bodyOrientation);
+                        }
+                    } else if (component instanceof EntityEffectsUpdate effectUpdates
+                            && effectUpdates.entityEffectUpdates != null) {
+                        Set<Integer> active = effects.computeIfAbsent(update.networkId,
+                                k -> ConcurrentHashMap.newKeySet());
+                        for (EntityEffectUpdate e : effectUpdates.entityEffectUpdates) {
+                            if (e == null) continue;
+                            if (e.type == EffectOp.Remove) {
+                                active.remove(e.id);
+                            } else {
+                                active.add(e.id);
+                            }
+                        }
+                    } else if (component instanceof InteractionsUpdate entityInteractions
+                            && entityInteractions.interactions != null) {
+                        interactions.put(update.networkId, Map.copyOf(entityInteractions.interactions));
+                    } else if (component instanceof ModelUpdate modelUpdate && modelUpdate.model == null) {
+                        hitboxes.remove(update.networkId);      // the model taken away, its box too
+                    } else if (component instanceof ModelUpdate modelUpdate) {
+                        double[] box = hitbox(modelUpdate.model, modelUpdate.entityScale);
+                        if (box != null) {
+                            hitboxes.put(update.networkId, box);
+                        } else {
+                            hitboxes.remove(update.networkId);
+                        }
                         if (modelUpdate.model.path != null && !modelUpdate.model.path.isEmpty()) {
                             types.put(update.networkId, modelUpdate.model.path);
                         }
@@ -105,6 +164,10 @@ final class EntityTrackerImpl implements EntityTracker {
                     } else if (component instanceof NameplateUpdate nameplate
                             && nameplate.text != null && !nameplate.text.isEmpty()) {
                         nameplates.put(update.networkId, nameplate.text);
+                    } else if (component instanceof ItemUpdate item && item.item != null
+                            && item.item.itemId != null && !item.item.itemId.isEmpty()) {
+                        items.put(update.networkId, item.item.itemId);
+                        quantities.put(update.networkId, item.item.quantity);
                     } else if (component instanceof PlayerSkinUpdate) {
                         // Only players carry a skin component — definitive
                         // player marker, independent of the model path.
@@ -139,6 +202,65 @@ final class EntityTrackerImpl implements EntityTracker {
         return haveLook ? new Vec3(lookPitch, lookYaw, lookRoll) : null;
     }
 
+    /**
+     * An entity as something to aim at, with the local player's pose - what a forged hit or use
+     * on it reports. {@code null} while the entity, or the local player, is not in sight.
+     *
+     * <p>The hit point is on the entity's vertical middle line, at the height of the player's
+     * eyes kept within the body - where a straight look at it lands.
+     */
+    EntityTarget entityTarget(int entityId, double eyeHeight) {
+        Vec3 at = positions.get(entityId);
+        Vec3 me = localPos;
+        if (at == null || me == null) {
+            return null;
+        }
+        Direction body = bodies.getOrDefault(entityId, new Direction(0f, 0f, 0f));
+        double hitY = Math.max(at.y() + 0.2, Math.min(at.y() + 1.2, me.y() + eyeHeight));
+        return new EntityTarget(entityId,
+                new Position(at.x(), at.y(), at.z()),
+                new Direction(body.yaw, body.pitch, body.roll),
+                new org.joml.Vector3f((float) at.x(), (float) hitY, (float) at.z()),
+                new Position(me.x(), me.y(), me.z()),
+                new Direction(lookYaw, lookPitch, lookRoll),
+                interactions.getOrDefault(entityId, Map.of()),
+                Set.copyOf(effectsOf(entityId)), true);
+    }
+
+    /** An entity's active effects by index, as last seen; empty when none were. */
+    Set<Integer> effectsOf(int entityId) {
+        Set<Integer> active = effects.get(entityId);
+        return active == null ? Set.of() : Set.copyOf(active);
+    }
+
+    /** The local player's own active effects. */
+    Set<Integer> selfEffects() {
+        return localId == Integer.MIN_VALUE ? Set.of() : effectsOf(localId);
+    }
+
+    /** An entity's own interaction roots by type, as last seen; empty when none were. */
+    Map<InteractionType, Integer> interactionsOf(int entityId) {
+        return interactions.getOrDefault(entityId, Map.of());
+    }
+
+    /**
+     * A model's hitbox about the feet as the server collides by it ({@code EntityScaleBoundingBoxSystem}):
+     * the box sent already carries the model's own scale, and an entity scale replaces that scale
+     * rather than multiplying it - so the box grows by the ratio of the two. {@code null} for a
+     * model without a hitbox.
+     */
+    static double[] hitbox(meridian.protocol.Model model, float entityScale) {
+        meridian.protocol.Hitbox h = model.hitbox;
+        if (h == null) {
+            return null;
+        }
+        double k = 1;
+        if (Float.isFinite(entityScale) && entityScale > 0) {
+            k = Float.isFinite(model.scale) && model.scale > 0 ? entityScale / model.scale : entityScale;
+        }
+        return new double[] {h.minX * k, h.minY * k, h.minZ * k, h.maxX * k, h.maxY * k, h.maxZ * k};
+    }
+
     private static Vec3 positionOf(ModelTransform transform) {
         if (transform == null) return null;
         Position p = transform.position;
@@ -161,6 +283,17 @@ final class EntityTrackerImpl implements EntityTracker {
     }
 
     @Override
+    public Optional<Box> boundsOf(int entityId) {
+        Vec3 at = positions.get(entityId);
+        double[] h = hitboxes.get(entityId);
+        if (at == null || h == null) {
+            return Optional.empty();
+        }
+        return Optional.of(new Box(new Vec3(at.x() + h[0], at.y() + h[1], at.z() + h[2]),
+                new Vec3(at.x() + h[3], at.y() + h[4], at.z() + h[5])));
+    }
+
+    @Override
     public Optional<String> entityTypeOf(int entityId) {
         return Optional.ofNullable(types.get(entityId));
     }
@@ -168,6 +301,21 @@ final class EntityTrackerImpl implements EntityTracker {
     @Override
     public Optional<String> entityModelAssetId(int entityId) {
         return Optional.ofNullable(modelAssetIds.get(entityId));
+    }
+
+    @Override
+    public Optional<String> itemOf(int entityId) {
+        return Optional.ofNullable(items.get(entityId));
+    }
+
+    @Override
+    public int itemQuantityOf(int entityId) {
+        return quantities.getOrDefault(entityId, 0);
+    }
+
+    @Override
+    public Optional<Vec3> firstSeenAt(int entityId) {
+        return Optional.ofNullable(firstSeen.get(entityId));
     }
 
     @Override
@@ -188,21 +336,12 @@ final class EntityTrackerImpl implements EntityTracker {
     /**
      * Unit vector for the local player's current look direction, or
      * {@code null} if no orientation has been observed yet. Package-private
-     * accessor used by {@link PlayerImpl#lookDirection}; the formula mirrors
-     * {@link #entityInCrosshair} so both stay in sync.
+     * accessor used by {@link PlayerImpl#lookDirection}; {@link Look#direction}, as
+     * {@link #entityInCrosshair} aims by.
      */
     Vec3 localLookDirection() {
         if (!haveLook) return null;
-        // Match Hytale's own forward formula
-        // (TriggerVolumeTestCommand.java: forwardX = -sin(yaw), forwardZ = -cos(yaw)).
-        // Both axes carry a negative sign — yaw=0 looks toward -Z, yaw=π/2
-        // looks toward -X. An earlier draft of this method had +cos which
-        // sent the raycast directly behind the player.
-        double cosPitch = Math.cos(lookPitch);
-        double lx = -Math.sin(lookYaw) * cosPitch;
-        double ly = Math.sin(lookPitch);
-        double lz = -Math.cos(lookYaw) * cosPitch;
-        return new Vec3(lx, ly, lz);
+        return new Look(lookYaw, lookPitch).direction();
     }
 
     @Override
@@ -241,15 +380,8 @@ final class EntityTrackerImpl implements EntityTracker {
         Vec3 origin = localPos;
         if (origin == null || !haveLook) return OptionalInt.empty();
 
-        // Look unit vector. Hytale Direction is (yaw, pitch) in radians:
-        // pitch < 0 looks down (a topdown camera uses pitch = -PI/2).
-        // Yaw → forward formula mirrors the server's own builtin
-        // (TriggerVolumeTestCommand): forwardX = -sin(yaw), forwardZ = -cos(yaw).
-        // Kept in sync with {@link #localLookDirection}.
-        double cosPitch = Math.cos(lookPitch);
-        double lx = -Math.sin(lookYaw) * cosPitch;
-        double ly = Math.sin(lookPitch);
-        double lz = -Math.cos(lookYaw) * cosPitch;
+        Vec3 look = new Look(lookYaw, lookPitch).direction();
+        double lx = look.x(), ly = look.y(), lz = look.z();
 
         double maxRangeSq = maxRange * maxRange;
         double minCos = Math.cos(Math.toRadians(maxAngleDeg));

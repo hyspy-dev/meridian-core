@@ -15,9 +15,11 @@ import java.util.concurrent.RejectedExecutionException;
 import meridian.api.module.Scheduler;
 import meridian.api.packet.PacketHandler;
 import meridian.api.session.ProxySession;
+import meridian.protocol.packets.inventory.SetActiveSlot;
 import meridian.core.api.BlockPos;
 import meridian.core.api.Face;
 import meridian.core.api.InteractionControl;
+import meridian.core.api.InteractionOutcome;
 import meridian.core.impl.ChunkTracker;
 import meridian.core.impl.InteractionRegistry;
 import meridian.core.impl.InventoryTracker;
@@ -41,6 +43,7 @@ import meridian.protocol.PlaceBlockInteraction;
 import meridian.protocol.RootInteraction;
 import meridian.protocol.VariantRotation;
 import meridian.protocol.SelectInteraction;
+import meridian.protocol.packets.interaction.CancelInteractionChain;
 import meridian.protocol.packets.interaction.SyncInteractionChain;
 import meridian.protocol.packets.interaction.SyncInteractionChains;
 import org.slf4j.Logger;
@@ -66,6 +69,8 @@ import org.slf4j.LoggerFactory;
  */
 public final class InteractionControlImpl implements InteractionControl {
     private static final Logger log = LoggerFactory.getLogger("meridian-core");
+    /** The hotbar's inventory-section id (server {@code InventoryComponent.HOTBAR_SECTION_ID}). */
+    private static final int HOTBAR_SECTION = -1;
 
     /** What the simulator should build for the chain's {@code interactionData}. */
     private enum DataKind { NONE, BLOCK, PLACEMENT }
@@ -81,19 +86,29 @@ public final class InteractionControlImpl implements InteractionControl {
     private record TimedChain(SyncInteractionChain chain, long nanos) {}
 
     /**
-     * A unit of forging work on the serialized queue. {@link #run()} builds and
-     * sends the chain, returning its tick-duration — the number of 60&nbsp;Hz
-     * packets it spreads over — so the queue knows how long to wait before
-     * starting the next forge.
+     * A forge that started: when the queue may move on, and how the chain went. A forge that sent
+     * nothing is done at once.
      */
+    private record Started(CompletableFuture<Void> localDone, CompletableFuture<InteractionOutcome> outcome) {
+        static final Started NOTHING = settled(InteractionOutcome.notSent());
+
+        static Started of(ForgeRun run) {
+            return new Started(run.localDone(), run.outcome());
+        }
+
+        static Started settled(InteractionOutcome outcome) {
+            return new Started(CompletableFuture.completedFuture(null), CompletableFuture.completedFuture(outcome));
+        }
+    }
+
+    /** A unit of forging work on the serialized queue: builds the chain and starts playing it. */
     @FunctionalInterface
     private interface QueuedForge {
-        /** Runs the forge; returns its tick-duration (0 if nothing was sent). */
-        int run();
+        Started start();
     }
 
     /** A forge waiting on the queue, paired with the future its caller holds. */
-    private record QueuedItem(QueuedForge forge, CompletableFuture<Void> done) {}
+    private record QueuedItem(QueuedForge forge, CompletableFuture<InteractionOutcome> done) {}
 
     private final InteractionRegistry registry;
     private final InventoryTracker inventory;
@@ -101,18 +116,34 @@ public final class InteractionControlImpl implements InteractionControl {
     private final WorldStateImpl worldState;
     private final ItemRegistry items;
     private final Scheduler scheduler;
+    /** Network id &rarr; that entity as an aim (where it stands, its own interactions), or {@code null}. */
+    private final EntityLookup entities;
+    /** The player's eyes above its feet: its model's, as core's movement keeps it. */
+    private final java.util.function.DoubleSupplier eyeHeight;
 
     private volatile ProxySession session;
     private volatile BlockPosition targetBlock;
     /** The player's last observed movement state — what {@code ConditionInteraction} tests. */
     private volatile MovementStates movementStates;
-    /** The player's last observed game mode — what {@code ConditionInteraction.requiredGameMode} tests. */
-    private volatile GameMode gameMode;
     /** Player's last observed look yaw (radians) — drives FacingPlayer placement. */
     private volatile float lookYaw;
     private volatile boolean haveLook;
     /** Chain-id NAT: keeps forged chain ids out of the client's counter space. */
     private final ChainIdNat nat = new ChainIdNat();
+    /** The combo steps the server has been sent - what a forged swing continues from. */
+    private final ChainingMemory chaining = new ChainingMemory();
+    /** How the simulator enters roots and picks combo steps. */
+    private final InteractionSimulator.RootResolver resolver = new InteractionSimulator.RootResolver() {
+        @Override
+        public CompiledInteraction resolve(int rootId) {
+            return compileRoot(rootId);
+        }
+
+        @Override
+        public int chainingIndex(meridian.protocol.ChainingInteraction node, int interactionId) {
+            return chaining.next(node, interactionId);
+        }
+    };
     /** (type, held item) &rarr; root id — a fallback for the {@link ItemRegistry}. */
     private final Map<ActionKey, Integer> observedRoot = new ConcurrentHashMap<>();
     /**
@@ -127,18 +158,65 @@ public final class InteractionControlImpl implements InteractionControl {
     private final Map<Integer, Integer> selectHitBlock = new ConcurrentHashMap<>();
     /** client chainId &rarr; that chain's main (non-fork) root, to attribute its forks. */
     private final Map<Integer, Integer> chainMainRoot = new ConcurrentHashMap<>();
+    /** Chains being played, by server-side chain id - what the server's echoes and cancels go to. */
+    private final Map<Integer, ForgeRun> runs = new ConcurrentHashMap<>();
+    /** How long a settled run still hears the server: a late fork, a late replay. */
+    private static final Duration RUN_LINGER = Duration.ofSeconds(30);
+    /** The body forged pushes move ({@code ApplyForceInteraction}); set by core for a headless session. */
+    private volatile ForceBody forceBody;
+
+    /** The body forged chains push: core's, for the session it plays the client of. */
+    public void forceBody(ForceBody body) {
+        this.forceBody = body;
+    }
+
+    /** What a run needs from this control. */
+    private final ForgeRun.Host host = new ForgeRun.Host() {
+        @Override
+        public void send(SyncInteractionChains packet) {
+            sendChains(packet);
+        }
+
+        @Override
+        public SyncInteractionChain wrap(int chainId, SyncInteractionChain fork, InteractionType type) {
+            return forkParent(chainId, fork, type);
+        }
+
+        @Override
+        public CompiledInteraction compile(int rootId) {
+            return compileRoot(rootId);
+        }
+
+        @Override
+        public InteractionSimulator.RootResolver resolver() {
+            return resolver;
+        }
+
+        @Override
+        public ForceBody forceBody() {
+            return forceBody;
+        }
+
+        @Override
+        public Scheduler scheduler() {
+            return scheduler;
+        }
+
+        @Override
+        public void finished(ForgeRun run) {
+            try {
+                scheduler.schedule(() -> forget(run), RUN_LINGER);
+            } catch (RejectedExecutionException terminated) {
+                forget(run);
+            }
+        }
+    };
     /**
-     * Forged dig chains awaiting the server's own area forks. The shovel's
-     * {@code SelectInteraction} runs <em>server-side</em>: when we forge the main
-     * dig chain through it, the server runs its area selector and spawns one
-     * break fork per block, announcing them back to us (S2C). We answer each
-     * with {@link #replyToFork} so the fork's {@code WaitForDataFrom.Client} gate
-     * opens and the server breaks its own selected block — no client dig, no
-     * hard-coded {@code HitBlock} root.
+     * (forged chain, fork path) &rarr; the state we last told the server it is in. A fork's reply
+     * rides in its parent's packet, which states the parent's own state again - it must say what
+     * the parent is, not that it is still running.
      */
-    private final Set<Integer> reactiveDigChains = ConcurrentHashMap.newKeySet();
-    /** (forged chainId, forkedId) already answered — reply once per server fork. */
-    private final Set<Long> repliedForks = ConcurrentHashMap.newKeySet();
+    private final Map<String, InteractionState> sentStates = new ConcurrentHashMap<>();
     /**
      * (type, held item) &rarr; the last complete real chain <em>sequence</em>,
      * for replay. An interaction with a {@code WaitForDataFrom.Client} operation
@@ -168,13 +246,23 @@ public final class InteractionControlImpl implements InteractionControl {
 
     public InteractionControlImpl(InteractionRegistry registry, InventoryTracker inventory,
                                   ChunkTracker chunks, WorldStateImpl worldState,
-                                  ItemRegistry items, Scheduler scheduler) {
+                                  ItemRegistry items, Scheduler scheduler,
+                                  EntityLookup entities, java.util.function.DoubleSupplier eyeHeight) {
+        this.entities = entities;
+        this.eyeHeight = eyeHeight;
         this.registry = registry;
         this.inventory = inventory;
         this.chunks = chunks;
         this.worldState = worldState;
         this.items = items;
         this.scheduler = scheduler;
+    }
+
+    /** Drops a settled run, and what was kept for its packets. */
+    private void forget(ForgeRun run) {
+        runs.remove(run.chainId(), run);
+        String chain = String.valueOf(run.chainId());
+        sentStates.keySet().removeIf(k -> k.equals(chain) || k.startsWith(chain + "/"));
     }
 
     /** Creates the observer + chain-id NAT handler — register at NORMAL, BOTH directions. */
@@ -196,17 +284,19 @@ public final class InteractionControlImpl implements InteractionControl {
         }
     }
 
+    /**
+     * A movement report that went to the server without passing the client-side chain (a game's
+     * body core moves): its states and its look, as {@link InteractionObserver} reads them.
+     */
+    public void ownMovement(meridian.protocol.packets.player.ClientMovement m) {
+        onMovementStates(m.movementStates);
+        onPlayerLook(m.lookOrientation);
+    }
+
     /** Tracks the player's movement state — {@code ConditionInteraction}'s input. */
     void onMovementStates(MovementStates states) {
         if (states != null) {
             this.movementStates = states;
-        }
-    }
-
-    /** Tracks the player's game mode — {@code ConditionInteraction.requiredGameMode}'s input. */
-    void onGameMode(GameMode mode) {
-        if (mode != null) {
-            this.gameMode = mode;
         }
     }
 
@@ -244,6 +334,7 @@ public final class InteractionControlImpl implements InteractionControl {
         }
         inventory.observeActiveSlots(hotbarSlot, chain.activeUtilitySlot,
                 chain.activeToolsSlot);
+        chaining.noteSent(chain, this::compileRoot); // the player's own swings move the combo too
 
         // Diagnostic: log every chain's walk, including initial=false continuations.
         if (chain.interactionData != null) {
@@ -391,9 +482,18 @@ public final class InteractionControlImpl implements InteractionControl {
 
     /** Vertical orientation for an {@code UpDown} block — flipped on a ceiling. */
     private static BlockRotation upDownRotation(BlockFace face) {
-        return face == BlockFace.Down
-                ? new BlockRotation(Rotation.None, Rotation.OneEighty, Rotation.None)
-                : new BlockRotation(Rotation.None, Rotation.None, Rotation.None);
+        return blockRotation(face == BlockFace.Down
+                ? meridian.core.api.Rotation.of(0, 2, 0) : meridian.core.api.Rotation.NONE);
+    }
+
+    /** The protocol's quarter turns, by count: None, Ninety, OneEighty, TwoSeventy. */
+    private static final Rotation[] QUARTERS = Rotation.values();
+
+    /** The server's orientation number as the three quarter turns a placement carries. */
+    static BlockRotation blockRotation(int index) {
+        return new BlockRotation(QUARTERS[meridian.core.api.Rotation.yaw(index)],
+                QUARTERS[meridian.core.api.Rotation.pitch(index)],
+                QUARTERS[meridian.core.api.Rotation.roll(index)]);
     }
 
     /** The block id a {@code PlaceBlockInteraction} in {@code compiled} places, or -1. */
@@ -426,13 +526,7 @@ public final class InteractionControlImpl implements InteractionControl {
         }
         double deg = Math.toDegrees(lookYaw);
         int q = (int) Math.floorMod(Math.round(deg / 90.0), 4L);
-        Rotation yaw = switch (q) {
-            case 1 -> Rotation.Ninety;
-            case 2 -> Rotation.OneEighty;
-            case 3 -> Rotation.TwoSeventy;
-            default -> Rotation.None;
-        };
-        return new BlockRotation(yaw, Rotation.None, Rotation.None);
+        return blockRotation(meridian.core.api.Rotation.of(q, 0, 0));
     }
 
     /**
@@ -445,9 +539,9 @@ public final class InteractionControlImpl implements InteractionControl {
      */
     private static BlockRotation axisRotation(BlockFace face) {
         return switch (face) {
-            case Up, Down     -> new BlockRotation(Rotation.None,   Rotation.None,   Rotation.None);
-            case North, South -> new BlockRotation(Rotation.None,   Rotation.Ninety, Rotation.None);
-            case East, West   -> new BlockRotation(Rotation.Ninety, Rotation.Ninety, Rotation.None);
+            case Up, Down     -> blockRotation(meridian.core.api.Rotation.NONE);
+            case North, South -> blockRotation(meridian.core.api.Rotation.of(0, 1, 0));
+            case East, West   -> blockRotation(meridian.core.api.Rotation.of(1, 1, 0));
             default           -> null;
         };
     }
@@ -471,7 +565,7 @@ public final class InteractionControlImpl implements InteractionControl {
         InteractionContext ctx = contextFor(captured.interactionType,
                 captured.data.blockPosition, DataKind.BLOCK, captured.itemInHandId, BlockFace.Up);
         List<InteractionSyncData> vm = InteractionSimulator.simulate(
-                compiled, ctx, this::compileRoot);
+                compiled, ctx, resolver);
 
         StringBuilder real = new StringBuilder();
         StringBuilder sim = new StringBuilder();
@@ -511,7 +605,7 @@ public final class InteractionControlImpl implements InteractionControl {
         InteractionContext ctx = contextFor(key.type(), first.data.blockPosition,
                 DataKind.BLOCK, key.item(), BlockFace.Up);
         List<InteractionSimulator.Packet> ticked = InteractionSimulator.simulateTicked(
-                compiled, ctx, this::compileRoot, selectHitBlock).packets();
+                compiled, ctx, resolver, selectHitBlock).packets();
 
         // Reconstruct the server-authoritative walk from the capture: each op
         // lives at flat index operationBaseIndex + i; a desync packet rewinds
@@ -585,15 +679,17 @@ public final class InteractionControlImpl implements InteractionControl {
             }
         }
         MovementStates movement = movementStates;
-        GameMode mode = gameMode;
+        GameMode mode = entities.selfGameMode();
         Map<String, Integer> vars = items.varsFor(itemId);
         // Placement rotation is filled in by buildFromVm (it knows the placed
         // block id) via withBlockRotation; null here means "default for now".
-        return dataKind == DataKind.PLACEMENT
+        InteractionContext ctx = dataKind == DataKind.PLACEMENT
                 ? InteractionContext.ofPlacement(type, target, blockType, blockId, face,
                         null, movement, mode, vars)
                 : InteractionContext.ofBlock(type, target, blockType, blockId, face,
                         movement, mode, vars);
+        // The player's own effects as last seen - what effect conditions on the user test.
+        return ctx.withEffects(new WalkEffects(entities.selfEffects(), null, entities.selfStats()));
     }
 
     /** Flattens a registry root into its operation list, or {@code null} if absent. */
@@ -604,6 +700,21 @@ public final class InteractionControlImpl implements InteractionControl {
         }
         return InteractionFlattener.compile(
                 rootId, root.interactions, id -> registry.interaction(id).orElse(null));
+    }
+
+    /** A root's operation list as the VM sees it, or why there is none - for the command channel. */
+    public String describeRoot(int rootId) {
+        RootInteraction root = registry.root(rootId).orElse(null);
+        CompiledInteraction compiled = compileRoot(rootId);
+        if (root == null || compiled == null) {
+            return "root " + rootId + " is not in the registry";
+        }
+        return "root '" + root.id + "' #" + rootId + "\n" + compiled.describe();
+    }
+
+    /** The root the server last used for {@code type} with {@code itemId} in hand, if one was seen. */
+    public Integer observedRootFor(InteractionType type, String itemId) {
+        return observedRoot.get(ActionKey.of(type, itemId));
     }
 
     /** Flattens a root once and logs its operation tree — VM-development diagnostics. */
@@ -637,14 +748,14 @@ public final class InteractionControlImpl implements InteractionControl {
     }
 
     @Override
-    public CompletableFuture<Void> useOnBlock(BlockPos pos) {
+    public CompletableFuture<InteractionOutcome> useOnBlock(BlockPos pos) {
         // Harvest interactions are requiresClient — the server waits for per-op
         // client data, so a bare chain is not enough. Build it via the VM.
         return enqueueForge(() -> forge(pos, InteractionType.Use, DataKind.BLOCK));
     }
 
     @Override
-    public CompletableFuture<Void> hitBlock(BlockPos pos) {
+    public CompletableFuture<InteractionOutcome> hitBlock(BlockPos pos) {
         // A hit is a Primary (left-click) interaction — the held item's Primary
         // root carries a BreakBlockInteraction the server resolves into block
         // damage. One forge = one hit; the server decides the HP removed, so a
@@ -653,9 +764,9 @@ public final class InteractionControlImpl implements InteractionControl {
     }
 
     @Override
-    public CompletableFuture<Void> digSwing(BlockPos aim) {
+    public CompletableFuture<InteractionOutcome> digSwing(BlockPos aim) {
         if (aim == null) {
-            return CompletableFuture.completedFuture(null);
+            return CompletableFuture.completedFuture(InteractionOutcome.notSent());
         }
         // One swing: forge the held tool's Primary main chain through its
         // SelectInteraction. We do NOT pre-compute break forks — the server runs
@@ -666,136 +777,415 @@ public final class InteractionControlImpl implements InteractionControl {
     }
 
     /**
-     * Forges the held tool's {@code Primary} main chain and marks it so the
-     * server's area forks for this swing are answered reactively. Returns the
-     * chain's tick-duration.
+     * How long after the last swing the block's own change is waited for: it comes beside the
+     * server's word on the chain, and the two can arrive a tick or two apart.
      */
-    private int forgeDigSwing(BlockPos pos) {
-        ProxySession s = session;
-        if (s == null) {
-            log.warn("meridian-core: dig swing requested but no session yet");
-            return 0;
+    private static final Duration BREAK_SETTLE = Duration.ofMillis(500);
+
+    @Override
+    public java.util.OptionalDouble digReach(String itemId) {
+        String item = itemId == null || itemId.isEmpty() ? null : itemId;
+        double sweep = sweepOf(item);
+        if (Double.isNaN(sweep)) {
+            return java.util.OptionalDouble.empty();
         }
-        String itemId = inventory.itemInHandId();
-        // Empty hit-block map: the simulator emits the SelectInteraction op but
-        // spawns no forks — the server owns the area selection.
-        int[] forgedOut = new int[] {-1};
-        SyncInteractionChains[] forged = buildFromVm(pos, InteractionType.Primary, DataKind.BLOCK,
-                itemId, BlockFace.Up, null, Map.of(), forgedOut, BlockFace.Up);
-        if (forged == null) {
-            log.warn("meridian-core: dig swing — no Primary root for item {}", itemId);
-            return 0;
-        }
-        if (forgedOut[0] != -1) {
-            reactiveDigChains.add(forgedOut[0]);
-            log.info("meridian-core: forged reactive dig swing chain {} (item {}) — "
-                    + "awaiting server area forks", forgedOut[0], itemId);
-        }
-        return sendPacedVm(forged, InteractionType.Primary, pos);
+        return java.util.OptionalDouble.of(sweep > 0 ? sweep : useDistance(item));
+    }
+
+    @Override
+    public java.util.OptionalDouble useReach(String itemId) {
+        return java.util.OptionalDouble.of(useDistance(itemId == null || itemId.isEmpty() ? null : itemId));
     }
 
     /**
-     * Answers the server's area forks for one of our reactive dig swings. When we
-     * forge the main dig chain, the server runs the {@code SelectInteraction}'s
-     * selector and spawns a break fork per block, echoing them to us — on a
-     * fork's first sync the packet carries its {@code HitBlock} root in
-     * {@code overrideRootInteraction} (the server hands us the link the wire
-     * otherwise drops). We reply per fork so its {@code WaitForDataFrom.Client}
-     * break op can run; the server breaks its own selected block (it ignores the
-     * block we send), so the swing clears exactly the real shovel area.
+     * The server's reach with the item in hand, before its buffer ({@code getPlayerInteractionDistanceSq}):
+     * the item's use distance for the game mode, in Creative at least the client's creative reach.
      */
-    void onServerForkAnnounce(SyncInteractionChain serverChain) {
-        if (serverChain == null || !reactiveDigChains.contains(serverChain.chainId)) {
+    private double useDistance(String item) {
+        GameMode own = entities.selfGameMode();
+        GameMode mode = own != null ? own : GameMode.Adventure;
+        double use = items.useDistance(item, mode);
+        return mode == GameMode.Creative ? Math.max(use, creativeReach) : use;
+    }
+
+    /**
+     * The client's creative reach, as its preferences tell the server - clamped as the server
+     * clamps it. Until they come, the server's own default.
+     */
+    void onPreferences(meridian.protocol.packets.player.SyncPlayerPreferences prefs) {
+        creativeReach = Math.max(0, Math.min(MAX_CREATIVE_REACH, prefs.creativeInteractionDistance));
+    }
+
+    @Override
+    public boolean digSweeps(String itemId) {
+        return sweepOf(itemId == null || itemId.isEmpty() ? null : itemId) > 0;
+    }
+
+    /**
+     * How far the item's dig sweeps: a BreakBlock in its swing breaks the block aimed at (a
+     * pickaxe's) - {@code 0}; with none, what breaks blocks is a sweep the server makes (a shovel's,
+     * whose HitBlock forks break them) - its reach. A sweep beside a BreakBlock hits entities only.
+     * {@code NaN} when the swing is not known.
+     */
+    private double sweepOf(String item) {
+        OptionalInt rootId = resolveRoot(InteractionType.Primary, item);
+        CompiledInteraction root = rootId.isEmpty() ? null : compileRoot(rootId.getAsInt());
+        if (root == null) {
+            return Double.NaN;
+        }
+        boolean aimed = false;
+        double sweep = Double.MAX_VALUE;
+        for (FlatOp op : root.ops()) {
+            if (op instanceof FlatOp.Node n) {
+                if (n.interaction() instanceof meridian.protocol.BreakBlockInteraction) {
+                    aimed = true;
+                } else if (n.interaction() instanceof SelectInteraction sel) {
+                    double r = selectorReach(sel.selector);
+                    if (r > 0) {
+                        sweep = Math.min(sweep, r);
+                    }
+                }
+            }
+        }
+        return !aimed && sweep < Double.MAX_VALUE ? sweep : 0;
+    }
+
+    /** How far from where it starts a selector takes things in; 0 when it does not say. */
+    private static double selectorReach(meridian.protocol.Selector selector) {
+        return switch (selector) {
+            case meridian.protocol.HorizontalSelector h -> h.endDistance;
+            case meridian.protocol.StabSelector st -> st.endDistance;
+            case meridian.protocol.AOECircleSelector c -> c.range;
+            case meridian.protocol.AOECylinderSelector c -> c.range;
+            case meridian.protocol.DonutSelector d -> d.maxRadius;
+            case meridian.protocol.RaycastSelector r -> r.distance;
+            case null, default -> 0;
+        };
+    }
+
+    @Override
+    public CompletableFuture<Boolean> breakBlock(BlockPos pos, int maxSwings) {
+        if (pos == null || maxSwings < 1 || session == null) {
+            return CompletableFuture.completedFuture(false);
+        }
+        int x = pos.x(), y = pos.y(), z = pos.z();
+        int start = chunks.blockIdAt(x, y, z);
+        if (!chunks.known(x, y, z) || start <= 0) {
+            return CompletableFuture.completedFuture(false);  // nothing known there, or nothing to break
+        }
+        // Gone once core is sent the cell holding something else: air, or what the block breaks into.
+        java.util.function.BooleanSupplier gone = () -> chunks.known(x, y, z) && chunks.blockIdAt(x, y, z) != start;
+        CompletableFuture<Boolean> done = new CompletableFuture<>();
+        ChunkTracker.CellWatch watch = chunks.watchCell(x, y, z, () -> {
+            if (!done.isDone() && gone.getAsBoolean()) {
+                answerBreak(done, () -> true, Duration.ZERO);
+            }
+        });
+        done.whenComplete((v, e) -> watch.close());
+        swingUntilGone(pos, 1, maxSwings, gone, done);
+        return done;
+    }
+
+    /** Swing {@code n} of {@code max}, once the one before has been answered - as a held button swings. */
+    private void swingUntilGone(BlockPos pos, int n, int max, java.util.function.BooleanSupplier gone,
+                                CompletableFuture<Boolean> done) {
+        if (done.isDone()) {
+            return;
+        }
+        digSwing(pos).whenComplete((outcome, error) -> {
+            if (done.isDone()) {
+                return;
+            }
+            if (gone.getAsBoolean()) {
+                answerBreak(done, () -> true, Duration.ZERO);
+                return;
+            }
+            boolean sent = outcome != null && outcome.status() != InteractionOutcome.Status.NOT_SENT;
+            if (sent && n < max) {
+                swingUntilGone(pos, n + 1, max, gone, done);
+            } else if (!sent && n == 1) {
+                answerBreak(done, () -> false, Duration.ZERO);   // nothing went out
+            } else {
+                // The last swing, or no more could be sent: its block change may still be coming.
+                answerBreak(done, gone, BREAK_SETTLE);
+            }
+        });
+    }
+
+    /** Answers a break on the scheduler after {@code delay}, with what {@code answer} says then. */
+    private void answerBreak(CompletableFuture<Boolean> done, java.util.function.BooleanSupplier answer,
+                             Duration delay) {
+        Runnable complete = () -> done.complete(answer.getAsBoolean());
+        try {
+            scheduler.schedule(complete, delay);
+        } catch (RejectedExecutionException terminated) {
+            complete.run();
+        }
+    }
+
+    @Override
+    public CompletableFuture<InteractionOutcome> hitEntity(int entityId) {
+        return enqueueForge(() -> forgeAim(entityId, InteractionType.Primary));
+    }
+
+    @Override
+    public CompletableFuture<InteractionOutcome> useOnEntity(int entityId) {
+        return enqueueForge(() -> forgeAim(entityId, InteractionType.Use));
+    }
+
+    @Override
+    public CompletableFuture<InteractionOutcome> dodge() {
+        return enqueueForge(() -> forgeAim(-1, InteractionType.Dodge));
+    }
+
+    @Override
+    public CompletableFuture<InteractionOutcome> useItem() {
+        return enqueueForge(() -> forgeAim(-1, InteractionType.Secondary));
+    }
+
+    @Override
+    public CompletableFuture<InteractionOutcome> useItem(Duration hold) {
+        return enqueueForge(() -> forgeAim(-1, InteractionType.Secondary, seconds(hold)));
+    }
+
+    @Override
+    public CompletableFuture<InteractionOutcome> swing() {
+        return enqueueForge(() -> forgeAim(-1, InteractionType.Primary));
+    }
+
+    @Override
+    public CompletableFuture<InteractionOutcome> swing(Duration hold) {
+        return enqueueForge(() -> forgeAim(-1, InteractionType.Primary, seconds(hold)));
+    }
+
+    /** A hold in seconds; a negative or missing one is a tap. */
+    private static float seconds(Duration hold) {
+        return hold == null || hold.isNegative() ? 0f : hold.toNanos() / 1_000_000_000f;
+    }
+
+    /** What the server adds to the use distance before it refuses ({@code MAX_INTERACTION_DISTANCE_BUFFER}). */
+    private static final double REACH_BUFFER = 2.0;
+    /** The creative reach a client has unless its settings say otherwise. */
+    private static final double CREATIVE_REACH = 10.0;
+    /** The most creative reach the server takes from a client's settings. */
+    private static final double MAX_CREATIVE_REACH = 128.0;
+    /** The creative reach the client's preferences set ({@link #onPreferences}). */
+    private volatile double creativeReach = CREATIVE_REACH;
+
+    /**
+     * An entity as an aim, with whether the player reaches it - the server's
+     * {@code canPlayerInteractWithEntity}: the held item's use distance for the game mode (at
+     * least the creative reach in Creative) plus a buffer, from the eyes to the entity's feet.
+     * {@code null} while core does not see it.
+     */
+    private EntityTarget reachable(int entityId) {
+        EntityTarget target = entities.target(entityId);
+        if (target == null) {
+            return null;
+        }
+        String held = inventory.itemInHandId();
+        double reach = useDistance(held == null || held.isEmpty() ? null : held) + REACH_BUFFER;
+        return target.withReach(target.distanceSqFromEyes(eyeHeight.getAsDouble()) <= reach * reach);
+    }
+
+    /**
+     * Forges {@code type} with the held item aimed at an entity - or, for {@code entityId < 0},
+     * at nothing: no block, no entity.
+     */
+    private Started forgeAim(int entityId, InteractionType type) {
+        return forgeAim(entityId, type, Float.NaN);
+    }
+
+    /** {@link #forgeAim(int, InteractionType)} with the button held {@code holdSeconds} ({@code NaN}: the default hold). */
+    private Started forgeAim(int entityId, InteractionType type, float holdSeconds) {
+        if (session == null) {
+            log.warn("meridian-core: interaction {} requested but no session yet", type);
+            return Started.NOTHING;
+        }
+        EntityTarget target = null;
+        if (entityId >= 0) {
+            target = reachable(entityId);
+            if (target == null) {
+                log.warn("meridian-core: {} on entity {} - core does not see it", type, entityId);
+                return Started.NOTHING;
+            }
+        }
+        String itemId = inventory.itemInHandId();
+        ForgeRun run = startRun(null, type, DataKind.NONE, itemId, BlockFace.None, null, Map.of(),
+                BlockFace.None, target, Integer.MIN_VALUE, holdSeconds);
+        return run == null ? Started.NOTHING : Started.of(run);
+    }
+
+    /**
+     * Forges the held tool's {@code Primary} main chain at {@code pos}. The server runs the swing's
+     * area selection and forks a break per block; the run answers each as it is announced.
+     */
+    private Started forgeDigSwing(BlockPos pos) {
+        if (session == null) {
+            log.warn("meridian-core: dig swing requested but no session yet");
+            return Started.NOTHING;
+        }
+        String itemId = inventory.itemInHandId();
+        // Empty hit-block map: the walk runs the SelectInteraction op but spawns no forks - the
+        // server owns the area selection.
+        ForgeRun run = startRun(pos, InteractionType.Primary, DataKind.BLOCK, itemId, BlockFace.Up, null,
+                Map.of(), BlockFace.Up, null, Integer.MIN_VALUE, Float.NaN);
+        if (run == null) {
+            log.warn("meridian-core: dig swing — no Primary root for item {}", itemId);
+            return Started.NOTHING;
+        }
+        return Started.of(run);
+    }
+
+    /**
+     * The server's echo of a chain core forged: the forks it made, to be answered, and the chain's
+     * path and states, for the run playing it ({@link ForgeRun#onServer}).
+     *
+     * <p>A swing's selector, a shovel's area, a hit on an entity: the server runs these on its side
+     * and forks a chain per block or entity it picked, naming the root it runs on the fork's first
+     * sync ({@code overrideRootInteraction}). Each is answered as one more lane of the run, so its
+     * {@code WaitForDataFrom.Client} operations get their data. Forks core sent itself (a
+     * gesture's, a {@code ParallelInteraction}'s) are lanes of the run already.
+     */
+    void onServerEcho(SyncInteractionChain serverChain) {
+        if (serverChain == null) {
+            return;
+        }
+        ForgeRun run = runs.get(serverChain.chainId);
+        if (run == null) {
             return;
         }
         if (serverChain.newForks != null) {
             for (SyncInteractionChain fork : serverChain.newForks) {
                 if (fork != null && fork.forkedId != null) {
-                    replyToFork(serverChain.chainId, fork);
+                    answerFork(run, fork);
                 }
             }
         }
-        // A fork can also arrive as its own sync packet (same chainId, forkedId set).
         if (serverChain.forkedId != null) {
-            replyToFork(serverChain.chainId, serverChain);
+            answerFork(run, serverChain); // a fork can arrive as its own sync, too
+        }
+        run.onServer(serverChain);
+        if (serverChain.newForks != null) {
+            for (SyncInteractionChain fork : serverChain.newForks) {
+                if (fork != null && fork.forkedId != null) {
+                    run.onServer(fork);
+                }
+            }
         }
     }
 
-    /** Builds and sends the C2S fork sync that unblocks one server break fork. */
-    private void replyToFork(int forgedChainId, SyncInteractionChain serverFork) {
-        ForkedChainId forkedId = serverFork.forkedId;
-        long key = ((long) forgedChainId << 32) ^ forkKey(forkedId);
-        if (!repliedForks.add(key)) {
-            return; // already answered this fork
+    /**
+     * A chain the server started for a headless player (a negative id): a projectile's miss, a stat
+     * effect. The client runs it too and sends its side - the server waits for that on every
+     * operation that takes the client's data, and cancels the chain after a few seconds without it.
+     * A game does this itself; for a headless session core is the client, and plays it as one more
+     * run from the root the server names on its first sync, following the server's word.
+     */
+    void onServerChain(SyncInteractionChain s) {
+        if (s == null) {
+            return;
         }
-        int forkRoot = serverFork.overrideRootInteraction;
-        if (forkRoot > 0) {
-            // Learn it from the server's own announcement (no manual dig needed).
-            if (selectHitBlock.putIfAbsent(forkedId.entryIndex, forkRoot) == null) {
-                log.info("meridian-core: learned HitBlock fork root {} for SelectInteraction "
-                        + "op {} (from server announce)", forkRoot, forkedId.entryIndex);
-            }
-        } else {
-            Integer cached = selectHitBlock.get(forkedId.entryIndex);
-            if (cached == null) {
-                log.warn("meridian-core: server fork {} (chain {}) carries no root and none "
-                        + "cached — cannot answer", forkedId, forgedChainId);
+        ForgeRun run = runs.get(s.chainId);
+        boolean opens = s.forkedId == null && s.initial && s.overrideRootInteraction > 0;
+        if (opens && (run == null || run.isServerStarted())) {
+            // The server numbers its own chains itself and may use an id again once one is over.
+            ForgeRun fresh = answerServerChain(s);
+            if (fresh == null) {
                 return;
             }
-            forkRoot = cached;
+            runs.put(s.chainId, fresh);
         }
+        onServerEcho(s);
+    }
+
+    /** The client's side of a chain the server started: a run of its root, not yet playing. */
+    private ForgeRun answerServerChain(SyncInteractionChain s) {
+        CompiledInteraction compiled = compileRoot(s.overrideRootInteraction);
+        if (compiled == null || compiled.size() == 0) {
+            log.warn("meridian-core: server chain {} runs root {} - not in registry", s.chainId,
+                    s.overrideRootInteraction);
+            return null;
+        }
+        InteractionType type = s.interactionType != null ? s.interactionType : InteractionType.Primary;
+        BlockPosition block = s.data != null ? s.data.blockPosition : null;
+        InteractionContext ctx = contextFor(type, block, block == null ? DataKind.NONE : DataKind.BLOCK,
+                inventory.itemInHandId(), BlockFace.Up);
+        if (s.data != null && s.data.entityId >= 0) {
+            EntityTarget target = reachable(s.data.entityId);
+            if (target != null) {
+                ctx = ctx.withEntity(target);
+            }
+        }
+        InteractionChainData data = s.data != null ? s.data.clone() : new InteractionChainData();
+        if (data.proxyId == null) {
+            data.proxyId = new UUID(0L, 0L);
+        }
+        ForgeRun.Header header = new ForgeRun.Header(inventory.activeHotbarSlot(),
+                inventory.activeUtilitySlot(), inventory.activeToolsSlot(), inventory.itemInHandId(),
+                inventory.utilityItemId(), inventory.toolsItemId());
+        log.info("meridian-core: answering server chain {} ({} root {})", s.chainId, type,
+                s.overrideRootInteraction);
+        return new ForgeRun(host, s.chainId, header, type, new ChainWalk(compiled, ctx, resolver, Map.of()).live(forceBody),
+                data, ctx, Map.of()).serverStarted();
+    }
+
+    /** The server cancelled a chain core forged, or one of its forks. */
+    void onServerCancel(CancelInteractionChain cancel) {
+        ForgeRun run = runs.get(cancel.chainId);
+        if (run != null) {
+            run.onCancel(cancel.forkedId);
+        }
+    }
+
+    /** Answers one fork the server made of a forged chain, once. */
+    private void answerFork(ForgeRun run, SyncInteractionChain serverFork) {
+        ForkedChainId forkedId = serverFork.forkedId;
+        // The server names the fork's root on the fork's first sync - the HitBlock / HitEntity root
+        // its selector chose. A later sync of it carries none.
+        int forkRoot = serverFork.overrideRootInteraction;
+        if (forkRoot <= 0 || run.hasLane(forkedId)) {
+            return;
+        }
+        InteractionType forkType = serverFork.interactionType != null
+                ? serverFork.interactionType : InteractionType.Primary;
         CompiledInteraction compiled = compileRoot(forkRoot);
         if (compiled == null) {
             log.warn("meridian-core: server fork root {} not in registry", forkRoot);
             return;
         }
         BlockPosition block = serverFork.data != null ? serverFork.data.blockPosition : null;
-        InteractionContext ctx = contextFor(InteractionType.Primary, block, DataKind.BLOCK,
+        InteractionContext ctx = contextFor(forkType, block, DataKind.BLOCK,
                 inventory.itemInHandId(), BlockFace.Up);
         if (block != null) {
             ctx = ctx.withTarget(block);
         }
-        List<InteractionSimulator.Packet> fp = InteractionSimulator.simulateTicked(
-                compiled, ctx, this::compileRoot, Map.of()).packets();
-        if (fp.isEmpty()) {
-            return;
-        }
-        log.info("meridian-core: answering server fork {} (chain {}, root {}, {} packet(s))",
-                forkedId, forgedChainId, forkRoot, fp.size());
-        sendForkReply(forgedChainId, forkedId, block, fp);
-    }
-
-    /**
-     * Sends the fork's per-tick ops back to the server, each wrapped in a parent
-     * chain's {@code newForks} (the path {@code InteractionManager.sync} routes to
-     * {@code syncFork}). The server matches the fork by {@code forkedId} and feeds
-     * our ops in as its client state.
-     */
-    private void sendForkReply(int forgedChainId, ForkedChainId forkedId, BlockPosition block,
-                               List<InteractionSimulator.Packet> fp) {
-        BlockPos bp = block != null ? new BlockPos(block.x, block.y, block.z)
-                : new BlockPos(0, 0, 0);
-        for (int i = 0; i < fp.size(); i++) {
-            InteractionSimulator.Packet p = fp.get(i);
-            boolean last = i == fp.size() - 1;
-            SyncInteractionChain fork = vmChain(bp, block, InteractionType.Primary, forgedChainId,
-                    forkedId, false, last, p.baseIndex(),
-                    p.ops().toArray(new InteractionSyncData[0]));
-            SyncInteractionChain parent = forkParent(forgedChainId, fork);
-            SyncInteractionChains scs = new SyncInteractionChains();
-            scs.updates = new SyncInteractionChain[] {parent};
-            dumpChain("FORK-REPLY", parent);
-            long delayMs = i * 1000L / 60L;
-            if (delayMs == 0L) {
-                sendChains(scs);
-            } else {
-                scheduler.schedule(() -> sendChains(scs), Duration.ofMillis(delayMs));
+        InteractionChainData data = new InteractionChainData();
+        data.entityId = -1;
+        data.proxyId = new UUID(0L, 0L);
+        data.targetSlot = 0; // forks report targetSlot 0, as the client does
+        data.blockPosition = block != null ? block.clone() : null;
+        if (serverFork.data != null && serverFork.data.entityId >= 0) {
+            // A HitEntity fork is aimed at the entity the swing hit.
+            EntityTarget hit = reachable(serverFork.data.entityId);
+            if (hit != null) {
+                ctx = ctx.withEntity(hit);
             }
+        }
+        if (block == null && serverFork.data != null) {
+            // An entity fork names the entity and the hit point the server gave it.
+            data.entityId = serverFork.data.entityId;
+            data.hitLocation = serverFork.data.hitLocation;
+        }
+        if (run.answerFork(forkedId, forkType, new ChainWalk(compiled, ctx, resolver, Map.of()).live(forceBody), data)) {
+            log.info("meridian-core: answering server fork {} of chain {} (root {})",
+                    ForgeRun.path(forkedId), run.chainId(), forkRoot);
         }
     }
 
     /** A parent chain that carries a single fork sync in its {@code newForks}. */
-    private SyncInteractionChain forkParent(int forgedChainId, SyncInteractionChain fork) {
+    private SyncInteractionChain forkParent(int forgedChainId, SyncInteractionChain fork,
+                                            InteractionType type) {
         SyncInteractionChain c = new SyncInteractionChain();
         c.activeHotbarSlot = inventory.activeHotbarSlot();
         c.activeUtilitySlot = inventory.activeUtilitySlot();
@@ -806,11 +1196,13 @@ public final class InteractionControlImpl implements InteractionControl {
         c.initial = false;
         c.desync = false;
         c.overrideRootInteraction = Integer.MIN_VALUE;
-        c.interactionType = InteractionType.Primary;
+        c.interactionType = type;
         c.equipSlot = inventory.activeHotbarSlot();
         c.chainId = forgedChainId;
-        c.forkedId = null;
-        c.state = InteractionState.NotFinished;
+        // The server takes a fork's sync on the chain it was forked from (syncFork resolves the
+        // innermost step there), so a fork forked inside a fork rides in that fork's packet.
+        c.forkedId = outerFork(fork.forkedId);
+        c.state = sentStates.getOrDefault(forkKey(forgedChainId, c.forkedId), InteractionState.NotFinished);
         c.newForks = new SyncInteractionChain[] {fork};
         c.operationBaseIndex = 0;
         c.interactionData = null;
@@ -822,32 +1214,48 @@ public final class InteractionControlImpl implements InteractionControl {
         return c;
     }
 
-    private static long forkKey(ForkedChainId f) {
-        return ((long) f.entryIndex << 20) ^ (f.subIndex & 0xFFFFFL);
+    /**
+     * One fork of one chain, by its whole path: a fork spawned inside a fork (a pickaxe's hit,
+     * forked from the swing's own parallel fork) is a different fork from its parent.
+     */
+    private static String forkKey(int chainId, ForkedChainId f) {
+        StringBuilder sb = new StringBuilder().append(chainId);
+        for (ForkedChainId at = f; at != null; at = at.forkedId) {
+            sb.append('/').append(at.entryIndex).append('.').append(at.subIndex);
+        }
+        return sb.toString();
+    }
+
+    /** The fork a nested fork was spawned in - its path without the last step; {@code null} at the top. */
+    private static ForkedChainId outerFork(ForkedChainId f) {
+        if (f == null || f.forkedId == null) {
+            return null;
+        }
+        return new ForkedChainId(f.entryIndex, f.subIndex, outerFork(f.forkedId));
     }
 
     @Override
-    public CompletableFuture<Void> waterBlock(BlockPos pos) {
+    public CompletableFuture<InteractionOutcome> waterBlock(BlockPos pos) {
         return enqueueForge(() -> forge(pos, InteractionType.Secondary, DataKind.BLOCK));
     }
 
     @Override
-    public CompletableFuture<Void> plantOnBlock(BlockPos pos) {
+    public CompletableFuture<InteractionOutcome> plantOnBlock(BlockPos pos) {
         return enqueueForge(() -> forge(pos, InteractionType.Secondary, DataKind.PLACEMENT));
     }
 
     @Override
-    public CompletableFuture<Void> placeOnBlock(BlockPos pos) {
+    public CompletableFuture<InteractionOutcome> placeOnBlock(BlockPos pos) {
         return placeOnBlock(pos, Face.UP);
     }
 
     @Override
-    public CompletableFuture<Void> placeOnBlock(BlockPos target, Face face) {
+    public CompletableFuture<InteractionOutcome> placeOnBlock(BlockPos target, Face face) {
         return placeOnBlock(target, face, face);
     }
 
     @Override
-    public CompletableFuture<Void> placeOnBlock(BlockPos target, Face face, Face orient) {
+    public CompletableFuture<InteractionOutcome> placeOnBlock(BlockPos target, Face face, Face orient) {
         // Same Secondary / PlaceBlockInteraction forge as plant — the server
         // places whatever block the held item maps to, not just a crop — but
         // against the chosen face, so the block can land sideways / below. The
@@ -858,6 +1266,26 @@ public final class InteractionControlImpl implements InteractionControl {
         return enqueueForge(() ->
                 forge(target, InteractionType.Secondary, DataKind.PLACEMENT, bf, null, ob));
     }
+
+    @Override
+    public CompletableFuture<InteractionOutcome> placeOnBlock(BlockPos target, Face face, int rotation) {
+        if (rotation < 0 || rotation > 63) {
+            return placeOnBlock(target, face);
+        }
+        BlockFace bf = toBlockFace(face);
+        // The forges run one at a time, in order: the rotation rides this one only.
+        return enqueueForge(() -> {
+            forcedRotation = rotation;
+            try {
+                return forge(target, InteractionType.Secondary, DataKind.PLACEMENT, bf, null, bf);
+            } finally {
+                forcedRotation = -1;
+            }
+        });
+    }
+
+    /** The orientation number the placement being forged carries as it is, or -1: worked out. */
+    private volatile int forcedRotation = -1;
 
     private static BlockFace toBlockFace(Face face) {
         return switch (face) {
@@ -871,7 +1299,7 @@ public final class InteractionControlImpl implements InteractionControl {
     }
 
     @Override
-    public CompletableFuture<Void> switchHotbarSlot(int slot) {
+    public CompletableFuture<InteractionOutcome> switchHotbarSlot(int slot) {
         return enqueueForge(() -> doSwitchHotbarSlot(slot));
     }
 
@@ -886,8 +1314,8 @@ public final class InteractionControlImpl implements InteractionControl {
      * when the forge is <em>dequeued</em>, not here — so a queued slot-switch's
      * inventory mirror is in place before the forges behind it read it.
      */
-    private synchronized CompletableFuture<Void> enqueueForge(QueuedForge forge) {
-        CompletableFuture<Void> done = new CompletableFuture<>();
+    private synchronized CompletableFuture<InteractionOutcome> enqueueForge(QueuedForge forge) {
+        CompletableFuture<InteractionOutcome> done = new CompletableFuture<>();
         forgeQueue.addLast(new QueuedItem(forge, done));
         if (!forging) {
             runNextForge();
@@ -896,13 +1324,12 @@ public final class InteractionControlImpl implements InteractionControl {
     }
 
     /**
-     * Pulls the next forge off the queue, runs it, and schedules — once this
-     * chain's tick-duration has elapsed — both the completion of its future and
-     * the run of the one after it. The queue only serializes (overlapping
-     * chains of one player are invalid); it adds no padding between forges, so
-     * a burst of instant harvests runs back-to-back at the tick rate. Any
-     * human-like spacing is the calling plugin's choice. Called only with the
-     * {@code this} monitor held.
+     * Pulls the next forge off the queue and starts it. The queue moves on a tick after the chain's
+     * last packet - the client starts its next chain once its own is played, not once the server has
+     * said how it went - and the caller's future completes with the server's word. The queue only
+     * serializes (overlapping chains of one player are invalid); it adds no padding, so a burst of
+     * instant harvests runs back-to-back at the tick rate. Any human-like spacing is the calling
+     * plugin's choice. Called only with the {@code this} monitor held.
      */
     private synchronized void runNextForge() {
         QueuedItem next = forgeQueue.pollFirst();
@@ -911,109 +1338,102 @@ public final class InteractionControlImpl implements InteractionControl {
             return;
         }
         forging = true;
-        int ticks;
+        Started started;
         try {
-            ticks = next.forge().run();
+            started = next.forge().start();
         } catch (RuntimeException ex) {
             log.warn("meridian-core: queued forge failed", ex);
-            ticks = 0;
+            started = Started.NOTHING;
         }
-        // Exactly the chain's tick-duration — one tick minimum, since even an
-        // instant chain occupies the tick its packet lands on.
-        long delayMs = Math.max(ticks, 1) * 1000L / 60L;
+        started.outcome().whenComplete((outcome, error) ->
+                next.done().complete(outcome != null ? outcome : InteractionOutcome.notSent()));
+        // Even an instant chain occupies the tick its packet lands on.
+        started.localDone().whenComplete((v, error) -> nextForgeIn(Duration.ofNanos(ForgeRun.TICK_NANOS)));
+    }
+
+    private void nextForgeIn(Duration delay) {
         try {
-            scheduler.schedule(() -> {
-                // The chain has played out: complete the caller's future (which may
-                // enqueue follow-up forges via .thenRun), then start the next one.
-                next.done().complete(null);
-                runNextForge();
-            }, Duration.ofMillis(delayMs));
+            scheduler.schedule(this::runNextForge, delay);
         } catch (RejectedExecutionException terminated) {
-            // The module was torn down (e.g. after a disconnect) while a stale UI
-            // still holds this control — the scheduler is shut down. Complete the
-            // future and stop draining; never propagate to the caller (a Swing
-            // button handler) as an unhandled exception.
+            // The module was torn down (e.g. after a disconnect) while a stale UI still holds this
+            // control - the scheduler is shut down. Complete the futures and stop draining; never
+            // propagate to the caller (a Swing button handler) as an unhandled exception.
+            List<QueuedItem> dropped;
+            synchronized (this) {
+                forging = false;
+                dropped = new ArrayList<>(forgeQueue);
+                forgeQueue.clear();
+            }
             log.warn("meridian-core: forge scheduler is shut down (module torn down?) — "
-                    + "dropping {} queued forge(s)", forgeQueue.size() + 1);
-            forging = false;
-            forgeQueue.clear();
-            next.done().complete(null);
+                    + "dropping {} queued forge(s)", dropped.size());
+            dropped.forEach(q -> q.done().complete(InteractionOutcome.notSent()));
         }
     }
 
-    /** Body of {@link #switchHotbarSlot}; returns the chain's tick-duration. */
-    private int doSwitchHotbarSlot(int slot) {
-        ProxySession s = session;
-        if (s == null) {
+    /** Body of {@link #switchHotbarSlot}. */
+    private Started doSwitchHotbarSlot(int slot) {
+        if (session == null) {
             log.warn("meridian-core: switchHotbarSlot requested but no session yet");
-            return 0;
+            return Started.NOTHING;
         }
         if (slot == inventory.activeHotbarSlot()) {
-            return 0; // already on it
+            // Already on it: the slot is the one asked for.
+            return Started.settled(new InteractionOutcome(InteractionOutcome.Status.FINISHED, List.of(), Map.of(), 0));
         }
-        // Every item maps SwapFrom -> the ChangeActiveSlot root; resolve via the
-        // held item (any item works).
-        OptionalInt root = resolveRoot(InteractionType.SwapFrom, inventory.itemInHandId());
-        if (root.isEmpty()) {
+        if (resolveRoot(InteractionType.SwapFrom, inventory.itemInHandId()).isEmpty()) {
             log.warn("meridian-core: no SwapFrom root known — cannot switch hotbar slot");
-            return 0;
+            return Started.NOTHING;
         }
 
-        SyncInteractionChain chain = new SyncInteractionChain();
-        chain.activeHotbarSlot = inventory.activeHotbarSlot(); // server is still on this slot
-        chain.activeUtilitySlot = inventory.activeUtilitySlot();
-        chain.activeToolsSlot = inventory.activeToolsSlot();
-        chain.itemInHandId = inventory.itemInHandId();
-        chain.utilityItemId = inventory.utilityItemId();
-        chain.toolsItemId = inventory.toolsItemId();
-        chain.initial = true;
-        chain.desync = false;
-        chain.overrideRootInteraction = Integer.MIN_VALUE;
-        chain.interactionType = InteractionType.SwapFrom;
-        chain.equipSlot = inventory.activeHotbarSlot();
-        chain.chainId = nat.allocateForged();
-        chain.forkedId = null;
-        chain.state = InteractionState.Finished;
-        chain.newForks = null;
-        chain.operationBaseIndex = 0;
+        // The held item's SwapFrom root, walked like any other: it ends in the
+        // ChangeActiveSlotInteraction (reading the slot to go to from data.targetSlot), and an item
+        // can do things before it lets go - a drawn bow puts its arrow back, gated on its stats.
+        String itemId = inventory.itemInHandId();
+        int from = inventory.activeHotbarSlot();
+        ForgeRun run = startRun(null, InteractionType.SwapFrom, DataKind.NONE, itemId, BlockFace.None, null,
+                Map.of(), BlockFace.None, null, slot, Float.NaN);
+        if (run == null) {
+            log.warn("meridian-core: SwapFrom root for {} could not be walked", itemId);
+            return Started.NOTHING;
+        }
+        log.info("meridian-core: forged SwapFrom - hotbar slot {} -> {}", from, slot);
 
-        InteractionChainData data = new InteractionChainData();
-        data.entityId = -1;
-        data.proxyId = new UUID(0L, 0L);
-        // ChangeActiveSlotInteraction reads the target slot from data.targetSlot.
-        data.targetSlot = slot;
-        chain.data = data;
-
-        // Root 5 (*Change_Active_Slot) is a single ChangeActiveSlotInteraction op.
-        InteractionSyncData op = new InteractionSyncData();
-        op.operationCounter = 0;
-        op.rootInteraction = root.getAsInt();
-        op.state = InteractionState.Finished;
-        chain.interactionData = new InteractionSyncData[] {op};
-
-        SyncInteractionChains packet = new SyncInteractionChains();
-        packet.updates = new SyncInteractionChain[] {chain};
-        s.sendToServer(packet);
-        log.info("meridian-core: forged SwapFrom chain {} — hotbar slot {} -> {}",
-                chain.chainId, inventory.activeHotbarSlot(), slot);
-
-        // The server's ChangeActiveSlotInteraction always sets the slot — mirror
-        // it so a follow-up forge sends the matching activeHotbarSlot / item.
+        // The server's ChangeActiveSlotInteraction always sets the slot — mirror it so a follow-up
+        // forge sends the matching activeHotbarSlot / item. (The chain itself keeps reporting the
+        // slot it leaves: its header was taken at its start.)
         inventory.observeActiveSlots(slot, inventory.activeUtilitySlot(),
                 inventory.activeToolsSlot());
-        return 1; // a single-packet, instantly-Finished chain
+        // The server tells a client nothing of a slot it changed (it sends SetActiveSlot only to
+        // correct one): a game behind the session is put on the slot the server is now on, so the
+        // hand it shows, and the chains it sends next, match.
+        if (!headless(session)) {
+            SetActiveSlot onClient = new SetActiveSlot();
+            onClient.inventorySectionId = HOTBAR_SECTION;
+            onClient.activeSlot = slot;
+            session.sendToClient(onClient);
+        }
+        return Started.of(run);
+    }
+
+    /** Whether no game is behind the session - then core is the client. */
+    private static boolean headless(ProxySession session) {
+        try {
+            return session != null && session.headless() != null;
+        } catch (NoSuchMethodError olderProxy) {
+            return false;
+        }
     }
 
     // ------------------------------------------------------------------
     // Forge
     // ------------------------------------------------------------------
 
-    /** Builds and sends one forged chain; returns its tick-duration (0 if nothing sent). */
-    private int forge(BlockPos pos, InteractionType type, DataKind dataKind) {
+    /** Builds one forged chain and starts playing it. */
+    private Started forge(BlockPos pos, InteractionType type, DataKind dataKind) {
         return forge(pos, type, dataKind, BlockFace.Up, null);
     }
 
-    private int forge(BlockPos pos, InteractionType type, DataKind dataKind, BlockFace face) {
+    private Started forge(BlockPos pos, InteractionType type, DataKind dataKind, BlockFace face) {
         return forge(pos, type, dataKind, face, null, face);
     }
 
@@ -1021,7 +1441,7 @@ public final class InteractionControlImpl implements InteractionControl {
      * Forge variant carrying the placement face (ignored for non-placement) and,
      * for an area dig, the set of blocks each {@code SelectInteraction} fork breaks.
      */
-    private int forge(BlockPos pos, InteractionType type, DataKind dataKind, BlockFace face,
+    private Started forge(BlockPos pos, InteractionType type, DataKind dataKind, BlockFace face,
                       List<BlockPos> hitBlocks) {
         return forge(pos, type, dataKind, face, hitBlocks, face);
     }
@@ -1030,12 +1450,11 @@ public final class InteractionControlImpl implements InteractionControl {
      * Forge variant taking a separate {@code orientFace} for the placed block's
      * rotation, independent of the geometry {@code face} it attaches against.
      */
-    private int forge(BlockPos pos, InteractionType type, DataKind dataKind, BlockFace face,
+    private Started forge(BlockPos pos, InteractionType type, DataKind dataKind, BlockFace face,
                       List<BlockPos> hitBlocks, BlockFace orientFace) {
-        ProxySession s = session;
-        if (s == null) {
+        if (session == null) {
             log.warn("meridian-core: interaction {} requested but no session yet", type);
-            return 0;
+            return Started.NOTHING;
         }
 
         // Chunk-decode verification: block ids around the target.
@@ -1047,42 +1466,20 @@ public final class InteractionControlImpl implements InteractionControl {
 
         String itemId = inventory.itemInHandId();
 
-        // VM is the primary path — it honestly simulates the server walk. The
-        // captured-sequence replay is the fallback when a root cannot be resolved.
-        SyncInteractionChains[] forged = buildFromVm(pos, type, dataKind, itemId, face, hitBlocks,
-                selectHitBlock, null, orientFace);
-        if (forged != null) {
-            return sendPacedVm(forged, type, pos);
+        // The VM is the primary path - it plays the server's walk honestly, and follows the server
+        // where it decides. The captured-sequence replay is the fallback when a root cannot be
+        // resolved. No HitBlock forks of our own: the server runs a swing's selector and spawns them
+        // (SelectInteraction maps only predicted entity forks), and they are answered as announced.
+        ForgeRun run = startRun(pos, type, dataKind, itemId, face, hitBlocks, Map.of(), orientFace, null,
+                Integer.MIN_VALUE, Float.NaN);
+        if (run != null) {
+            return Started.of(run);
         }
         List<TimedChain> sequence = capturedSeq.get(ActionKey.of(type, itemId));
         if (sequence != null && !sequence.isEmpty()) {
             return sendPacedReplay(sequence, pos, type);
         }
-        return 0;
-    }
-
-    /**
-     * Sends a VM-built chain paced at the 60&nbsp;Hz tick rate — one packet per
-     * tick, so the server's {@code runTime} / charge clock keeps step with the
-     * {@code progress} the packets carry.
-     */
-    private int sendPacedVm(SyncInteractionChains[] forged, InteractionType type, BlockPos pos) {
-        int chainId = forged[0].updates.length > 0 ? forged[0].updates[0].chainId : -1;
-        log.info("meridian-core: forged {} chain {} ({} tick(s), ticked) at ({},{},{}) — vm",
-                type, chainId, forged.length, pos.x(), pos.y(), pos.z());
-        for (int i = 0; i < forged.length; i++) {
-            SyncInteractionChains scs = forged[i];
-            for (SyncInteractionChain c : scs.updates) {
-                dumpChain("FORGED-vm", c);
-            }
-            long delayMs = i * 1000L / 60L;
-            if (delayMs == 0L) {
-                sendChains(scs);
-            } else {
-                scheduler.schedule(() -> sendChains(scs), Duration.ofMillis(delayMs));
-            }
-        }
-        return forged.length; // one SyncInteractionChains per 60 Hz tick
+        return Started.NOTHING;
     }
 
     /**
@@ -1091,7 +1488,7 @@ public final class InteractionControlImpl implements InteractionControl {
      * against its own clock — so the packets must be delivered spread over time
      * (one {@code SyncInteractionChains} each), not in one burst.
      */
-    private int sendPacedReplay(List<TimedChain> sequence, BlockPos pos, InteractionType type) {
+    private Started sendPacedReplay(List<TimedChain> sequence, BlockPos pos, InteractionType type) {
         int forgedId = nat.allocateForged();
         int templateY = templateTargetY(sequence.get(0).chain());
         long t0 = sequence.get(0).nanos();
@@ -1109,7 +1506,11 @@ public final class InteractionControlImpl implements InteractionControl {
                 scheduler.schedule(() -> sendChain(c), Duration.ofMillis(delayMs));
             }
         }
-        return (int) (spanMs * 60L / 1000L); // wall-clock span expressed in 60 Hz ticks
+        // Nothing to play, only the server to hear: how the replayed chain went.
+        ForgeRun run = ForgeRun.passive(host, forgedId, type);
+        runs.put(forgedId, run);
+        run.replayedOver(Duration.ofMillis(spanMs));
+        return Started.of(run);
     }
 
     /** Sends one forged chain to the server as its own {@code SyncInteractionChains}. */
@@ -1120,13 +1521,37 @@ public final class InteractionControlImpl implements InteractionControl {
         }
         SyncInteractionChains packet = new SyncInteractionChains();
         packet.updates = new SyncInteractionChain[] {chain};
+        chaining.noteSent(chain, this::compileRoot);
+        noteState(chain);
         s.sendToServer(packet);
+    }
+
+    /** Remembers the state a chain (and the forks it carries) was last sent in. */
+    private void noteState(SyncInteractionChain c) {
+        if (c == null) {
+            return;
+        }
+        if (c.state != null) {
+            sentStates.put(forkKey(c.chainId, c.forkedId), c.state);
+        }
+        if (c.newForks != null) {
+            for (SyncInteractionChain f : c.newForks) {
+                noteState(f);
+            }
+        }
     }
 
     /** Sends a pre-batched {@code SyncInteractionChains} (main chain + forks). */
     private void sendChains(SyncInteractionChains packet) {
         ProxySession s = session;
         if (s != null) {
+            if (packet.updates != null) {
+                for (SyncInteractionChain c : packet.updates) {
+                    chaining.noteSent(c, this::compileRoot);
+                    noteState(c);
+                    dumpChain("FORGED-vm", c);
+                }
+            }
             s.sendToServer(packet);
         }
     }
@@ -1238,23 +1663,16 @@ public final class InteractionControlImpl implements InteractionControl {
     }
 
     /** A simulated parallel fork: its spec and its per-tick packets. */
-    private record ForkBuild(InteractionSimulator.Fork fork,
-                             List<InteractionSimulator.Packet> packets) {}
-
     /**
-     * Builds the forged chain from the interaction VM. {@link InteractionSimulator}
-     * produces the main chain's per-tick packets plus any parallel forks a
-     * {@code ParallelInteraction} spawned; each fork root is simulated in turn.
-     * The result is one {@code SyncInteractionChains} per 60&nbsp;Hz tick — the
-     * main chain plus every fork active that tick — with the forks announced in
-     * {@code newForks} on the packet that resolved the {@code ParallelInteraction}.
-     * {@code null} if the root cannot be resolved.
+     * Starts playing the held item's {@code type} chain: a {@link ChainWalk} of its root under the
+     * action's context, live against the server ({@link ForgeRun}), the button held
+     * {@code holdSeconds} ({@code NaN}: each charge to its first tier). The chain reports the held
+     * items as they are now, for its whole length. {@code null} if the root cannot be resolved.
      */
-    private SyncInteractionChains[] buildFromVm(BlockPos pos, InteractionType type,
-                                               DataKind dataKind, String itemId, BlockFace face,
-                                               List<BlockPos> hitBlocks,
-                                               Map<Integer, Integer> hitBlockMap, int[] forgedOut,
-                                               BlockFace orientFace) {
+    private ForgeRun startRun(BlockPos pos, InteractionType type, DataKind dataKind, String itemId,
+                              BlockFace face, List<BlockPos> hitBlocks, Map<Integer, Integer> hitBlockMap,
+                              BlockFace orientFace, EntityTarget entity, int targetSlot,
+                              float holdSeconds) {
         OptionalInt rootId = resolveRoot(type, itemId);
         if (rootId.isEmpty()) {
             log.warn("meridian-core: no root for {} with item {} — item catalog not "
@@ -1262,12 +1680,15 @@ public final class InteractionControlImpl implements InteractionControl {
             return null;
         }
         CompiledInteraction compiled = compileRoot(rootId.getAsInt());
-        if (compiled == null) {
+        if (compiled == null || compiled.size() == 0) {
             log.warn("meridian-core: root {} not in registry", rootId.getAsInt());
             return null;
         }
         InteractionContext ctx = contextFor(type,
-                new BlockPosition(pos.x(), pos.y(), pos.z()), dataKind, itemId, face);
+                pos == null ? null : new BlockPosition(pos.x(), pos.y(), pos.z()), dataKind, itemId, face);
+        if (entity != null) {
+            ctx = ctx.withEntity(entity);
+        }
         if (dataKind == DataKind.PLACEMENT) {
             // Resolve the block being placed: the PlaceBlock node's id, or — when
             // it's the generic -1 ("place the held item's block") — the item
@@ -1276,7 +1697,9 @@ public final class InteractionControlImpl implements InteractionControl {
             if (placedId < 0) {
                 placedId = items.blockIdOf(itemId).orElse(-1);
             }
-            ctx = ctx.withBlockRotation(placementRotationFor(placedId, itemId, orientFace));
+            int forced = forcedRotation;
+            ctx = ctx.withBlockRotation(forced >= 0 ? blockRotation(forced)
+                    : placementRotationFor(placedId, itemId, orientFace));
         }
         if (hitBlocks != null && !hitBlocks.isEmpty()) {
             List<BlockPosition> targets = new ArrayList<>(hitBlocks.size());
@@ -1285,139 +1708,31 @@ public final class InteractionControlImpl implements InteractionControl {
             }
             ctx = ctx.withHitBlocks(targets);
         }
-        InteractionSimulator.TickedResult main = InteractionSimulator.simulateTicked(
-                compiled, ctx, this::compileRoot, hitBlockMap);
-        List<InteractionSimulator.Packet> mainPackets = main.packets();
-        if (mainPackets.isEmpty()) {
-            return null;
-        }
-        int forgedId = nat.allocateForged();
-        if (forgedOut != null) {
-            forgedOut[0] = forgedId;
-        }
-
-        // Simulate each ParallelInteraction fork root into its own packet list.
-        List<ForkBuild> forks = new ArrayList<>();
-        for (InteractionSimulator.Fork fork : main.forks()) {
-            CompiledInteraction forkRoot = compileRoot(fork.rootId());
-            if (forkRoot == null) {
-                log.warn("meridian-core: fork root {} not in registry — skipped", fork.rootId());
-                continue;
-            }
-            // A dig HitBlock fork breaks its own block, so simulate it with a
-            // context pointed at that block (its BreakBlock op carries it).
-            InteractionContext forkCtx = fork.block() != null ? ctx.withTarget(fork.block()) : ctx;
-            InteractionSimulator.TickedResult fr = InteractionSimulator.simulateTicked(
-                    forkRoot, forkCtx, this::compileRoot, hitBlockMap);
-            if (!fr.forks().isEmpty()) {
-                log.warn("meridian-core: nested forks in root {} not emitted", fork.rootId());
-            }
-            forks.add(new ForkBuild(fork, fr.packets()));
-        }
-
-        // The forks are announced on the main packet that carries the
-        // ParallelInteraction op, and run starting the tick after it.
-        int announceIdx = 0;
-        if (!forks.isEmpty()) {
-            int entryIndex = forks.get(0).fork().entryIndex();
-            for (int i = 0; i < mainPackets.size(); i++) {
-                InteractionSimulator.Packet p = mainPackets.get(i);
-                if (entryIndex >= p.baseIndex()
-                        && entryIndex < p.baseIndex() + p.ops().size()) {
-                    announceIdx = i;
-                    break;
-                }
-            }
-        }
-        int forkStartTick = announceIdx + 1;
-
-        int total = mainPackets.size();
-        for (ForkBuild fb : forks) {
-            total = Math.max(total, forkStartTick + fb.packets().size());
-        }
-
-        SyncInteractionChains[] perTick = new SyncInteractionChains[total];
-        for (int t = 0; t < total; t++) {
-            List<SyncInteractionChain> chains = new ArrayList<>();
-            if (t < mainPackets.size()) {
-                InteractionSimulator.Packet p = mainPackets.get(t);
-                SyncInteractionChain mc = vmChain(pos, null, type, forgedId, null, t == 0,
-                        t == mainPackets.size() - 1, p.baseIndex(),
-                        p.ops().toArray(new InteractionSyncData[0]));
-                if (t == announceIdx && !forks.isEmpty()) {
-                    SyncInteractionChain[] announce =
-                            new SyncInteractionChain[forks.size()];
-                    for (int k = 0; k < forks.size(); k++) {
-                        InteractionSimulator.Fork f = forks.get(k).fork();
-                        announce[k] = vmChain(pos, f.block(), type, forgedId,
-                                new ForkedChainId(f.entryIndex(), f.subIndex(), null),
-                                true, false, 0, null);
-                    }
-                    mc.newForks = announce;
-                }
-                chains.add(mc);
-            }
-            for (ForkBuild fb : forks) {
-                int fj = t - forkStartTick;
-                if (fj >= 0 && fj < fb.packets().size()) {
-                    InteractionSimulator.Packet fp = fb.packets().get(fj);
-                    InteractionSimulator.Fork f = fb.fork();
-                    chains.add(vmChain(pos, f.block(), type, forgedId,
-                            new ForkedChainId(f.entryIndex(), f.subIndex(), null),
-                            false, fj == fb.packets().size() - 1, fp.baseIndex(),
-                            fp.ops().toArray(new InteractionSyncData[0])));
-                }
-            }
-            SyncInteractionChains scs = new SyncInteractionChains();
-            scs.updates = chains.toArray(new SyncInteractionChain[0]);
-            perTick[t] = scs;
-        }
-        log.info("meridian-core: VM ticked root {} ({} tick(s), {} fork(s)) for {} item {}",
-                rootId.getAsInt(), total, forks.size(), type, itemId);
-        return perTick;
-    }
-
-    /**
-     * Builds one forged {@code SyncInteractionChain}. {@code forkedId} is set
-     * for a fork (null for the main chain); {@code ops} is null for a fork
-     * announcement (the server reads only {@code state} for a null-data packet).
-     */
-    private SyncInteractionChain vmChain(BlockPos pos, BlockPosition dataBlock,
-                                         InteractionType type, int forgedId,
-                                         ForkedChainId forkedId, boolean first, boolean last,
-                                         int baseIndex, InteractionSyncData[] ops) {
-        SyncInteractionChain chain = new SyncInteractionChain();
-        chain.activeHotbarSlot = inventory.activeHotbarSlot();
-        chain.activeUtilitySlot = inventory.activeUtilitySlot();
-        chain.activeToolsSlot = inventory.activeToolsSlot();
-        chain.itemInHandId = inventory.itemInHandId();
-        chain.utilityItemId = inventory.utilityItemId();
-        chain.toolsItemId = inventory.toolsItemId();
-        chain.initial = first;
-        chain.desync = false;
-        chain.overrideRootInteraction = Integer.MIN_VALUE;
-        chain.interactionType = type;
-        chain.equipSlot = inventory.activeHotbarSlot();
-        chain.chainId = forgedId;
-        chain.forkedId = forkedId;
-        chain.state = last ? InteractionState.Finished : InteractionState.NotFinished;
-        chain.newForks = null;
-        // The server reads each op's chain index as operationBaseIndex + i, so a
-        // continuation packet must resume from where the previous one ended.
-        chain.operationBaseIndex = baseIndex;
 
         InteractionChainData data = new InteractionChainData();
         data.entityId = -1;
         data.proxyId = new UUID(0L, 0L);
-        // A dig fork carries the block it breaks; the main chain carries the
-        // clicked block. Forks report targetSlot=0 (matching the client).
-        data.blockPosition = dataBlock != null
-                ? dataBlock : new BlockPosition(pos.x(), pos.y(), pos.z());
-        data.targetSlot = forkedId != null ? 0 : Integer.MIN_VALUE;
-        chain.data = data;
-
-        chain.interactionData = ops;
-        return chain;
+        // The main chain carries the clicked block, and the slot a hotbar switch goes to.
+        data.blockPosition = pos != null ? new BlockPosition(pos.x(), pos.y(), pos.z()) : null;
+        data.targetSlot = targetSlot;
+        if (entity != null) {
+            // Aimed at an entity: the server puts it in the chain's context as the target
+            // (InteractionManager: data.entityId, data.hitLocation).
+            data.entityId = entity.networkId();
+            data.hitLocation = new org.joml.Vector3f(entity.hitLocation());
+        }
+        ForgeRun.Header header = new ForgeRun.Header(inventory.activeHotbarSlot(),
+                inventory.activeUtilitySlot(), inventory.activeToolsSlot(), inventory.itemInHandId(),
+                inventory.utilityItemId(), inventory.toolsItemId());
+        int forgedId = nat.allocateForged();
+        ForgeRun run = new ForgeRun(host, forgedId, header, type,
+                new ChainWalk(compiled, ctx, resolver, hitBlockMap).live(forceBody).hold(holdSeconds), data, ctx, hitBlockMap);
+        runs.put(forgedId, run);
+        log.info("meridian-core: forged {} chain {} (root {}, item {}) at {} — live", type, forgedId,
+                rootId.getAsInt(), itemId,
+                pos == null ? "no block" : "(" + pos.x() + "," + pos.y() + "," + pos.z() + ")");
+        run.start();
+        return run;
     }
 
     /**
@@ -1425,6 +1740,12 @@ public final class InteractionControlImpl implements InteractionControl {
      * or the chain observed for this (type, item) when the catalog is not in yet.
      */
     private OptionalInt resolveRoot(InteractionType type, String itemId) {
+        // The server's InteractionContext.getRootInteractionId: the player entity's own roots
+        // first (its Interactions component), then the held item's.
+        Integer own = entities.selfInteractions().get(type);
+        if (own != null) {
+            return OptionalInt.of(own);
+        }
         OptionalInt fromItem = items.rootFor(itemId, type);
         if (fromItem.isPresent()) {
             return fromItem;

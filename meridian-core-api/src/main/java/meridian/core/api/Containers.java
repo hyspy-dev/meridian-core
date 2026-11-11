@@ -46,4 +46,9 @@ public interface Containers {
 
     /** Every container the player has opened, by where it is. */
     Map<BlockPos, Contents> all();
+
+    /** The container the player opened last, if any - to name one by opening it. */
+    default java.util.Optional<BlockPos> lastOpened() {
+        return java.util.Optional.empty();
+    }
 }

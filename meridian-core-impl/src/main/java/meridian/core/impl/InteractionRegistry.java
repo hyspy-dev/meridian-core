@@ -101,7 +101,7 @@ public final class InteractionRegistry {
     }
 
     /** Integer id of the root interaction named {@code name}. */
-    OptionalInt rootId(String name) {
+    public OptionalInt rootId(String name) {
         Integer id = rootIdByName.get(name);
         return id == null ? OptionalInt.empty() : OptionalInt.of(id);
     }

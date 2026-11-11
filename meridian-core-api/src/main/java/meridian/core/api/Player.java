@@ -13,6 +13,17 @@ public interface Player {
     Vec3 position();
 
     /**
+     * Where the player's eyes are: {@link #position()} raised by the eye height of the player's
+     * model, standing - the point a look, a reach and the crosshair are measured from. Until the
+     * server has sent the model, the default player model's: 1.6 blocks. {@code null} while the
+     * position is.
+     */
+    default Vec3 eyePosition() {
+        Vec3 feet = position();
+        return feet == null ? null : new Vec3(feet.x(), feet.y() + 1.6, feet.z());
+    }
+
+    /**
      * Unit vector for the player's look direction in world space — derived
      * from the most recently observed {@code lookOrientation} (yaw + pitch
      * in radians). {@code null} until the client has sent at least one
@@ -57,6 +68,46 @@ public interface Player {
      */
     int hotbarSlotOf(String substring);
 
+    /** The id of the item in a hotbar slot, or {@code null} when it is empty. */
+    default String hotbarItem(int slot) {
+        return null;
+    }
+
+    /**
+     * The hotbar slot holding what breaks {@code block} best, by the server's rule: a tool whose
+     * spec names the block's gather type (stone, soil, wood...) at no less than the block's quality,
+     * the strongest of them, the faster on a tie. With no such tool, an item that is no tool does
+     * what a bare hand does, while a weapon, a builder tool or a tool for other blocks breaks
+     * nothing at all: held, an empty slot (or an item that is no tool) is the one to take.
+     *
+     * @return the slot to hold, or {@code -1} when the one held does as well as any - nothing better
+     *         in the hotbar - or the block takes no breaking at all
+     */
+    default int bestToolSlot(BlockView block) {
+        return -1;
+    }
+
+    /**
+     * {@link #bestToolSlot(BlockView)} among the items whose ids {@code among} accepts only: the
+     * slot of the strongest of them whose spec names the block's gather type at no less than its
+     * quality.
+     *
+     * @return the slot, or {@code -1} when none of them is such a tool - no bare hand here
+     */
+    default int bestToolSlot(BlockView block, java.util.function.Predicate<String> among) {
+        return -1;
+    }
+
+    /**
+     * How hard the item in a hotbar slot hits the block: the power of its spec for the block's gather
+     * type - the server's own number; a bare hand or an item that is no tool counts as the hand.
+     *
+     * @return the power; {@code 0} when it does not break the block at all, or the block takes no breaking
+     */
+    default double toolPower(int slot, BlockView block) {
+        return 0;
+    }
+
     /**
      * Switches the active hotbar slot, forging a {@code SwapFrom} interaction —
      * the same one the client sends when the player scrolls the hotbar. The
@@ -64,12 +115,12 @@ public interface Player {
      * so this is the honest way to equip a different item before an action.
      *
      * <p>Asynchronous, like every forge — see {@link Block}. The returned future
-     * completes once the switch chain has played out, so an action that needs
-     * the new item can be chained with {@code .thenRun(...)}.
+     * completes with how the server ran the switch, so an action that needs the
+     * new item can be chained with {@code .thenCompose(...)}.
      *
-     * @return a future completing when the switch chain has played out
+     * @return how the server ran the switch; {@code FINISHED} at once when the slot is active already
      */
-    CompletableFuture<Void> selectHotbarSlot(int slot);
+    CompletableFuture<InteractionOutcome> selectHotbarSlot(int slot);
 
     /**
      * Teleports the player to {@code position} — a real teleport the player sees.
