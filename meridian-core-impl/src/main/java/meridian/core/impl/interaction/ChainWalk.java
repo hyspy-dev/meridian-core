@@ -211,6 +211,34 @@ final class ChainWalk {
         return flatIndex;
     }
 
+    /**
+     * The interaction the walk stands on - the one still running after the last tick - or
+     * {@code null} once done, or between roots. With {@link #currentRoot} it is what the server's
+     * rules look at ({@code InteractionManager.applyRules}: the chain's root now and the operation at
+     * its counter).
+     */
+    meridian.protocol.Interaction currentInteraction() {
+        if (done) {
+            return null;
+        }
+        return compiled.op(counter) instanceof FlatOp.Node n ? n.interaction() : null;
+    }
+
+    /** The root the walk stands in now: the chain's own, or one a {@code Replace} entered. */
+    int currentRoot() {
+        return compiled.rootId();
+    }
+
+    /** How long the interaction the walk stands on has run, in seconds, as its next packet says. */
+    float opTime() {
+        return opTime;
+    }
+
+    /** How long the walk has played, in seconds since the press: its ticks. */
+    float elapsed() {
+        return ticks * InteractionSimulator.TICK_SECONDS;
+    }
+
     /** The state the last resolved operation ended in. */
     InteractionState lastState() {
         return lastState;

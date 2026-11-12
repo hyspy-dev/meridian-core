@@ -60,6 +60,11 @@ final class ForgeRun {
     private static final long MAX_NANOS = 60_000_000_000L;
     /** How often one operation index may be replayed before the lane gives up on it. */
     private static final int MAX_REPLAYS_AT = 2;
+    /**
+     * How far the server may stand on in a chain beyond where the client's clock has it: a tick of
+     * its own (30 a second) and the time it shifts a chain by, with some to spare.
+     */
+    static final double SERVER_LEAD_SECONDS = 0.06;
 
     /** What a run needs from the control it belongs to. */
     interface Host {
@@ -101,6 +106,8 @@ final class ForgeRun {
         final int startTick;
         /** The server's data by operation index - the latest it sent. */
         final TreeMap<Integer, InteractionSyncData> server = new TreeMap<>();
+        /** When the server's latest data for each operation index came in, by {@link System#nanoTime}. */
+        final Map<Integer, Long> serverAt = new java.util.HashMap<>();
         final Map<Integer, Integer> replays = new java.util.HashMap<>();
         InteractionState serverState = InteractionState.NotFinished;
         boolean initialSent;
@@ -161,6 +168,11 @@ final class ForgeRun {
     private boolean serverStarted;
     /** The outcome is decided (its future completes a moment later, on the scheduler). */
     private boolean settled;
+    /**
+     * Cut short by a chain started over it whose rules let it ({@link #interrupt}): nothing more of
+     * it is sent, and the server cancels it.
+     */
+    private boolean interrupted;
 
     ForgeRun(Host host, int chainId, Header header, InteractionType type, ChainWalk walk,
              InteractionChainData data, InteractionContext ctx, Map<Integer, Integer> selectHitBlock) {
@@ -223,6 +235,90 @@ final class ForgeRun {
         return chainId;
     }
 
+    /** The chain's interaction type. */
+    InteractionType type() {
+        return main.type;
+    }
+
+    /** Whether the chain was cut short by one started over it ({@link #interrupt}). */
+    synchronized boolean wasInterrupted() {
+        return interrupted;
+    }
+
+    /**
+     * Whether a chain of {@code type} with root {@code root} started now cuts this one short, by the
+     * rules of where it stands now ({@link ChainRules}): only while it is still played, as the
+     * server checks only a chain it still runs.
+     *
+     * @param roots the registry's roots by id
+     */
+    synchronized boolean interruptedBy(InteractionType type, meridian.protocol.RootInteraction root,
+                                       java.util.function.IntFunction<meridian.protocol.RootInteraction> roots) {
+        if (settled || interrupted || serverStarted || main.walk == null || !main.playing()) {
+            return false;
+        }
+        meridian.protocol.Interaction op = main.walk.currentInteraction();
+        if (!ChainRules.interrupts(type, root, main.type, roots.apply(main.walk.currentRoot()), op)) {
+            return false;
+        }
+        return serverStillThere(op);
+    }
+
+    /**
+     * Whether the server, too, still stands on the interaction the walk stands on once a chain sent
+     * now reaches it: its rules are what count there. The server may stand further on than the walk -
+     * it runs the chain by its own clock from its own tick (30 a second), and the time it shifts a
+     * chain by - and where it stands past an interaction that lets itself be cut short, the chain
+     * sent over it waits there, while the one cut short waits for the client's data it no longer
+     * gets (the server cancels it after its timeout, and warns). So the cut is made only with time to
+     * spare: the interaction's time left, by the walk's clock and by the server's last word on it,
+     * beyond {@link #SERVER_LEAD_SECONDS} and however far the walk has fallen behind the wall clock.
+     */
+    private boolean serverStillThere(meridian.protocol.Interaction op) {
+        long now = System.nanoTime();
+        int at = main.walk.position();
+        Map.Entry<Integer, InteractionSyncData> last = main.server.lastEntry();
+        if (last != null && (last.getKey() > at
+                || (last.getKey() == at && last.getValue().state != InteractionState.NotFinished))) {
+            return false;   // the server is past it already
+        }
+        float runTime = op == null ? 0f : op.runTime;
+        if (runTime <= 0f) {
+            return true;    // it lasts as long as it is held or waited on: no clock to beat
+        }
+        double wall = (now - startNanos) / 1e9;
+        double behind = Math.max(0, wall - main.walk.elapsed());
+        double left = runTime - main.walk.opTime() - behind;
+        Long heard = main.serverAt.get(at);
+        InteractionSyncData there = main.server.get(at);
+        if (heard != null && there != null) {
+            // The server's own time on it: what it said, and the time since.
+            left = Math.min(left, runTime - there.progress - (now - heard) / 1e9);
+        }
+        return left > SERVER_LEAD_SECONDS;
+    }
+
+    /**
+     * Cuts the chain short, as the client does when a chain started over it interrupts it: nothing
+     * more of it goes out - its forks with it - and it is done locally at once, so the next chain
+     * starts. The client sends no word of it: the server cuts it short by the same rules when the
+     * chain over it comes in, and tells so ({@code CancelInteractionChain}). The outcome is then
+     * {@code CANCELLED}; or how the server ran it, should it have run it on.
+     */
+    void interrupt() {
+        synchronized (this) {
+            if (settled || interrupted) {
+                return;
+            }
+            interrupted = true;
+            lanes.values().forEach(l -> l.abandoned = true);
+            log.info("meridian-core: forged chain {} cut short at op {} - the chain started over it interrupts it",
+                    chainId, main.walk == null ? -1 : main.walk.position());
+            finishLocally();
+            settle(System.nanoTime());
+        }
+    }
+
     /** Completes once every lane of the run's own has sent its last packet. */
     CompletableFuture<Void> localDone() {
         return localDone;
@@ -259,10 +355,12 @@ final class ForgeRun {
                 return;
             }
             if (s.interactionData != null) {
+                long heard = System.nanoTime();
                 for (int i = 0; i < s.interactionData.length; i++) {
                     InteractionSyncData d = s.interactionData[i];
                     if (d != null) {
                         lane.server.put(s.operationBaseIndex + i, d);
+                        lane.serverAt.put(s.operationBaseIndex + i, heard);
                         lane.walk.verdict(s.operationBaseIndex + i, d);
                     }
                 }
@@ -305,7 +403,8 @@ final class ForgeRun {
         boolean resume;
         synchronized (this) {
             String key = path(forkedId);
-            if (lanes.containsKey(key)) {
+            if (lanes.containsKey(key) || interrupted) {
+                // A chain cut short answers nothing more: the client has let it go.
                 return false;
             }
             lanes.put(key, new Lane(forkedId, type, walk, data, true, ticks));
@@ -613,6 +712,16 @@ final class ForgeRun {
         }
         if (main.cancelled) {
             complete(InteractionOutcome.Status.CANCELLED);
+            return;
+        }
+        if (interrupted) {
+            // Cut short: the server's cancel is waited for - or its end, had it run the chain on.
+            if (main.serverState != InteractionState.NotFinished) {
+                complete(main.serverState == InteractionState.Failed
+                        ? InteractionOutcome.Status.FAILED : InteractionOutcome.Status.FINISHED);
+            } else if (now - localDoneNanos > SETTLE_NANOS) {
+                complete(InteractionOutcome.Status.TIMED_OUT);
+            }
             return;
         }
         boolean all = true;
