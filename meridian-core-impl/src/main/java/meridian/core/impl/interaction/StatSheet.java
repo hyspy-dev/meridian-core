@@ -111,6 +111,12 @@ public final class StatSheet {
         return s == null ? null : s.value;
     }
 
+    /** A stat's value and bounds - {@code {value, min, max}} - or {@code null} when the entity has no such stat. */
+    public synchronized float[] read(int index) {
+        Stat s = stats.get(index);
+        return s == null ? null : new float[] {s.value, s.min, s.max};
+    }
+
     /** Every stat's value, by index. */
     public synchronized Map<Integer, Float> values() {
         Map<Integer, Float> out = new HashMap<>();

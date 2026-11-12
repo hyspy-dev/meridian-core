@@ -169,6 +169,8 @@ public class MeridianCoreModule implements ProxyModule {
         // PlayerState: the player as the server keeps them - where, how, and carrying what.
         // Who they are comes from the token they log in with, which is what the server goes by.
         PlayerStateImpl playerState = new PlayerStateImpl(entityTracker);
+        // Every entity's shared stats (a mob's health) are read against the same catalog as ours.
+        entityTracker.statCatalog(playerState.statCatalog());
 
         // ClientSpoof: what a module wants the client shown, and the server told of its movement.
         // Applied by core's own rewriters (movement below, ClientSpoofHandler further down) after
@@ -178,6 +180,12 @@ public class MeridianCoreModule implements ProxyModule {
         ClientSpoofImpl clientSpoof = new ClientSpoofImpl(sessionHolder, entityTracker, playerState,
                 () -> movementRef[0] == null ? null : movementRef[0].serverSettings());
         ctx.services().provide(ClientSpoof.class, clientSpoof);
+
+        // Combat: the hits the player takes and the attacks others begin, as the server tells any
+        // game - whom to fight is a module's call.
+        CombatImpl combat = new CombatImpl(entityTracker);
+        ctx.services().provide(meridian.core.api.Combat.class, combat);
+        ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR, (direction, session) -> new CombatHandler(combat));
 
         // S2C: learn the local id, track entity transforms, capture the session.
         ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR,
@@ -338,8 +346,18 @@ public class MeridianCoreModule implements ProxyModule {
                     }
                 }, movement::eyeHeight);
         ctx.services().provide(InteractionControl.class, interactionControl);
+        // What an item does in a fight: the effects it applies (core's catalog of them, kept by
+        // movement) and the stats they change, by name.
+        interactionControl.fightLookups(movement::effect, name -> playerState.statIndex(name).orElse(-1));
+        // A repair as a player makes it: a kit used, the server's list of worn items answered.
+        Repairs repairs = new Repairs(sessionHolder, inventoryTracker, itemRegistry, playerState);
+        repairs.hands(interactionControl);
+        interactionControl.repairer(repairs::repair);
+        ctx.registerHandler(Direction.BOTH, HandlerPosition.MONITOR, (direction, session) -> repairs.handler());
         // A forged ApplyForce pushes the headless body, as the client's own push would.
         interactionControl.forceBody(movement.forceBody());
+        // A loop of swings at a block waits out an urgent hold taken after it began.
+        interactionControl.urgency(movement.urgency());
         // The reports of a game's body core moves skip the client-side chain: core's own observers of
         // it hear them here, in the chain's order - the pose as it is, then the spoof, then the forges.
         movement.gameObservers(m -> {
@@ -429,6 +447,7 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.services().provide(meridian.core.api.Worker.class, worker);
         meridian.core.impl.navigation.NavigationPanel navigation =
                 new meridian.core.impl.navigation.NavigationPanel(walker, worker, movement, interactionControl);
+        navigation.entities(entityTracker::positionOf);
         navigation.register(ctx);
         meridian.api.settings.SettingsSpec.Builder settings = meridian.api.settings.SettingsSpec.builder();
         settings.section("Go to a point", navigation.section());

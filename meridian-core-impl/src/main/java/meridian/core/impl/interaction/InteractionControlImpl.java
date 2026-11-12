@@ -881,14 +881,29 @@ public final class InteractionControlImpl implements InteractionControl {
             }
         });
         done.whenComplete((v, e) -> watch.close());
-        swingUntilGone(pos, 1, maxSwings, gone, done);
+        meridian.core.impl.movement.Urgency u = urgency;
+        swingUntilGone(pos, 1, maxSwings, gone, done, u == null ? Long.MAX_VALUE : u.stamp());
         return done;
+    }
+
+    /** Core's urgent holds: a loop of swings begun before one is held ends at its next swing. */
+    private volatile meridian.core.impl.movement.Urgency urgency;
+
+    public void urgency(meridian.core.impl.movement.Urgency urgency) {
+        this.urgency = urgency;
     }
 
     /** Swing {@code n} of {@code max}, once the one before has been answered - as a held button swings. */
     private void swingUntilGone(BlockPos pos, int n, int max, java.util.function.BooleanSupplier gone,
-                                CompletableFuture<Boolean> done) {
+                                CompletableFuture<Boolean> done, long born) {
         if (done.isDone()) {
+            return;
+        }
+        meridian.core.impl.movement.Urgency u = urgency;
+        if (u != null && u.holdsBack(born)) {
+            // An urgent hold came: the swings stop, and the loop is over once it is given back - the
+            // body will be elsewhere by then, so whoever swung decides again from there.
+            u.turn(born).thenRun(() -> answerBreak(done, gone, Duration.ZERO));
             return;
         }
         digSwing(pos).whenComplete((outcome, error) -> {
@@ -901,7 +916,7 @@ public final class InteractionControlImpl implements InteractionControl {
             }
             boolean sent = outcome != null && outcome.status() != InteractionOutcome.Status.NOT_SENT;
             if (sent && n < max) {
-                swingUntilGone(pos, n + 1, max, gone, done);
+                swingUntilGone(pos, n + 1, max, gone, done, born);
             } else if (!sent && n == 1) {
                 answerBreak(done, () -> false, Duration.ZERO);   // nothing went out
             } else {
@@ -920,6 +935,220 @@ public final class InteractionControlImpl implements InteractionControl {
         } catch (RejectedExecutionException terminated) {
             complete.run();
         }
+    }
+
+    // ------------------------------------------------------------------
+    // What an item does in a fight
+    // ------------------------------------------------------------------
+
+    /** The most roots one look into an item's chain goes through. */
+    private static final int MOST_ROOTS = 64;
+    /** The server's entity effects by index, for what a use heals ({@link #fightLookups}). */
+    private volatile java.util.function.IntFunction<meridian.protocol.EntityEffect> effectAt = i -> null;
+    /** A stat's catalog index by name, {@code -1} for none ({@link #fightLookups}). */
+    private volatile java.util.function.ToIntFunction<String> statIndex = n -> -1;
+
+    /** Repairs an item with a kit ({@link #repair}); set by core's module. */
+    private volatile java.util.function.Function<String, CompletableFuture<Boolean>> repairer =
+            item -> CompletableFuture.completedFuture(false);
+
+    public void repairer(java.util.function.Function<String, CompletableFuture<Boolean>> repairs) {
+        if (repairs != null) {
+            repairer = repairs;
+        }
+    }
+
+    @Override
+    public CompletableFuture<Boolean> repair(String itemId) {
+        return repairer.apply(itemId);
+    }
+
+    /** Where the effects and the stat names come from: core's own catalogs of them. */
+    public void fightLookups(java.util.function.IntFunction<meridian.protocol.EntityEffect> effects,
+                             java.util.function.ToIntFunction<String> stats) {
+        if (effects != null) {
+            effectAt = effects;
+        }
+        if (stats != null) {
+            statIndex = stats;
+        }
+    }
+
+    /**
+     * Every operation an item's chain of {@code type} can reach: its root's, and those of every root
+     * it calls - a {@code Replace} through the item's own variables (else its default), a
+     * {@code RunRoot}, a {@code Parallel}'s branches, and with {@code intoHits} what a swing runs on
+     * what it hits. {@code null} when core knows no root for it.
+     */
+    private List<meridian.protocol.Interaction> reached(String item, InteractionType type, boolean intoHits) {
+        OptionalInt root = resolveRoot(type, item);
+        if (root.isEmpty()) {
+            return null;
+        }
+        Map<String, Integer> vars = items.varsFor(item);
+        List<meridian.protocol.Interaction> out = new ArrayList<>();
+        ArrayDeque<Integer> todo = new ArrayDeque<>();
+        java.util.Set<Integer> seen = new java.util.HashSet<>();
+        todo.add(root.getAsInt());
+        while (!todo.isEmpty() && seen.size() < MOST_ROOTS) {
+            int id = todo.poll();
+            if (id == Integer.MIN_VALUE || !seen.add(id)) {
+                continue;
+            }
+            CompiledInteraction c = compileRoot(id);
+            if (c == null) {
+                continue;
+            }
+            for (FlatOp op : c.ops()) {
+                if (!(op instanceof FlatOp.Node n) || n.interaction() == null) {
+                    continue;
+                }
+                meridian.protocol.Interaction i = n.interaction();
+                out.add(i);
+                if (i instanceof meridian.protocol.ReplaceInteraction r) {
+                    Integer to = r.variable == null ? null : vars.get(r.variable);
+                    todo.add(to != null ? to : r.defaultValue);
+                } else if (i instanceof meridian.protocol.RunRootInteraction rr) {
+                    todo.add(rr.rootInteraction);
+                } else if (i instanceof meridian.protocol.ParallelInteraction par && par.next != null) {
+                    for (int next : par.next) {
+                        todo.add(next);
+                    }
+                } else if (intoHits && i instanceof SelectInteraction sel) {
+                    todo.add(sel.hitEntity);
+                }
+            }
+        }
+        return out;
+    }
+
+    @Override
+    public java.util.OptionalDouble hitReach(String itemId) {
+        String item = itemId == null || itemId.isEmpty() ? null : itemId;
+        List<meridian.protocol.Interaction> ops = reached(item, InteractionType.Primary, false);
+        if (ops == null) {
+            return java.util.OptionalDouble.empty();
+        }
+        double best = 0;
+        for (meridian.protocol.Interaction i : ops) {
+            if (i instanceof SelectInteraction sel && (sel.hitEntity != Integer.MIN_VALUE || sel.hitEntityRules != null)) {
+                best = Math.max(best, selectorReach(sel.selector));
+            }
+        }
+        return best > 0 ? java.util.OptionalDouble.of(best) : java.util.OptionalDouble.empty();
+    }
+
+    @Override
+    public boolean guards(String itemId) {
+        String item = itemId == null || itemId.isEmpty() ? null : itemId;
+        List<meridian.protocol.Interaction> ops = reached(item, InteractionType.Secondary, false);
+        if (ops == null) {
+            return false;
+        }
+        for (meridian.protocol.Interaction i : ops) {
+            if (i instanceof meridian.protocol.WieldingInteraction w
+                    && (w.angledWielding != null || w.hasModifiers || w.blockedEffects != null)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Override
+    public Optional<Heal> heal(String itemId) {
+        if (itemId == null || itemId.isEmpty()) {
+            return Optional.empty();
+        }
+        int health = statIndex.applyAsInt("Health");
+        List<meridian.protocol.Interaction> ops = reached(itemId, InteractionType.Secondary, false);
+        if (health < 0 || ops == null) {
+            return Optional.empty();
+        }
+        StatSheet own = entities.selfStats();
+        float[] mine = own == null ? null : own.read(health);
+        double max = mine == null ? 100 : Math.max(1, mine[2] - mine[1]);
+        double now = 0;
+        double slow = 0;
+        double seconds = 0;
+        for (meridian.protocol.Interaction i : ops) {
+            if (i instanceof meridian.protocol.ApplyEffectInteraction apply
+                    && apply.entityTarget == meridian.protocol.InteractionTarget.User) {
+                meridian.protocol.EntityEffect e = effectAt.apply(apply.effectId);
+                Float v = e == null || e.statModifiers == null ? null : e.statModifiers.get(health);
+                if (v == null || v <= 0) {
+                    continue;
+                }
+                double per = e.valueType == meridian.protocol.ValueType.Percent ? v / 100.0 * max : v;
+                if (e.damageCalculatorCooldown > 0 && !e.infinite) {
+                    // Applied each cooldown for as long as the effect lasts (ActiveEntityEffect).
+                    slow += per * Math.floor(e.duration / e.damageCalculatorCooldown);
+                    seconds = Math.max(seconds, e.duration);
+                } else {
+                    now += per;
+                }
+            } else if (i instanceof meridian.protocol.ChangeStatInteraction change
+                    && change.entityTarget == meridian.protocol.InteractionTarget.User
+                    && change.changeStatBehaviour == meridian.protocol.ChangeStatBehaviour.Add
+                    && change.statModifiers != null) {
+                Float v = change.statModifiers.get(health);
+                if (v != null && v > 0) {
+                    now += change.valueType == meridian.protocol.ValueType.Percent ? v / 100.0 * max : v;
+                }
+            }
+        }
+        return now + slow > 0 ? Optional.of(new Heal(now, slow, seconds)) : Optional.empty();
+    }
+
+    /**
+     * The item a chain of {@code type} runs with, by the server's rule
+     * ({@code InteractionContext.forInteraction}): the main hand's, but the utility slot's (a
+     * shield) when the hand is empty, when the utility item's priority for the type is higher, when
+     * the hand's item has no such interaction, or - for {@code Secondary} at equal priority - when
+     * the hand's item works beside a utility item ({@code Utility.Compatible}, a sword). The utility
+     * slot is taken only once core knows which one is active.
+     */
+    String handItem(InteractionType type) {
+        String primary = inventory.itemInHandId();
+        if (type != InteractionType.Primary && type != InteractionType.Secondary) {
+            return primary;
+        }
+        String secondary = inventory.utilitySlotKnown() ? inventory.utilityItemId() : null;
+        if (secondary == null) {
+            return primary;
+        }
+        if (primary == null) {
+            return secondary;
+        }
+        meridian.protocol.ItemBase main = items.item(primary).orElse(null);
+        meridian.protocol.ItemBase off = items.item(secondary).orElse(null);
+        if (main == null || off == null) {
+            return primary;
+        }
+        int pMain = priority(main, type, meridian.protocol.PrioritySlot.MainHand);
+        int pOff = priority(off, type, meridian.protocol.PrioritySlot.OffHand);
+        if (pMain == pOff) {
+            return type == InteractionType.Secondary && main.utility != null && main.utility.compatible ? secondary : primary;
+        }
+        if (pMain < pOff) {
+            return secondary;
+        }
+        return main.interactions == null || !main.interactions.containsKey(type) ? secondary : primary;
+    }
+
+    /** {@code InteractionConfiguration.getPriorityFor}: the slot's value, else the default's, else 0. */
+    private static int priority(meridian.protocol.ItemBase item, InteractionType type, meridian.protocol.PrioritySlot slot) {
+        if (item.interactionConfig == null || item.interactionConfig.priorities == null) {
+            return 0;
+        }
+        meridian.protocol.InteractionPriority p = item.interactionConfig.priorities.get(type);
+        if (p == null || p.values == null) {
+            return 0;
+        }
+        Integer v = p.values.get(slot);
+        if (v == null) {
+            v = p.values.get(meridian.protocol.PrioritySlot.Default);
+        }
+        return v == null ? 0 : v;
     }
 
     @Override
@@ -1009,7 +1238,8 @@ public final class InteractionControlImpl implements InteractionControl {
                 return Started.NOTHING;
             }
         }
-        String itemId = inventory.itemInHandId();
+        // The hand the server runs it with: a shield in the utility slot takes a sword's Secondary.
+        String itemId = handItem(type);
         ForgeRun run = startRun(null, type, DataKind.NONE, itemId, BlockFace.None, null, Map.of(),
                 BlockFace.None, target, Integer.MIN_VALUE, holdSeconds);
         return run == null ? Started.NOTHING : Started.of(run);

@@ -26,6 +26,7 @@ import meridian.core.api.Worker;
 public final class NavigationPanel {
 
     private static final String USAGE = "goto <x y z> [radius] | plan <x y z> [radius] | trace <x y z> [radius] | cancel"
+            + " | chase <entity> [within]"
             + " | place <x y z> <item> [rotation] | take <x y z> <item> <count> | deposit <x y z> <item> <count>"
             + " | pillar <item> <blocks> | down <blocks> | pour|scoop <x y z> <item>";
 
@@ -40,12 +41,22 @@ public final class NavigationPanel {
     private volatile String yText = "";
     private volatile String zText = "";
     private volatile String status = "Idle.";
+    /** Where an entity is, for {@code nav chase}; none until core's module sets it. */
+    private volatile java.util.function.IntFunction<java.util.Optional<meridian.core.api.Vec3>> entityAt =
+            id -> java.util.Optional.empty();
 
     public NavigationPanel(Navigator navigator, Worker worker, Movement movement, InteractionControl interactions) {
         this.navigator = navigator;
         this.worker = worker;
         this.movement = movement;
         this.interactions = interactions;
+    }
+
+    /** Where an entity is now, for {@code nav chase <entity>}. */
+    public void entities(java.util.function.IntFunction<java.util.Optional<meridian.core.api.Vec3>> where) {
+        if (where != null) {
+            entityAt = where;
+        }
     }
 
     /** The "Go to a point" section, for core's settings. */
@@ -146,6 +157,11 @@ public final class NavigationPanel {
             worker.cancel();
             navigator.cancel();
             return CompletableFuture.completedFuture(Map.of("cancelled", true));
+        }
+        if (what.equals("chase") && args.size() >= 2) {
+            int entity = Integer.parseInt(args.get(1));
+            double within = args.size() > 2 ? Double.parseDouble(args.get(2)) : 2;
+            return navigator.chase(() -> entityAt.apply(entity), within).thenApply(NavigationPanel::result);
         }
         if (what.equals("down") && args.size() >= 2) {
             return worker.pillarDown(Integer.parseInt(args.get(1))).thenApply(o -> Map.of("outcome", o.name()));
