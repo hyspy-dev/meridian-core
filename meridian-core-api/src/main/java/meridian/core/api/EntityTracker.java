@@ -90,6 +90,9 @@ public interface EntityTracker {
      * that carry a skin, so this is a definitive signal independent of the
      * model path (handy for a players-only ESP filter).
      *
+     * <p>A player without a skin - a headless one, on a server that does not check accounts -
+     * counts as one by its model, the player model ({@code Player}).
+     *
      * <p>False for non-players and for players whose skin component hasn't been
      * observed yet; sticky once true (the local player included).
      */
@@ -192,6 +195,44 @@ public interface EntityTracker {
      * none. A core too old to tell answers empty.
      */
     default Optional<Box> boundsOf(int entityId) {
+        return Optional.empty();
+    }
+
+    /**
+     * One stat of an entity's as the server keeps it: its value, between its bounds - the stat
+     * type's own, moved by the modifiers on it (a mob's {@code MaxHealth}).
+     */
+    record Stat(double value, double min, double max) {
+
+        /** How full it is, {@code 0} at its min to {@code 1} at its max. */
+        public double fraction() {
+            return max > min ? Math.max(0, Math.min(1, (value - min) / (max - min))) : 0;
+        }
+    }
+
+    /**
+     * A stat of an entity's by the name the server's catalog gives it ({@code Health},
+     * {@code Stamina}...), as the server has sent it to this client. The server shares only some
+     * stats with other viewers - {@code Health} is one, the bar the game draws over a mob - so for
+     * another entity most stats are absent; for the local player all of its own are there.
+     *
+     * @return the stat; empty until the server has sent it, and for a core too old to keep it
+     */
+    default Optional<Stat> statOf(int entityId, String name) {
+        return Optional.empty();
+    }
+
+    /** {@link #statOf} for {@code Health}. A value at its min is an entity that is dead or dying. */
+    default Optional<Stat> healthOf(int entityId) {
+        return statOf(entityId, "Health");
+    }
+
+    /**
+     * The item an entity holds in its main hand, as the server shows it to everyone (its
+     * {@code Equipment}): a player's weapon or tool, a mob's club. Empty for an empty hand, before
+     * the server has said, and for a core too old to keep it.
+     */
+    default Optional<String> heldItemOf(int entityId) {
         return Optional.empty();
     }
 

@@ -109,6 +109,22 @@ public interface Player {
     }
 
     /**
+     * The hotbar slot of the best weapon to fight with: of the weapons in it whose swing hits an
+     * entity ({@link InteractionControl#hitReach}) and that are not broken, the one the server ranks
+     * highest (its item level), the longer reach on a tie.
+     *
+     * @return the slot, or {@code -1} when the hotbar holds no such weapon
+     */
+    default int bestWeaponSlot() {
+        return bestWeaponSlot(id -> true);
+    }
+
+    /** {@link #bestWeaponSlot()} among the items whose ids {@code among} accepts only. */
+    default int bestWeaponSlot(java.util.function.Predicate<String> among) {
+        return -1;
+    }
+
+    /**
      * Switches the active hotbar slot, forging a {@code SwapFrom} interaction —
      * the same one the client sends when the player scrolls the hotbar. The
      * server runs interactions against the item physically in the active slot,

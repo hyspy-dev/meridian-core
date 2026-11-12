@@ -13,6 +13,9 @@ import meridian.protocol.ComponentUpdate;
 import meridian.core.impl.interaction.EntityTarget;
 import meridian.protocol.Direction;
 import meridian.protocol.EffectOp;
+import meridian.protocol.EntityStatUpdate;
+import meridian.protocol.EntityStatsUpdate;
+import meridian.protocol.EquipmentUpdate;
 import meridian.protocol.EntityEffectUpdate;
 import meridian.protocol.EntityEffectsUpdate;
 import meridian.protocol.InteractionType;
@@ -83,6 +86,15 @@ final class EntityTrackerImpl implements EntityTracker {
     private final Map<Integer, Integer> quantities = new ConcurrentHashMap<>();
     /** Where each entity was first seen since it came into view: a drop's, where it fell from. */
     private final Map<Integer, Vec3> firstSeen = new ConcurrentHashMap<>();
+    /**
+     * Each entity's stats as the server shares them with this viewer ({@code EntityStatsUpdate}):
+     * changes applied in turn, as for the player's own ({@link meridian.core.impl.interaction.StatSheet}).
+     */
+    private final Map<Integer, meridian.core.impl.interaction.StatSheet> stats = new ConcurrentHashMap<>();
+    /** What each entity holds in its main hand ({@code Equipment}). */
+    private final Map<Integer, String> held = new ConcurrentHashMap<>();
+    /** The server's stat catalog by index - shared with the player's own sheet ({@link #statCatalog}). */
+    private volatile Map<Integer, meridian.protocol.EntityStatType> statTypes = Map.of();
     private volatile int localId = Integer.MIN_VALUE;
     private volatile Vec3 localPos;
     /** Look orientation of the local player, radians. */
@@ -115,6 +127,8 @@ final class EntityTrackerImpl implements EntityTracker {
                 items.remove(id);
                 quantities.remove(id);
                 firstSeen.remove(id);
+                stats.remove(id);
+                held.remove(id);
             }
         }
         if (packet.updates != null) {
@@ -168,6 +182,15 @@ final class EntityTrackerImpl implements EntityTracker {
                             && item.item.itemId != null && !item.item.itemId.isEmpty()) {
                         items.put(update.networkId, item.item.itemId);
                         quantities.put(update.networkId, item.item.quantity);
+                    } else if (component instanceof EntityStatsUpdate statUpdate
+                            && statUpdate.entityStatUpdates != null) {
+                        stats(update.networkId, statUpdate);
+                    } else if (component instanceof EquipmentUpdate equipment) {
+                        if (equipment.rightHandItemId != null && !equipment.rightHandItemId.isEmpty()) {
+                            held.put(update.networkId, equipment.rightHandItemId);
+                        } else {
+                            held.remove(update.networkId);
+                        }
                     } else if (component instanceof PlayerSkinUpdate) {
                         // Only players carry a skin component — definitive
                         // player marker, independent of the model path.
@@ -176,6 +199,38 @@ final class EntityTrackerImpl implements EntityTracker {
                 }
             }
         }
+    }
+
+    /**
+     * The server's stat catalog, shared with the player's own sheet: bounds and starting values by
+     * index, and the names stats are asked for by.
+     */
+    void statCatalog(Map<Integer, meridian.protocol.EntityStatType> types) {
+        statTypes = types == null ? Map.of() : types;
+    }
+
+    /** One entity's stat changes, applied in turn on its own sheet. */
+    private void stats(int entityId, EntityStatsUpdate update) {
+        meridian.core.impl.interaction.StatSheet sheet = stats.computeIfAbsent(entityId,
+                k -> new meridian.core.impl.interaction.StatSheet(statTypes));
+        update.entityStatUpdates.forEach((index, changes) -> {
+            if (changes == null || index == null) {
+                return;
+            }
+            for (EntityStatUpdate change : changes) {
+                sheet.apply(index, change);
+            }
+        });
+    }
+
+    /** The catalog index of the stat named so, or {@code -1}. */
+    private int statIndex(String name) {
+        for (Map.Entry<Integer, meridian.protocol.EntityStatType> e : statTypes.entrySet()) {
+            if (e.getValue() != null && name.equals(e.getValue().id)) {
+                return e.getKey();
+            }
+        }
+        return -1;
     }
 
     void onClientMovement(ClientMovement packet) {
@@ -319,14 +374,32 @@ final class EntityTrackerImpl implements EntityTracker {
     }
 
     @Override
+    public Optional<Stat> statOf(int entityId, String name) {
+        meridian.core.impl.interaction.StatSheet sheet = stats.get(entityId);
+        int index = name == null || sheet == null ? -1 : statIndex(name);
+        float[] v = index < 0 ? null : sheet.read(index);
+        return v == null ? Optional.empty() : Optional.of(new Stat(v[0], v[1], v[2]));
+    }
+
+    @Override
+    public Optional<String> heldItemOf(int entityId) {
+        return Optional.ofNullable(held.get(entityId));
+    }
+
+    @Override
     public Optional<String> nameplateOf(int entityId) {
         return Optional.ofNullable(nameplates.get(entityId));
     }
 
     @Override
     public boolean isPlayer(int entityId) {
-        return players.contains(entityId);
+        // A skin is the sure sign; a player whose game sent none (a headless one, on an insecure
+        // server) still wears the player model.
+        return players.contains(entityId) || PLAYER_MODEL.equals(modelAssetIds.get(entityId));
     }
+
+    /** The model every player wears. */
+    private static final String PLAYER_MODEL = "Player";
 
     @Override
     public Optional<Vec3> localPosition() {
