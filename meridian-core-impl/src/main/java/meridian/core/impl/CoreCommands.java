@@ -30,7 +30,8 @@ final class CoreCommands {
 
     static final String USAGE = "pos | block <x y z> | reach [item] | besttool <x y z> | placeat <x y z> [face] | chest <x y z> | known <x y z> | find <name-contains> [radius] [limit] | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
             + "use|plant|water <x y z> | hit|dig <x y z> [times] | break <x y z> [maxSwings] | place <x y z> [face] [orient] | "
-            + "hits [seconds] | swings [seconds] | fightitem [item] | repair <item> | urgent <seconds> | "
+            + "hits [seconds] | swings [seconds] | fightitem [item] | repair <item> | urgent <seconds> | wheel <seconds> | "
+            + "swingguard <entity> [after <ms>] [hold <s>] [overpower] | "
             + "entities [range] [players] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | dodge | assets | asset <path> | "
             + "movement | body | stand <x y z> | surface <x z> [wait <s>] | safe <x y z> [radius] | hurts <x y z> | move <walk|jump|mantle|drop|leap|swim|climb|fly> <x y z> [walk|run|sprint] | "
             + "predict <kind> <x y z> [gait] [trace] | hold <forward> <strafe> <yaw> [jump] [crouch] [sprint] [walk] [fly] | hold off | halt | "
@@ -89,6 +90,8 @@ final class CoreCommands {
                 yield interactions().repair(args.get(1)).thenApply(ok -> Map.of("repaired", ok));
             }
             case "urgent" -> urgent(args);
+            case "wheel" -> wheel(args);
+            case "swingguard" -> swingGuard(args);
             case "spoof" -> CompletableFuture.completedFuture(spoof(args));
             case "assets" -> CompletableFuture.completedFuture(assets());
             case "movement" -> CompletableFuture.completedFuture(movement());
@@ -392,6 +395,7 @@ final class CoreCommands {
         if (s.mantling()) doing.add("mantling");
         if (s.hanging()) doing.add("hanging");
         out.put("states", doing);
+        out.put("holds", movementService().holds());
         return out;
     }
 
@@ -754,6 +758,57 @@ final class CoreCommands {
             w.release();
             return Map.of("taken", true, "held", seconds);
         }, CompletableFuture.delayedExecutor((long) (seconds * 1000), java.util.concurrent.TimeUnit.MILLISECONDS));
+    }
+
+    /**
+     * {@code wheel <seconds>}: an ordinary hold on the body for that long - as a job holds it (a
+     * miner's, a builder's); answered when given back, with the holds counted while it was held.
+     */
+    private CompletableFuture<?> wheel(List<String> args) {
+        double seconds = args.size() > 1 ? Double.parseDouble(args.get(1)) : 2;
+        meridian.core.api.Movement m = movementService();
+        meridian.core.api.Movement.Wheel w = m.take().orElse(null);
+        if (w == null) {
+            return CompletableFuture.completedFuture(Map.of("taken", false));
+        }
+        int counted = m.holds();
+        return CompletableFuture.supplyAsync(() -> {
+            w.release();
+            return Map.of("taken", true, "held", seconds, "holdsWhileHeld", counted, "holdsAfter", m.holds());
+        }, CompletableFuture.delayedExecutor((long) (seconds * 1000), java.util.concurrent.TimeUnit.MILLISECONDS));
+    }
+
+    /**
+     * {@code swingguard <entity> [after <ms>] [hold <s>] [overpower]}: a swing at the entity, and
+     * {@code after} ms into it (default 40) the guard raised for {@code hold} s (default 0.65) - cutting
+     * the swing short where its rules let a guard (the game's way), or with {@code overpower} after it.
+     * Answers both outcomes and the entity's health before and after.
+     */
+    private CompletableFuture<?> swingGuard(List<String> args) {
+        int id = Integer.parseInt(args.get(1));
+        int at = args.indexOf("after");
+        long after = at >= 0 && at + 1 < args.size() ? Long.parseLong(args.get(at + 1)) : 40;
+        java.time.Duration hold = hold(args);
+        java.time.Duration guardFor = hold == null ? java.time.Duration.ofMillis(650) : hold;
+        boolean interrupt = !args.contains("overpower");
+        Object before = entityTracker().healthOf(id).map(h -> (Object) h.value()).orElse("unknown");
+        return faceIfHeadless(id).thenCompose(v -> {
+            CompletableFuture<InteractionOutcome> swing = interactions().hitEntity(id);
+            CompletableFuture<InteractionOutcome> guard = CompletableFuture.supplyAsync(() -> null,
+                            CompletableFuture.delayedExecutor(after, java.util.concurrent.TimeUnit.MILLISECONDS))
+                    .thenCompose(x -> interactions().useItem(guardFor, interrupt));
+            return swing.thenCombine(guard, (s, g) -> List.of(s, g));
+        }).thenCompose(list -> CompletableFuture.supplyAsync(() -> list,
+                CompletableFuture.delayedExecutor(300, java.util.concurrent.TimeUnit.MILLISECONDS)))
+                .thenApply(list -> {
+                    Map<String, Object> out = new LinkedHashMap<>();
+                    out.put("interrupt", interrupt);
+                    out.put("swing", outcome(list.get(0)));
+                    out.put("guard", outcome(list.get(1)));
+                    out.put("healthBefore", before);
+                    out.put("healthAfter", entityTracker().healthOf(id).map(h -> (Object) h.value()).orElse("unknown"));
+                    return out;
+                });
     }
 
     private Object stats() {

@@ -26,7 +26,9 @@ import java.util.concurrent.CompletableFuture;
  * caller can act on it with {@code .thenAccept(...)} / {@code .thenCompose(...)}:
  * retry, undo its own plans, try something else. The queue only serializes - it
  * adds no padding, so queued forges run back-to-back at the tick rate; any
- * human-like spacing is the caller's choice. The future always completes
+ * human-like spacing is the caller's choice. One forge may cut short the chain
+ * under way instead of waiting for it, as the game lets a guard cut a swing
+ * short: {@link #useItem(Duration, boolean)}. The future always completes
  * normally - a forge that could not run (no session, no root) completes with
  * {@link InteractionOutcome.Status#NOT_SENT}. Callbacks run on core's scheduler
  * thread.
@@ -252,6 +254,29 @@ public interface InteractionControl {
      */
     default CompletableFuture<InteractionOutcome> useItem(Duration hold) {
         return CompletableFuture.failedFuture(new UnsupportedOperationException("useItem(hold)"));
+    }
+
+    /**
+     * {@link #useItem(Duration)}, and whether it may cut short the chain of core's under way.
+     *
+     * <p>With {@code interrupt} on, it is pressed as a player presses the button in the middle of a
+     * chain: where the rules of the chain under way let a {@code Secondary} interrupt it - its root's
+     * or the interaction it stands on, {@code InterruptedBy} (a sword's swing until its blow, not its
+     * blow or the moment after) - that chain is cut short the way the game cuts it, and this one
+     * starts at once. The server cuts it short by the same rules when this one comes in, and
+     * cancels it: its outcome is {@code CANCELLED}, and its blow does not land. Where the rules do
+     * not let it, or forges wait ahead of it, it waits its turn as every forge does.
+     *
+     * <p>With {@code interrupt} off it always waits: the swing under way runs to its end and lands,
+     * then the guard goes up - more than the game lets a player do (a guard raised mid-swing ends the
+     * swing), and the server takes it.
+     *
+     * <p>A core too old to cut a chain short waits, as {@link #useItem(Duration)}.
+     *
+     * @return how the server ran the use
+     */
+    default CompletableFuture<InteractionOutcome> useItem(Duration hold, boolean interrupt) {
+        return useItem(hold);
     }
 
     /**
