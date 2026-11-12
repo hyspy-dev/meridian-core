@@ -455,7 +455,7 @@ public final class Body {
             // Another move waiting: go through this one's point instead of stopping on it.
             Queued after = queue.peekFirst();
             current.pilot().through(after != null);
-            current.pilot().ahead(after == null ? null : after.pilot().move().to());
+            current.pilot().ahead(after == null ? null : after.pilot().move());
             Controls k = current.pilot().next(state);
             if (k != null) {
                 return Neck.follow(state, k, current.pilot().lookYaw(), current.pilot().lookPitch(),
@@ -573,7 +573,7 @@ public final class Body {
         MoveResult last = new MoveResult(MoveResult.Status.ARRIVED, new Vec3(s.x, s.y, s.z));
         for (int i = 0; i < moves.size(); i++) {
             Pilot p = new Pilot(moves.get(i), physics, i + 1 < moves.size());
-            p.ahead(i + 1 < moves.size() ? moves.get(i + 1).to() : null);
+            p.ahead(i + 1 < moves.size() ? moves.get(i + 1) : null);
             while (true) {
                 Controls k = p.next(s);
                 if (k == null) {
