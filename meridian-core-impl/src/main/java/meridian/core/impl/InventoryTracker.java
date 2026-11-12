@@ -33,12 +33,16 @@ public final class InventoryTracker {
     private final Map<Integer, String> hotbar = new ConcurrentHashMap<>();
     private final Map<Integer, String> utility = new ConcurrentHashMap<>();
     private final Map<Integer, String> tools = new ConcurrentHashMap<>();
+    /** The hotbar's stacks that have worn out: a durability, and none of it left. */
+    private final java.util.Set<Integer> brokenHotbar = ConcurrentHashMap.newKeySet();
 
     /** How many slots the hotbar has, as the server last said. */
     private volatile int hotbarCapacity = 9;
     private volatile int activeHotbarSlot = 0;
     private volatile int activeUtilitySlot = 0;
     private volatile int activeToolsSlot = -1;
+    /** Whether the active utility slot is known - the server or the player's own chains said it. */
+    private volatile boolean utilityKnown;
 
     // ------------------------------------------------------------------
     // Ingest
@@ -46,6 +50,14 @@ public final class InventoryTracker {
 
     void onInventory(UpdatePlayerInventory packet) {
         load(packet.hotbar, hotbar);
+        if (packet.hotbar != null && packet.hotbar.items != null) {
+            brokenHotbar.clear();
+            packet.hotbar.items.forEach((slot, item) -> {
+                if (item != null && item.maxDurability > 0 && item.durability <= 0) {
+                    brokenHotbar.add(slot);
+                }
+            });
+        }
         if (packet.hotbar != null && packet.hotbar.capacity > 0) {
             hotbarCapacity = packet.hotbar.capacity;
         }
@@ -58,7 +70,10 @@ public final class InventoryTracker {
     void onSetActiveSlot(SetActiveSlot packet) {
         switch (packet.inventorySectionId) {
             case SECTION_HOTBAR -> activeHotbarSlot = packet.activeSlot;
-            case SECTION_UTILITY -> activeUtilitySlot = packet.activeSlot;
+            case SECTION_UTILITY -> {
+                activeUtilitySlot = packet.activeSlot;
+                utilityKnown = true;
+            }
             case SECTION_TOOLS -> activeToolsSlot = packet.activeSlot;
             default -> { /* other inventory section — not needed for forging */ }
         }
@@ -78,6 +93,12 @@ public final class InventoryTracker {
         activeHotbarSlot = hotbar;
         activeUtilitySlot = utility;
         activeToolsSlot = tools;
+        utilityKnown = true;
+    }
+
+    /** Whether the active utility slot is known: the server set it, or the player's own chain carried it. */
+    public boolean utilitySlotKnown() {
+        return utilityKnown;
     }
 
     /** Replaces {@code dst} with the contents of {@code section} (if present). */
@@ -128,6 +149,11 @@ public final class InventoryTracker {
     /** Item id in hotbar {@code slot}, or {@code null} if empty. */
     public String hotbarItem(int slot) {
         return hotbar.get(slot);
+    }
+
+    /** Whether the stack in hotbar {@code slot} has worn out - a durability with none of it left. */
+    public boolean hotbarBroken(int slot) {
+        return brokenHotbar.contains(slot);
     }
 
     /** How many slots the hotbar has. */

@@ -57,6 +57,8 @@ public final class MovementImpl implements Movement {
     private final IntFunction<Set<Integer>> effectsOf;
 
     private final ClientTeleports teleports;
+    /** The urgent holds ({@link #takeFirst}), for what core holds back while one is held. */
+    private final Urgency urgency = new Urgency();
 
     public MovementImpl(Terrain terrain, BlockHitboxes hitboxes, meridian.core.impl.FluidCatalog fluids,
                         Scheduler scheduler, Supplier<HeadlessClient> client, Supplier<Vec3> trackedFeet,
@@ -294,6 +296,72 @@ public final class MovementImpl implements Movement {
             return body.placed() ? java.util.Optional.of(headlessWheel) : java.util.Optional.empty();
         }
         return game.take();
+    }
+
+    /**
+     * The server's entity effect at this index ({@code UpdateEntityEffects}) - core's one catalog
+     * of them, kept for what effects do to the body - or {@code null}.
+     */
+    public meridian.protocol.EntityEffect effect(int index) {
+        return around.effect(index);
+    }
+
+    @Override
+    public java.util.Optional<Movement.Wheel> takeFirst() {
+        java.util.Optional<Movement.Wheel> taken = take();
+        if (taken.isEmpty()) {
+            return taken;
+        }
+        Movement.Wheel inner = taken.get();
+        urgency.begin();
+        // What the other holds had going stops where it is: their trips and digs wait.
+        body.stop();
+        UrgentWheel urgent = new UrgentWheel(inner);
+        inner.released().thenAccept(urgent::lost);
+        return java.util.Optional.of(urgent);
+    }
+
+    /** Core's urgent holds: what the navigator, the worker and the swing loops wait on while one is held. */
+    public Urgency urgency() {
+        return urgency;
+    }
+
+    /** An urgent hold: an ordinary one underneath, and the urgency it keeps up until it is gone. */
+    private final class UrgentWheel implements Movement.Wheel {
+        private final Movement.Wheel inner;
+        private final CompletableFuture<Movement.Release> own = new CompletableFuture<>();
+        private final java.util.concurrent.atomic.AtomicBoolean over = new java.util.concurrent.atomic.AtomicBoolean();
+
+        UrgentWheel(Movement.Wheel inner) {
+            this.inner = inner;
+        }
+
+        @Override
+        public boolean held() {
+            return !over.get() && inner.held();
+        }
+
+        @Override
+        public void release() {
+            if (over.compareAndSet(false, true)) {
+                inner.release();
+                urgency.end();
+                own.complete(Movement.Release.GIVEN_BACK);
+            }
+        }
+
+        /** The game took the body: the urgent hold is over with it. */
+        void lost(Movement.Release why) {
+            if (over.compareAndSet(false, true)) {
+                urgency.end();
+                own.complete(why);
+            }
+        }
+
+        @Override
+        public CompletableFuture<Movement.Release> released() {
+            return own;
+        }
     }
 
     @Override

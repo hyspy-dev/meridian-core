@@ -166,6 +166,11 @@ final class Surroundings {
         return f == null ? 1 : Math.max(1, f.maxFluidLevel);
     }
 
+    /** The server's effect at this index, or {@code null}. */
+    EntityEffect effect(int index) {
+        return effects.get(index);
+    }
+
     /** What the effects with these ids do to movement together. */
     EffectMotion effects(Set<Integer> active) {
         double speed = 1;
