@@ -100,7 +100,9 @@ nobody is providing them.
 **Acting**
 
 - **`InteractionControl`** - forging the interaction chains the server expects, so a
-  module can dig, place or use something the way the client would have.
+  module can dig, place or use something the way the client would have. What a fight needs - the
+  reading of it, urgent holds, who has the body, a guard that cuts a swing short as the game lets
+  it - is in [docs/combat.md](docs/combat.md).
 - **`Navigator`** - takes the player somewhere: a way found over the ground and gone move by move.
 - **`Worker`** - breaks a block: the best tool, a place within its reach, what is in the way first.
   It also picks up the drops. Both are in [docs/navigation.md](docs/navigation.md), with core's

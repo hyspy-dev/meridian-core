@@ -106,9 +106,85 @@ core <conn> hits [seconds] | swings [seconds] | fightitem [item]
 core <conn> entities ...       -> each with its health and its held item
 ```
 
+## Who has the body (`Movement.holds`)
+
+`holds()` is how many holds on the body (`take`) are held now: a trip of the navigator's, the
+worker's job, a module's own job (the auto-miner's, the blueprint's). A headless body's holds are
+counted too, though its body is core's all along. Left out:
+
+- urgent holds (`takeFirst`);
+- the holds taken while an urgent hold is held - the urgent taker's own work, a fighter's chase: by
+  the rule urgent holds keep (`Urgency`), work begun under one is its taker's.
+
+So a module that holds nothing itself tells whether another's job has the body (`holds() > 0`) or
+the player plays by hand (`0`); and under an urgent hold of its own, whether the job it holds back
+is still there to give the body back to - a job stopped meanwhile gives its hold back. A hold is
+counted from its take until its taker gives it back or the game takes the body (a key, a teleport,
+a death, a world). A core too old to count answers `-1`.
+
+```
+core <conn> body               -> ... holds
+core <conn> wheel <seconds>    -> an ordinary hold for that long, as a job's; answered when given back
+```
+
+## A guard that cuts a swing short (`InteractionControl.useItem(hold, interrupt)`)
+
+The game lets a chain started over a running one cut it short, by the running chain's rules: its
+root's, or those of the interaction it stands on (`Rules.InterruptedBy`), unless the new chain's
+root carries the bypass tag; or the new root's own `Interrupting` lists the running chain's type.
+The sword's swing: its `Charging` and its `Simple` wind-up (`Weapon_Sword_Primary_Swing_Left`, 0.111
+s) are `InterruptedBy: [Secondary]`; its selector (the blow) and the pad after it are not. So the
+rules let a guard end the swing in its first ~0.13 s (of 0.32); later it waits for the swing.
+
+**The server.** The client sends nothing for the chain it cuts short: it stops sending it and sends
+the new chain's first packet. The server, starting the new chain (`InteractionManager.syncStart` →
+`applyRules`), checks every chain it still runs: one whose rules let the new type interrupt it it
+cancels (`cancelChains`: its states `Failed`, a `CancelInteractionChain` to the client, its forks
+with it), and removes it a tick later, its interaction under way handled as failed - a selector not
+reached hurts no one. Interruptions are checked before blocking; a chain that does not let itself be
+interrupted blocks the new one instead (`Primary` and `Secondary` block each other by default,
+`InteractionTypeUtils`): the server queues it until the running chain is over.
+
+**Core.** `useItem(hold, true)` is pressed now: when a chain of core's is in flight and nothing else
+waits in the queue, core asks the run's rules where its walk stands - the root it is in after any
+`Replace`, the interaction it stands on (`ChainRules`, the server's `validateInterrupts`). Where they
+let a `Secondary` in, the run is cut short as the client does it: nothing more of it goes out, it is
+done locally at once and the queue starts the use at once. The run waits for the server's cancel
+and ends `CANCELLED` (or as the server ran it, had it run on; `TIMED_OUT` after 5 s of silence);
+server forks of it are not answered. Where the rules do not let it, the use waits its turn.
+
+**The server's lead.** What counts is where the *server* stands when the use comes in, and it can
+stand further on than core's walk: it runs the chain by its own clock from its own tick (30 a
+second), shifts a new chain's time by what the chain before ran over, and core's scheduler may run
+late. A use that reaches the server past the wind-up is blocked there (`Primary` blocks
+`Secondary`), while the swing it should have cut waits on its selector for the client's data that
+no longer comes: the server warns ("Client failed to send client data") and cancels it after its
+timeout, about 3 s - the guard only then. Seen on a loaded stand: cut 76 ms into a crude sword's
+swing, the server at its selector already. So core cuts only with time to spare: the interaction's
+time left - by the walk's clock less however far the walk is behind the wall clock, and by the
+server's own word on it (its progress, and the time since it said so) - must be more than 60 ms
+(`SERVER_LEAD_SECONDS`), and the server must not have said it is past it. For a sword that is the
+first ~40 ms of its wind-up; a guard asked for later waits for the swing.
+
+`useItem(hold, false)` - and every other forge - waits: the swing runs to its end and lands, then
+the guard goes up. More than the game lets a player do; the server takes it (its queue holds the
+guard back only while it still runs the swing).
+
+On the stand: a guard 40 ms into an iron sword's swing at a sheep - the swing `CANCELLED` after 4
+operations, no hit, the sheep's health as it was; the guard out 18 ms after the cut (a tick, before
+it went out at once). Without the interrupt the swing `FINISHED` with its hit (81 → 71), the guard
+after it (340 ms later).
+
+```
+core <conn> swingguard <entity> [after <ms>] [hold <s>] [overpower]
+    -> {interrupt, swing, guard, healthBefore, healthAfter}
+```
+
 ## Not yet
 
-- **A swing is not cut short by a guard.** Core plays forges one after another; a sword's swing that
-  the client would interrupt with `Secondary` (`InterruptedBy`) plays to its end first.
+- **Only a guard cuts a chain short.** The rules are core's for every forge (`ChainRules`), but only
+  `useItem(hold, interrupt)` is pressed "now"; every other forge waits its turn. A press waits as well
+  when another forge waits ahead of it, and it is not tried again while it waits: a chain whose rules
+  let it in only later in its run is not cut then.
 - **A shield in the utility slot for a headless player**: the active utility slot is never sent to
   one, so its forges take the hotbar item.
