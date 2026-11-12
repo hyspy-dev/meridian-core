@@ -110,6 +110,11 @@ final class PlayerStateImpl implements PlayerState {
         return java.util.OptionalInt.empty();
     }
 
+    /** The stat catalog itself, live - for the other entities' sheets, which share it. */
+    Map<Integer, meridian.protocol.EntityStatType> statCatalog() {
+        return statTypes;
+    }
+
     /** The catalog's stat type at an index, or {@code null}. */
     meridian.protocol.EntityStatType statType(int index) {
         return statTypes.get(index);

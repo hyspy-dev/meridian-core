@@ -57,6 +57,8 @@ public final class WorkerImpl implements Worker {
     static final double PER_OWN_OBSTACLE = 0.5;
     /** A reach is kept this much short, so the dig or the use still lands from where the body ends up. */
     static final double REACH_MARGIN = 0.3;
+    /** How often a dig is begun again after an urgent hold broke into it. */
+    static final int URGENT_RETRIES = 4;
     /** Once there, a block is still tried this much past the reach it was chosen for. */
     static final double REACH_SLACK = 0.4;
     /** A sweep hitting a block this hard breaks it in a swing or two: a shovel's 0.4-0.5 on soil, not its 0.05 on stone. */
@@ -101,6 +103,10 @@ public final class WorkerImpl implements Worker {
     private final AtomicInteger work = new AtomicInteger();
     /** The break under way, to stop it on a cancel. */
     private volatile CompletableFuture<?> breaking;
+    /** Core's urgent holds: a job begun before one waits while it is held ({@link Movement#takeFirst}). */
+    private final meridian.core.impl.movement.Urgency urgency;
+    /** The stamp of the job the calling thread runs ({@link #held}); {@code null} off a job's thread. */
+    private static final ThreadLocal<Long> BORN = new ThreadLocal<>();
 
     public WorkerImpl(Movement movement, World world, InteractionControl interactions, EntityTracker entities,
                       Navigator navigator, ContainersImpl containers, PlayerState inventory,
@@ -115,6 +121,40 @@ public final class WorkerImpl implements Worker {
         this.session = session;
         this.executor = executor;
         this.log = log;
+        this.urgency = movement instanceof meridian.core.impl.movement.MovementImpl m ? m.urgency()
+                : new meridian.core.impl.movement.Urgency();
+    }
+
+    /**
+     * Waits while an urgent hold holds this job back - one taken after the job began
+     * ({@link Movement#takeFirst}).
+     *
+     * @return whether it waited: the body may be somewhere else now
+     */
+    private boolean pause() throws InterruptedException {
+        Long born = BORN.get();
+        if (born == null || !urgency.awaitTurn(born)) {
+            return false;
+        }
+        log.info("meridian-core: the work goes on after an urgent hold");
+        return true;
+    }
+
+    /** A trip of the job's, once nothing holds the job back. */
+    private CompletableFuture<NavResult> go(Goal goal) throws InterruptedException {
+        pause();
+        return navigator.goTo(goal);
+    }
+
+    /** A turn of the head for the job, once nothing holds the job back. */
+    private CompletableFuture<Boolean> faceNow(Vec3 point, double within) throws InterruptedException {
+        pause();
+        return movement.face(point, within);
+    }
+
+    private CompletableFuture<Boolean> faceNow(BlockPos block) throws InterruptedException {
+        pause();
+        return movement.face(block);
     }
 
     @Override
@@ -250,6 +290,9 @@ public final class WorkerImpl implements Worker {
      */
     private <T> CompletableFuture<T> held(Job<T> job, T unavailable) {
         int id = work.incrementAndGet();
+        // The worker's work is what an urgent hold interrupts: a job begun while one is held - the
+        // next block of a job of many - waits for it as well.
+        long born = urgency.active() ? urgency.lastBegan() - 1 : urgency.stamp();
         CompletableFuture<?> b = breaking;
         if (b != null) {
             b.cancel(false);
@@ -262,12 +305,14 @@ public final class WorkerImpl implements Worker {
                 return;
             }
             wheel.released().thenRun(() -> work.compareAndSet(id, id + 1));
+            BORN.set(born);
             try {
                 done.complete(job.run(id));
             } catch (Throwable t) {
                 log.warn("meridian-core: work failed", t);
                 done.completeExceptionally(t);
             } finally {
+                BORN.remove();
                 wheel.release();
             }
         });
@@ -299,7 +344,10 @@ public final class WorkerImpl implements Worker {
         double reach = equip(target, rules);
         boolean placed = false;
         boolean got = false;
+        int again = 0;
         for (int attempt = 0; attempt < STAND_TRIES && live(id); attempt++) {
+            pause();
+            long mark = urgency.lastBegan();
             Stand s = stand(access, target, tried, reach);
             if (s == null) {
                 break;
@@ -309,7 +357,7 @@ public final class WorkerImpl implements Worker {
             log.info("meridian-core: {} to be broken from {}{} (cost {})", text(target), text(s.cell()),
                     s.here() ? ", where the body is" : "", String.format(Locale.ROOT, "%.1f", s.cost()));
             if (!s.here()) {
-                NavResult r = navigator.goTo(Goal.at(s.cell())).get(3, TimeUnit.MINUTES);
+                NavResult r = go(Goal.at(s.cell())).get(3, TimeUnit.MINUTES);
                 if (!live(id)) {
                     return Outcome.INTERRUPTED;
                 }
@@ -322,6 +370,11 @@ public final class WorkerImpl implements Worker {
             got = true;
             if (breakFromHere(id, target, rules, s.passage(), broken)) {
                 return Outcome.BROKEN;
+            }
+            if (urgency.lastBegan() != mark && again++ < URGENT_RETRIES) {
+                // An urgent hold came in the middle of it: the body is elsewhere now - again, from there.
+                tried.clear();
+                attempt--;
             }
         }
         // No place on open ground to break it from: a tunnel to it, the body's height, through the rock.
@@ -379,7 +432,7 @@ public final class WorkerImpl implements Worker {
                     return Outcome.WOULD_NOT_BREAK;
                 }
             }
-            NavResult r = navigator.goTo(Goal.at(st.to())).get(1, TimeUnit.MINUTES);
+            NavResult r = go(Goal.at(st.to())).get(1, TimeUnit.MINUTES);
             if (!live(id)) {
                 return Outcome.INTERRUPTED;
             }
@@ -648,10 +701,13 @@ public final class WorkerImpl implements Worker {
         if (world.blockAt(pos.x(), pos.y(), pos.z()).isAir()) {
             return true;
         }
+        if (pause()) {
+            return world.blockAt(pos.x(), pos.y(), pos.z()).isAir();   // the body is elsewhere now
+        }
         Vec3 eye = eye();
         Vec3 aim = eye == null ? centre(pos) : sight(eye, pos).aim();
         double d = eye == null ? 1 : Math.sqrt(distSq(eye, aim));
-        movement.face(aim, Math.max(Movement.FACE_WITHIN, Math.atan(0.25 / Math.max(d, 0.5)))).get(2, TimeUnit.SECONDS);
+        faceNow(aim, Math.max(Movement.FACE_WITHIN, Math.atan(0.25 / Math.max(d, 0.5)))).get(2, TimeUnit.SECONDS);
         CompletableFuture<Boolean> run = interactions.breakBlock(pos, MAX_SWINGS);
         breaking = run;
         try {
@@ -1007,6 +1063,7 @@ public final class WorkerImpl implements Worker {
         Set<Integer> passed = new HashSet<>();
         Set<Integer> retried = new HashSet<>();
         for (int round = 0; round < 256 && live(id); round++) {
+            pause();
             Vec3 me = movement.position();
             if (me == null) {
                 break;
@@ -1039,7 +1096,7 @@ public final class WorkerImpl implements Worker {
                 passed.add(best);
                 continue;
             }
-            NavResult r = navigator.goTo(goal).get(3, TimeUnit.MINUTES);
+            NavResult r = go(goal).get(3, TimeUnit.MINUTES);
             if (!live(id)) {
                 break;
             }
@@ -1173,7 +1230,7 @@ public final class WorkerImpl implements Worker {
             }
             tried.add(st.cell());
             if (!st.here()) {
-                NavResult r = navigator.goTo(Goal.at(st.cell())).get(3, TimeUnit.MINUTES);
+                NavResult r = go(Goal.at(st.cell())).get(3, TimeUnit.MINUTES);
                 if (!live(id)) {
                     return Outcome.INTERRUPTED;
                 }
@@ -1187,7 +1244,7 @@ public final class WorkerImpl implements Worker {
             }
             Vec3 eye = eye();
             double d = eye == null ? 1 : Math.sqrt(distSq(eye, st.aim()));
-            movement.face(st.aim(), Math.max(Movement.FACE_WITHIN, Math.atan(0.2 / Math.max(d, 0.5))))
+            faceNow(st.aim(), Math.max(Movement.FACE_WITHIN, Math.atan(0.2 / Math.max(d, 0.5))))
                     .get(2, TimeUnit.SECONDS);
             interactions.placeOnBlock(st.against(), st.face(), rotation).get(10, TimeUnit.SECONDS);
             for (long waited = 0; waited < PLACE_WAIT_MS; waited += 50) {
@@ -1247,7 +1304,7 @@ public final class WorkerImpl implements Worker {
                 return Outcome.NO_ITEM;
             }
             // Look down at the top of the block under the feet, then jump and hold it.
-            movement.face(new Vec3(under.x() + 0.5, under.y() + 1.0, under.z() + 0.5), Math.toRadians(8))
+            faceNow(new Vec3(under.x() + 0.5, under.y() + 1.0, under.z() + 0.5), Math.toRadians(8))
                     .get(2, TimeUnit.SECONDS);
             Movement.State st = movement.state();
             movement.hold(new Movement.Controls(0, 0, st.yaw(), st.pitch(), true, false, false, false, false));
@@ -1348,7 +1405,7 @@ public final class WorkerImpl implements Worker {
             return Outcome.NO_PLACE;
         }
         if (!bestHere) {
-            NavResult nav = navigator.goTo(Goal.at(best)).get(3, TimeUnit.MINUTES);
+            NavResult nav = go(Goal.at(best)).get(3, TimeUnit.MINUTES);
             if (!live(id)) {
                 return Outcome.INTERRUPTED;
             }
@@ -1362,7 +1419,7 @@ public final class WorkerImpl implements Worker {
         Vec3 eye = eye();
         double d = eye == null ? 1 : Math.sqrt(distSq(eye, aim));
         // The server takes the fluid its own ray from the eyes along the look meets: onto the middle.
-        movement.face(aim, Math.max(Movement.FACE_WITHIN, Math.atan(0.15 / Math.max(d, 0.5)))).get(2, TimeUnit.SECONDS);
+        faceNow(aim, Math.max(Movement.FACE_WITHIN, Math.atan(0.15 / Math.max(d, 0.5)))).get(2, TimeUnit.SECONDS);
         Thread.sleep(100);
         // The right button in the open air: the server's own ray along the look finds the fluid.
         interactions.useItem().get(10, TimeUnit.SECONDS);
@@ -1404,7 +1461,7 @@ public final class WorkerImpl implements Worker {
                 return i == 0 ? Outcome.NOTHING : Outcome.BROKEN;
             }
             equip(under, new Rules(Access.ANY, Tools.BEST));
-            movement.face(new Vec3(under.x() + 0.5, under.y() + 1.0, under.z() + 0.5), Math.toRadians(8))
+            faceNow(new Vec3(under.x() + 0.5, under.y() + 1.0, under.z() + 0.5), Math.toRadians(8))
                     .get(2, TimeUnit.SECONDS);
             if (!breakOne(under)) {
                 return Outcome.WOULD_NOT_BREAK;
@@ -1613,12 +1670,12 @@ public final class WorkerImpl implements Worker {
         double reach = Math.max(1.0, interactions.useReach(player == null ? null : player.heldItem())
                 .orElse(DEFAULT_REACH) - REACH_MARGIN);
         if (distSq(eye, centre(chest)) > reach * reach) {
-            NavResult r = navigator.goTo(Goal.near(chest, 2)).get(3, TimeUnit.MINUTES);
+            NavResult r = go(Goal.near(chest, 2)).get(3, TimeUnit.MINUTES);
             if (!live(id) || r.status() != NavResult.Status.ARRIVED) {
                 return -1;
             }
         }
-        movement.face(chest).get(2, TimeUnit.SECONDS);
+        faceNow(chest).get(2, TimeUnit.SECONDS);
         int window = containers.windowAt(chest);
         if (window < 0) {
             containers.reaching(chest);

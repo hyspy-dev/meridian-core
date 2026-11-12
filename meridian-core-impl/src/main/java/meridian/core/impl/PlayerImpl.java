@@ -206,6 +206,30 @@ final class PlayerImpl implements Player {
     }
 
     @Override
+    public int bestWeaponSlot(java.util.function.Predicate<String> among) {
+        int best = -1;
+        double bestScore = Double.NEGATIVE_INFINITY;
+        for (Map.Entry<Integer, String> e : new java.util.TreeMap<>(inventory.hotbarItems()).entrySet()) {
+            String id = e.getValue();
+            ItemBase item = items.item(id).orElse(null);
+            if (item == null || item.weapon == null || (among != null && !among.test(id))
+                    || inventory.hotbarBroken(e.getKey())) {
+                continue;
+            }
+            java.util.OptionalDouble reach = interactions.hitReach(id);
+            if (reach.isEmpty()) {
+                continue;     // a bow, a shield: no swing that hits
+            }
+            double score = item.itemLevel * 100.0 + item.qualityIndex + reach.getAsDouble();
+            if (score > bestScore) {
+                bestScore = score;
+                best = e.getKey();
+            }
+        }
+        return best;
+    }
+
+    @Override
     public double toolPower(int slot, BlockView block) {
         BlockBreaking breaking = breaking(block);
         if (breaking == null) {

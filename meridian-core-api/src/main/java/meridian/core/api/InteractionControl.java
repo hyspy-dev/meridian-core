@@ -283,6 +283,70 @@ public interface InteractionControl {
         return CompletableFuture.failedFuture(new UnsupportedOperationException("swing(hold)"));
     }
 
+    /**
+     * How far from the eyes a swing of this item hits an entity: the far end of the shape its
+     * {@code Primary} swing sweeps (the server's selector - a sword's 2.75), the farthest of its
+     * swings, followed through the item's own interaction variables. A player's swing lands within
+     * it; the server takes a hit up to the item's use distance and 2 more, but a hit from beyond
+     * the swing is no player's. An empty or {@code null} item is the bare hand.
+     *
+     * @return the reach; empty for an item whose swing hits no entity (a bow, a block), or one core
+     *         does not know
+     */
+    default java.util.OptionalDouble hitReach(String itemId) {
+        return java.util.OptionalDouble.empty();
+    }
+
+    /**
+     * Whether this item guards: its {@code Secondary}, held, raises a guard that takes or turns aside
+     * a blow from the front (a sword's, a shield's, a spear's block) - a wield that changes the damage
+     * taken. {@link #useItem(Duration)} holds it.
+     */
+    default boolean guards(String itemId) {
+        return false;
+    }
+
+    /**
+     * What a use of an item does for the player's health.
+     *
+     * @param now      health given at once, in points
+     * @param overTime health given over the next {@code seconds}, in points
+     * @param seconds  how long the slow part lasts; {@code 0} when there is none
+     */
+    record Heal(double now, double overTime, double seconds) {
+
+        public double total() {
+            return now + overTime;
+        }
+    }
+
+    /**
+     * What a use ({@code Secondary}) of this item does for the player's health, by the server's own
+     * effects and stat changes for it - a potion's, a bread's - a percentage of the max counted by
+     * the player's own max health.
+     *
+     * @return the heal; empty for an item whose use heals nothing, or one core does not know
+     */
+    default java.util.Optional<Heal> heal(String itemId) {
+        return java.util.Optional.empty();
+    }
+
+    /**
+     * Repairs an item as a player does with a repair kit: takes a kit from the hotbar (an item of
+     * the {@code Repair_Kit} set), uses it - the server then shows its list of worn items - and
+     * picks the most worn one with this id from that list; the server uses up one kit and gives the
+     * item back its durability, under a lower maximum. The slot in hand before is taken again after.
+     *
+     * <p>A game's player sees the list come up and go again; for a headless one core answers the
+     * list as a client does.
+     *
+     * @return whether the server repaired it; {@code false} with no kit in the hotbar, nothing of the
+     *         item worn, or the server refusing it
+     */
+    default CompletableFuture<Boolean> repair(String itemId) {
+        return CompletableFuture.completedFuture(false);
+    }
+
     /** {@code true} once a client session is live and packets can be sent. */
     boolean available();
 }
