@@ -143,6 +143,29 @@ public final class WorkerImpl implements Worker {
     }
 
     @Override
+    public boolean digsFromHere(BlockPos target, Access access, Tools tools) {
+        if (target == null || !world.known(target.x(), target.y(), target.z())) {
+            return false;
+        }
+        Block b = world.blockAt(target.x(), target.y(), target.z());
+        if (b.isAir() || nearLava(target)) {
+            return false;
+        }
+        Rules rules = new Rules(access == null ? Access.ANY : access, tools == null ? Tools.BEST : tools);
+        // The tool dig would take, without taking it: its reach is the one the place is chosen by.
+        Player player = world.player().orElse(null);
+        String item = null;
+        if (player != null) {
+            int slot = toolFor(player, target, b.type(), rules);
+            item = slot >= 0 ? player.hotbarItem(slot) : player.heldItem();
+        }
+        double reach = Math.max(1.0, interactions.digReach(item).orElse(interactions.useReach(item).orElse(DEFAULT_REACH))
+                - REACH_MARGIN);
+        Stand s = stand(rules.access(), target, new HashSet<>(), reach);
+        return s != null && s.here();
+    }
+
+    @Override
     public CompletableFuture<Integer> pickUp(BlockBox area) {
         if (area == null) {
             return CompletableFuture.completedFuture(0);

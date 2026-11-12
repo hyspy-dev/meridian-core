@@ -120,6 +120,16 @@ public interface Worker {
     CompletableFuture<Dug> dig(BlockPos target, Access access, Tools tools);
 
     /**
+     * Whether {@link #dig(BlockPos, Access, Tools)} would break the block at {@code target} from
+     * where the body stands now: with the tool it would take for it, the place it would pick is this
+     * one - no step to another. {@code false} when it would walk somewhere first, when there is no
+     * place to break it from, and when the block is not there. Nothing is done: no slot is changed.
+     */
+    default boolean digsFromHere(BlockPos target, Access access, Tools tools) {
+        return false;
+    }
+
+    /**
      * Puts items into the container at {@code chest} - a chest, a barrel: walks to within reach,
      * opens it, moves the stacks in from the hotbar, the storage and the backpack as a shift-click
      * does, and closes it. What does not fit stays with the player.
