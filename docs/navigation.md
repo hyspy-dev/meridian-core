@@ -36,6 +36,9 @@ So nobody yanks the body from anyone else:
 - One dig, or one round of picking up, holds it while it lasts.
 - A job of many blocks holds it from start to end, so the body stays held between blocks.
 - A hold that ends sees why through `Wheel.released()`.
+- An **urgent hold** (`Movement.takeFirst`) holds back what the other holds had going, without
+  ending it: a trip waits where the body is, a dig waits between its swings and steps. It goes on
+  once the last urgent hold is given back - see [combat.md](combat.md#urgent-holds-movementtakefirst).
 
 ## How a way is found
 
@@ -100,7 +103,11 @@ So nobody yanks the body from anyone else:
 - **Looking again.** A move that goes wrong, or a way that only got nearer, means a new search from
   where the body is. A trip gives up after 12 such searches, or when a partial way gets no nearer
   than the one before.
-- **One trip at a time.** A new `goTo` ends the trip under way.
+- **One trip at a time.** A new `goTo` ends the trip under way - unless an urgent hold holds that
+  one back: then it waits and goes on after. Cancelling the future of a trip ends that trip only;
+  `Navigator.cancel()` ends every trip, those that wait too.
+- **A chase** (`Navigator.chase`) goes after something that moves, the way found again as it moves
+  off the place the way was found to, done once near enough - see [combat.md](combat.md#a-chase-navigatorchase).
 - **The head.** It turns the way a player's does with a mouse: fast while it is far from where it
   wants to look, slowing as it gets there, at most 9° a tick. It looks at the way 2 blocks ahead of
   the body, so near a corner it starts turning toward the next move before the corner. The keys go
@@ -255,6 +262,7 @@ nav <conn> take|deposit <x y z> <item> <n>   -> Worker.take / Worker.deposit
 nav <conn> pillar <item> <blocks>            -> Worker.pillarUp
 nav <conn> down <blocks>                     -> Worker.pillarDown
 nav <conn> pour|scoop <x y z> <item>         -> Worker.pour / Worker.scoop
+nav <conn> chase <entity> [within] -> Navigator.chase: {status, at, moves, replans}
 nav <conn> cancel                  -> ends the trip and the work under way
 core <conn> placeat <x y z> [face] -> the held block into an empty cell (World.placeAt)
 core <conn> chest <x y z>          -> what core last saw in that container, and which was opened last

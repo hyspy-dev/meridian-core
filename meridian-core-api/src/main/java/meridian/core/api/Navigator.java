@@ -13,8 +13,9 @@ import java.util.concurrent.CompletableFuture;
  * turns out blocked (the world changed), it looks again from where the player stands. It gives up
  * when no way is left, or after too many tries.
  *
- * <p>One trip at a time: a new {@link #goTo} ends the one under way. The service is core's; a module
- * takes it from the service registry.
+ * <p>One trip at a time: a new {@link #goTo} (or {@link #chase}) ends the one under way - unless an
+ * urgent hold ({@link Movement#takeFirst}) holds that one back: then it waits, and goes on after.
+ * The service is core's; a module takes it from the service registry.
  */
 public interface Navigator {
 
@@ -31,8 +32,40 @@ public interface Navigator {
      * ({@link Movement#take}), given back at its end, so a module that holds it too keeps it. The
      * game taking it back (a key that moves the player, the server's teleport, a death) ends the
      * trip {@code INTERRUPTED}.
+     *
+     * <p>Cancelling the returned future ends this trip, and only this one; {@link #cancel} ends every
+     * trip, those held back by an urgent hold too ({@link Movement#takeFirst}). A trip begun while
+     * one held back waits does not end it: that one goes on once the urgent hold is given back.
      */
     CompletableFuture<NavResult> goTo(Goal goal);
+
+    /**
+     * Goes after something that moves - a mob, a player - to within {@code within} of it: within that
+     * many blocks of where {@code target} says it is, across, and no more than {@code within} (at
+     * least 1.5) up or down. The way is found to where it is, and found again whenever it has moved
+     * off the place the way was found to; the trip is done as soon as the body is near enough,
+     * wherever along the way that is. The body is held for it as for {@link #goTo}.
+     *
+     * <p>The trip goes on as long as the target moves on, until it is caught up with, no way is left
+     * to it ({@code NO_PATH}), or {@code target} has no place for it any more - gone from sight, dead
+     * ({@code INTERRUPTED}). Cancelling the returned future ends this trip only, as it does
+     * {@link #goTo}'s.
+     *
+     * <p>A core too old to chase goes once to where the target is now.
+     *
+     * @param target where the target is now, asked again as the trip goes; empty once it is gone
+     * @param within how near is near enough, in blocks
+     */
+    default CompletableFuture<NavResult> chase(java.util.function.Supplier<java.util.Optional<Vec3>> target,
+                                               double within) {
+        java.util.Optional<Vec3> at = target == null ? java.util.Optional.empty() : target.get();
+        if (at.isEmpty()) {
+            return CompletableFuture.completedFuture(new NavResult(NavResult.Status.INTERRUPTED, null, 0, 0));
+        }
+        Vec3 p = at.get();
+        return goTo(Goal.near(new BlockPos((int) Math.floor(p.x()), (int) Math.floor(p.y() + 1e-3),
+                (int) Math.floor(p.z())), within));
+    }
 
     /** The way to {@code goal} as it is found now, without moving - for a look before going. */
     List<Step> plan(Goal goal);

@@ -63,6 +63,26 @@ public interface Movement {
         return java.util.Optional.empty();
     }
 
+    /**
+     * Takes the player's body as {@link #take} does, first: an urgent hold, for what cannot wait - a
+     * fight that comes to a player at work. While an urgent hold is held, core holds back what it was
+     * doing for the other holds, without ending it: the move under way stops, a trip of the
+     * {@link Navigator}'s waits where the body is, the {@link Worker}'s job waits between its swings
+     * and its steps (a job of the worker's begun meanwhile waits too). What else is started while it
+     * is held - by the urgent taker - runs. Once the last
+     * urgent hold is given back, what waited goes on from wherever the body is then (a trip finds
+     * its way again). The holds that waited are never given back for it, so the body does not go to
+     * the game in between.
+     *
+     * <p>The game taking the body back (a key, a teleport, a death, a world) ends the urgent hold as
+     * it ends every other. A core too old to know urgent holds takes an ordinary one.
+     *
+     * @return the urgent hold; empty when the body cannot be taken
+     */
+    default java.util.Optional<Wheel> takeFirst() {
+        return take();
+    }
+
     /** One taker's hold on the player's body ({@link #take}). */
     interface Wheel {
 

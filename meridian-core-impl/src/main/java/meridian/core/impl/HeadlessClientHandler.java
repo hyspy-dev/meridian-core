@@ -64,6 +64,8 @@ final class HeadlessClientHandler implements PacketHandler {
     private Position position;
     private Direction body;
     private Direction look;
+    /** Whether a page of the server's is up on the headless client, owed an acknowledgement on its close. */
+    private boolean pageUp;
 
     HeadlessClientHandler(EntityTrackerImpl pose) {
         this.pose = pose;
@@ -108,6 +110,16 @@ final class HeadlessClientHandler implements PacketHandler {
             log.info("meridian-core: headless {} - entity {}, ready for gameplay", client.username(), id.clientId);
         } else if (packet instanceof ClientTeleport teleport) {
             acknowledge(client, teleport);
+        } else if (packet instanceof meridian.protocol.packets.interface_.CustomPage) {
+            // A client acknowledges every page packet, and a SetPage while a page is up: the
+            // server takes no button press of a page until it has its acknowledgements.
+            client.sendAsClient(new meridian.protocol.packets.interface_.CustomPageEvent(
+                    meridian.protocol.packets.interface_.CustomPageEventType.Acknowledge, null));
+            pageUp = true;
+        } else if (packet instanceof meridian.protocol.packets.interface_.SetPage && pageUp) {
+            client.sendAsClient(new meridian.protocol.packets.interface_.CustomPageEvent(
+                    meridian.protocol.packets.interface_.CustomPageEventType.Acknowledge, null));
+            pageUp = false;
         }
         return Action.FORWARD;
     }

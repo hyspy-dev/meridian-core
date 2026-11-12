@@ -30,6 +30,7 @@ final class CoreCommands {
 
     static final String USAGE = "pos | block <x y z> | reach [item] | besttool <x y z> | placeat <x y z> [face] | chest <x y z> | known <x y z> | find <name-contains> [radius] [limit] | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
             + "use|plant|water <x y z> | hit|dig <x y z> [times] | break <x y z> [maxSwings] | place <x y z> [face] [orient] | "
+            + "hits [seconds] | swings [seconds] | fightitem [item] | repair <item> | urgent <seconds> | "
             + "entities [range] [players] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | dodge | assets | asset <path> | "
             + "movement | body | stand <x y z> | surface <x z> [wait <s>] | safe <x y z> [radius] | hurts <x y z> | move <walk|jump|mantle|drop|leap|swim|climb|fly> <x y z> [walk|run|sprint] | "
             + "predict <kind> <x y z> [gait] [trace] | hold <forward> <strafe> <yaw> [jump] [crouch] [sprint] [walk] [fly] | hold off | halt | "
@@ -78,6 +79,16 @@ final class CoreCommands {
             case "look" -> CompletableFuture.completedFuture(look());
             case "inv" -> CompletableFuture.completedFuture(inventory());
             case "stats" -> CompletableFuture.completedFuture(stats());
+            case "hits" -> CompletableFuture.completedFuture(hits(args));
+            case "swings" -> CompletableFuture.completedFuture(swings(args));
+            case "fightitem" -> CompletableFuture.completedFuture(fightItem(args));
+            case "repair" -> {
+                if (args.size() < 2) {
+                    throw new IllegalArgumentException("repair <item>");
+                }
+                yield interactions().repair(args.get(1)).thenApply(ok -> Map.of("repaired", ok));
+            }
+            case "urgent" -> urgent(args);
             case "spoof" -> CompletableFuture.completedFuture(spoof(args));
             case "assets" -> CompletableFuture.completedFuture(assets());
             case "movement" -> CompletableFuture.completedFuture(movement());
@@ -627,6 +638,8 @@ final class CoreCommands {
         }
         tracker.positionOf(id).ifPresent(p -> e.put("position", p));
         tracker.boundsOf(id).ifPresent(b -> e.put("box", b));
+        tracker.healthOf(id).ifPresent(h -> e.put("health", Map.of("value", h.value(), "max", h.max())));
+        tracker.heldItemOf(id).ifPresent(h -> e.put("held", h));
         if (tracker instanceof EntityTrackerImpl impl && !impl.interactionsOf(id).isEmpty()) {
             e.put("interactions", impl.interactionsOf(id));
         }
@@ -667,6 +680,80 @@ final class CoreCommands {
             return List.of(impl.describeRoot(rootId).split("\n"));
         }
         return "no forging VM here";
+    }
+
+    private meridian.core.api.Combat combat() {
+        return ctx.services().get(meridian.core.api.Combat.class)
+                .orElseThrow(() -> new IllegalStateException("no Combat service"));
+    }
+
+    /** {@code hits [seconds]}: the hits the player took, oldest first. */
+    private Object hits(List<String> args) {
+        java.time.Duration within = java.time.Duration.ofMillis((long) (1000 * (args.size() > 1
+                ? Double.parseDouble(args.get(1)) : 60)));
+        long now = System.currentTimeMillis();
+        List<Map<String, Object>> out = new java.util.ArrayList<>();
+        for (meridian.core.api.Combat.Hit h : combat().hits(within)) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("ago", (now - h.at()) / 1000.0);
+            m.put("attacker", h.attacker());
+            if (h.attacker() >= 0) {
+                m.put("label", entityTracker().labelOf(h.attacker()));
+            }
+            m.put("amount", h.amount());
+            m.put("cause", h.cause());
+            m.put("from", h.from());
+            out.add(m);
+        }
+        return out;
+    }
+
+    /** {@code swings [seconds]}: the attacks other entities began, oldest first. */
+    private Object swings(List<String> args) {
+        java.time.Duration within = java.time.Duration.ofMillis((long) (1000 * (args.size() > 1
+                ? Double.parseDouble(args.get(1)) : 60)));
+        long now = System.currentTimeMillis();
+        List<Map<String, Object>> out = new java.util.ArrayList<>();
+        for (meridian.core.api.Combat.Swing s : combat().swings(within)) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("ago", (now - s.at()) / 1000.0);
+            m.put("entity", s.entity());
+            m.put("label", entityTracker().labelOf(s.entity()));
+            m.put("type", s.type());
+            m.put("chain", s.chain());
+            out.add(m);
+        }
+        return out;
+    }
+
+    /** {@code fightitem [item]}: what an item (the held one) does in a fight. */
+    private Object fightItem(List<String> args) {
+        String item = args.size() > 1 ? args.get(1) : world().player().map(Player::heldItem).orElse(null);
+        InteractionControl hands = interactions();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("item", item);
+        java.util.OptionalDouble reach = hands.hitReach(item);
+        if (reach.isPresent()) {
+            out.put("hitReach", reach.getAsDouble());
+        }
+        out.put("guards", hands.guards(item));
+        hands.heal(item).ifPresent(h -> out.put("heal", Map.of("now", h.now(), "overTime", h.overTime(),
+                "seconds", h.seconds())));
+        world().player().ifPresent(p -> out.put("bestWeaponSlot", p.bestWeaponSlot()));
+        return out;
+    }
+
+    /** {@code urgent <seconds>}: an urgent hold on the body for that long - what it holds back waits. */
+    private CompletableFuture<?> urgent(List<String> args) {
+        double seconds = args.size() > 1 ? Double.parseDouble(args.get(1)) : 2;
+        meridian.core.api.Movement.Wheel w = movementService().takeFirst().orElse(null);
+        if (w == null) {
+            return CompletableFuture.completedFuture(Map.of("taken", false));
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            w.release();
+            return Map.of("taken", true, "held", seconds);
+        }, CompletableFuture.delayedExecutor((long) (seconds * 1000), java.util.concurrent.TimeUnit.MILLISECONDS));
     }
 
     private Object stats() {
