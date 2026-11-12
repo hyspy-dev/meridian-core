@@ -83,6 +83,23 @@ public interface Movement {
         return take();
     }
 
+    /**
+     * How many holds on the body ({@link #take}) are held now - a trip of the {@link Navigator}'s,
+     * the {@link Worker}'s job, a module's own job (a miner's, a builder's) - a headless session's as
+     * well as a game's. Not counted: urgent holds ({@link #takeFirst}), and the holds taken while one
+     * is held, which are the urgent taker's own work (its trips run, as {@link #takeFirst} says), not
+     * the work it holds back.
+     *
+     * <p>So a module that holds nothing itself tells by it whether another's job has the body - a job
+     * to guard - or the player plays by hand; and while it holds an urgent hold, whether the job it
+     * holds back is still there to give the body back to.
+     *
+     * @return the count; {@code -1} where core is too old to tell
+     */
+    default int holds() {
+        return -1;
+    }
+
     /** One taker's hold on the player's body ({@link #take}). */
     interface Wheel {
 

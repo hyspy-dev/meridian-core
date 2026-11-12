@@ -39,6 +39,9 @@ So nobody yanks the body from anyone else:
 - An **urgent hold** (`Movement.takeFirst`) holds back what the other holds had going, without
   ending it: a trip waits where the body is, a dig waits between its swings and steps. It goes on
   once the last urgent hold is given back - see [combat.md](combat.md#urgent-holds-movementtakefirst).
+- `Movement.holds()` counts the holds held now - a headless body's too - leaving out the urgent ones
+  and what their takers start under them: whether a job has the body, or the player plays by hand
+  ([combat.md](combat.md#who-has-the-body-movementholds)).
 
 ## How a way is found
 

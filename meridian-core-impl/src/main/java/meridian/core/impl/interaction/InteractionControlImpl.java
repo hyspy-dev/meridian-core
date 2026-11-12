@@ -89,16 +89,25 @@ public final class InteractionControlImpl implements InteractionControl {
      * A forge that started: when the queue may move on, and how the chain went. A forge that sent
      * nothing is done at once.
      */
-    private record Started(CompletableFuture<Void> localDone, CompletableFuture<InteractionOutcome> outcome) {
+    private record Started(CompletableFuture<Void> localDone, CompletableFuture<InteractionOutcome> outcome,
+                           ForgeRun run) {
         static final Started NOTHING = settled(InteractionOutcome.notSent());
 
         static Started of(ForgeRun run) {
-            return new Started(run.localDone(), run.outcome());
+            return new Started(run.localDone(), run.outcome(), run);
         }
 
         static Started settled(InteractionOutcome outcome) {
-            return new Started(CompletableFuture.completedFuture(null), CompletableFuture.completedFuture(outcome));
+            return new Started(CompletableFuture.completedFuture(null), CompletableFuture.completedFuture(outcome), null);
         }
+    }
+
+    /**
+     * How a forge is pressed: as one more in the queue, or now, cutting short the chain in flight
+     * where that chain's rules let a chain of its type interrupt it ({@link ChainRules}).
+     */
+    private record Press(InteractionType type, boolean now) {
+        static final Press QUEUED = new Press(null, false);
     }
 
     /** A unit of forging work on the serialized queue: builds the chain and starts playing it. */
@@ -238,11 +247,15 @@ public final class InteractionControlImpl implements InteractionControl {
      * The forge queue. core owns the chain-start cadence: forges run strictly
      * one at a time, each to completion, so two plugins (or one plugin's loop)
      * can never interleave packets and clobber each other's chains. A plugin
-     * just calls {@code block.water()} in a loop — the spacing is core's job.
+     * just calls {@code block.water()} in a loop — the spacing is core's job. One forge may cut the
+     * one in flight short instead of waiting for it: one pressed now ({@link Press}), as the game lets
+     * a guard cut a swing short - only where the rules of the chain in flight say so.
      */
     private final ArrayDeque<QueuedItem> forgeQueue = new ArrayDeque<>();
     /** {@code true} while a forge is in flight — guarded by {@code this}. */
     private boolean forging;
+    /** The run of the forge in flight, when it plays one; guarded by {@code this}. */
+    private ForgeRun inFlight;
 
     public InteractionControlImpl(InteractionRegistry registry, InventoryTracker inventory,
                                   ChunkTracker chunks, WorldStateImpl worldState,
@@ -1178,6 +1191,12 @@ public final class InteractionControlImpl implements InteractionControl {
     }
 
     @Override
+    public CompletableFuture<InteractionOutcome> useItem(Duration hold, boolean interrupt) {
+        return enqueueForge(() -> forgeAim(-1, InteractionType.Secondary, seconds(hold)),
+                interrupt ? new Press(InteractionType.Secondary, true) : Press.QUEUED);
+    }
+
+    @Override
     public CompletableFuture<InteractionOutcome> swing() {
         return enqueueForge(() -> forgeAim(-1, InteractionType.Primary));
     }
@@ -1544,13 +1563,44 @@ public final class InteractionControlImpl implements InteractionControl {
      * when the forge is <em>dequeued</em>, not here — so a queued slot-switch's
      * inventory mirror is in place before the forges behind it read it.
      */
-    private synchronized CompletableFuture<InteractionOutcome> enqueueForge(QueuedForge forge) {
+    private CompletableFuture<InteractionOutcome> enqueueForge(QueuedForge forge) {
+        return enqueueForge(forge, Press.QUEUED);
+    }
+
+    /**
+     * {@link #enqueueForge(QueuedForge)}, pressed as {@code press} says: a forge pressed now, with
+     * nothing else waiting, cuts the chain in flight short where that chain's rules let it - as the
+     * game cuts a swing short when the guard is raised in it - and starts at once.
+     */
+    private synchronized CompletableFuture<InteractionOutcome> enqueueForge(QueuedForge forge, Press press) {
         CompletableFuture<InteractionOutcome> done = new CompletableFuture<>();
         forgeQueue.addLast(new QueuedItem(forge, done));
         if (!forging) {
             runNextForge();
+        } else if (press.now() && forgeQueue.size() == 1) {
+            cutShort(press.type());
         }
         return done;
+    }
+
+    /**
+     * Cuts the chain in flight short for a chain of {@code type} pressed now, where its rules let
+     * that type interrupt it ({@link ChainRules}): the client's way - nothing more of it goes out,
+     * and the server, by the same rules, cancels it once the new chain comes in - provided the server
+     * still stands where the rules let it in ({@link ForgeRun#interruptedBy}). Called with the
+     * {@code this} monitor held.
+     */
+    private void cutShort(InteractionType type) {
+        ForgeRun run = inFlight;
+        if (run == null) {
+            return;
+        }
+        OptionalInt rootId = resolveRoot(type, handItem(type));
+        RootInteraction root = rootId.isPresent() ? registry.root(rootId.getAsInt()).orElse(null) : null;
+        if (run.interruptedBy(type, root, id -> registry.root(id).orElse(null))) {
+            log.info("meridian-core: a {} pressed now cuts forged {} chain {} short", type, run.type(), run.chainId());
+            run.interrupt();
+        }
     }
 
     /**
@@ -1565,6 +1615,7 @@ public final class InteractionControlImpl implements InteractionControl {
         QueuedItem next = forgeQueue.pollFirst();
         if (next == null) {
             forging = false;
+            inFlight = null;
             return;
         }
         forging = true;
@@ -1575,10 +1626,14 @@ public final class InteractionControlImpl implements InteractionControl {
             log.warn("meridian-core: queued forge failed", ex);
             started = Started.NOTHING;
         }
+        inFlight = started.run();
         started.outcome().whenComplete((outcome, error) ->
                 next.done().complete(outcome != null ? outcome : InteractionOutcome.notSent()));
-        // Even an instant chain occupies the tick its packet lands on.
-        started.localDone().whenComplete((v, error) -> nextForgeIn(Duration.ofNanos(ForgeRun.TICK_NANOS)));
+        // Even an instant chain occupies the tick its packet lands on - but one cut short by the
+        // forge pressed over it lets that one go out at once, as the client sends it.
+        ForgeRun run = started.run();
+        started.localDone().whenComplete((v, error) -> nextForgeIn(run != null && run.wasInterrupted()
+                ? Duration.ZERO : Duration.ofNanos(ForgeRun.TICK_NANOS)));
     }
 
     private void nextForgeIn(Duration delay) {

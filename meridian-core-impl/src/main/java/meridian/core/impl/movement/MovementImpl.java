@@ -289,6 +289,19 @@ public final class MovementImpl implements Movement {
 
     @Override
     public java.util.Optional<Movement.Wheel> take() {
+        return hold().map(inner -> {
+            Counted c = new Counted(inner, urgency.stamp());
+            counted.add(c);
+            if (inner != headlessWheel) {
+                // The game took the body (a key, a teleport, a death, a world): this hold is gone.
+                inner.released().thenRun(() -> counted.remove(c));
+            }
+            return c;
+        });
+    }
+
+    /** A hold on the body, uncounted: a headless session's, or one of the game's body. */
+    private java.util.Optional<Movement.Wheel> hold() {
         if (around.settings() == null) {
             return java.util.Optional.empty();
         }
@@ -296,6 +309,52 @@ public final class MovementImpl implements Movement {
             return body.placed() ? java.util.Optional.of(headlessWheel) : java.util.Optional.empty();
         }
         return game.take();
+    }
+
+    /** The ordinary holds not given back yet ({@link #holds}). */
+    private final Set<Counted> counted = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    @Override
+    public int holds() {
+        int n = 0;
+        for (Counted c : counted) {
+            // Taken while an urgent hold is held: the urgent taker's own work, not what it holds back.
+            if (c.inner.held() && (!urgency.active() || urgency.holdsBack(c.born))) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /**
+     * An ordinary hold, counted until its taker gives it back or the game takes the body. It holds
+     * as the hold under it does - a headless session's is held until the session ends.
+     */
+    private final class Counted implements Movement.Wheel {
+        final Movement.Wheel inner;
+        /** When it was taken, by core's urgency clock. */
+        final long born;
+
+        Counted(Movement.Wheel inner, long born) {
+            this.inner = inner;
+            this.born = born;
+        }
+
+        @Override
+        public boolean held() {
+            return inner.held();
+        }
+
+        @Override
+        public void release() {
+            counted.remove(this);
+            inner.release();
+        }
+
+        @Override
+        public CompletableFuture<Movement.Release> released() {
+            return inner.released();
+        }
     }
 
     /**
@@ -308,7 +367,7 @@ public final class MovementImpl implements Movement {
 
     @Override
     public java.util.Optional<Movement.Wheel> takeFirst() {
-        java.util.Optional<Movement.Wheel> taken = take();
+        java.util.Optional<Movement.Wheel> taken = hold();
         if (taken.isEmpty()) {
             return taken;
         }
