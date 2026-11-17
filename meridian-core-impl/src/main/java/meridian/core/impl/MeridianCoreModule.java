@@ -483,12 +483,23 @@ public class MeridianCoreModule implements ProxyModule {
                 .liveText("No-clip", () -> noClip.isEnabled() ? "on (client-side)" : "off");
         // --- end 0.6+ only ----------------------------------------------------------
 
+        // Players' names starred in what reaches the game (registered last, below).
+        Anonymizer anonymizer = new Anonymizer(playerState::name, entityTracker::isPlayer);
+        settings.bool("anonymize", "Anonymise players (names as stars, own included)", false,
+                anonymizer::setEnabled);
+        settings.persistent("anonymize");
+
         settings.section("Go to a point", navigation.section());
         ctx.registerSettings(settings.build());
 
         // The services above on the proxy's command channel: core <conn> ..., for driving and
         // checking the forged chains from outside the game.
-        CoreCommands.register(ctx, sessionHolder);
+        CoreCommands.register(ctx, sessionHolder, anonymizer);
+
+        // Last of core's handlers, at MONITOR: core's readers - the entity tracker among them, which
+        // watches at MONITOR - have seen the real names by then, and only what goes on to the game
+        // is starred. A module's MONITOR handler, registered after core, sees the stars.
+        ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR, (direction, session) -> anonymizer.handler());
 
         ctx.getLogger().info("meridian-core ready (WorldState, EntityTracker, CameraControl, "
                 + "InteractionRegistry, InventoryTracker, ChunkTracker, ItemRegistry, "

@@ -43,16 +43,18 @@ final class CoreCommands {
 
     private final ModuleContext ctx;
     private final SessionHolder sessions;
+    private final Anonymizer anonymizer;
 
-    private CoreCommands(ModuleContext ctx, SessionHolder sessions) {
+    private CoreCommands(ModuleContext ctx, SessionHolder sessions, Anonymizer anonymizer) {
         this.ctx = ctx;
         this.sessions = sessions;
+        this.anonymizer = anonymizer;
     }
 
     /** Offers the commands; a proxy without a command channel - or too old to have one - has none. */
-    static void register(ModuleContext ctx, SessionHolder sessions) {
+    static void register(ModuleContext ctx, SessionHolder sessions, Anonymizer anonymizer) {
         try {
-            CoreCommands c = new CoreCommands(ctx, sessions);
+            CoreCommands c = new CoreCommands(ctx, sessions, anonymizer);
             ctx.registerCommand("core", USAGE, c::run);
         } catch (NoSuchMethodError olderProxy) {
             // no command channel there
@@ -80,6 +82,7 @@ final class CoreCommands {
             case "look" -> CompletableFuture.completedFuture(look());
             case "inv" -> CompletableFuture.completedFuture(inventory());
             case "stats" -> CompletableFuture.completedFuture(stats());
+            case "anon" -> CompletableFuture.completedFuture(anon(args));
             case "hits" -> CompletableFuture.completedFuture(hits(args));
             case "swings" -> CompletableFuture.completedFuture(swings(args));
             case "fightitem" -> CompletableFuture.completedFuture(fightItem(args));
@@ -809,6 +812,18 @@ final class CoreCommands {
                     out.put("healthAfter", entityTracker().healthOf(id).map(h -> (Object) h.value()).orElse("unknown"));
                     return out;
                 });
+    }
+
+    /** {@code anon [on|off]}: "Anonymise players" switched, and the names known; {@code anon star <text>} starred. */
+    private Object anon(List<String> args) {
+        Anonymizer a = anonymizer;
+        if (args.size() >= 2 && args.get(1).equalsIgnoreCase("star")) {
+            return Map.of("text", a.star(String.join(" ", args.subList(2, args.size()))));
+        }
+        if (args.size() >= 2) {
+            a.setEnabled(args.get(1).equalsIgnoreCase("on") || args.get(1).equalsIgnoreCase("true"));
+        }
+        return Map.of("enabled", a.isEnabled(), "names", new java.util.TreeSet<>(a.names()));
     }
 
     private Object stats() {
