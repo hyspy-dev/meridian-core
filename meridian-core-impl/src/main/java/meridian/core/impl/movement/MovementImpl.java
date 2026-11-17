@@ -424,6 +424,19 @@ public final class MovementImpl implements Movement {
     }
 
     @Override
+    public boolean flightOn() {
+        return flightOn.getAsBoolean();
+    }
+
+    /** Where flight being switched on is read from - client-control's Fly, through core's ClientSpoof. */
+    public void flightOn(java.util.function.BooleanSupplier on) {
+        this.flightOn = on == null ? () -> true : on;
+        physics.flightOn = this.flightOn;
+    }
+
+    private volatile java.util.function.BooleanSupplier flightOn = () -> true;
+
+    @Override
     public Capabilities capabilities() {
         return reach.capabilities();
     }

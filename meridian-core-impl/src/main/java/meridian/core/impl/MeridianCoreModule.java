@@ -241,6 +241,8 @@ public class MeridianCoreModule implements ProxyModule {
                 () -> entityTracker.localPosition().orElse(null),
                 entityTracker::localEntityId, entityTracker::effectsOf, clientTeleports);
         ctx.services().provide(meridian.core.api.Movement.class, movement);
+        // A trip flies only with flight switched on (client-control's Fly): in creative it walks.
+        movement.flightOn(clientSpoof::flight);
         movementRef[0] = movement;
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY, (direction, session) -> movement.observer());
         // Last on the client side: what actually goes out - a teleport's answer, core's own teleport.

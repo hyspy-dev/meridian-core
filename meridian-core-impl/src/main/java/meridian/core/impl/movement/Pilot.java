@@ -207,17 +207,23 @@ final class Pilot {
         boolean walk = gait == Gait.WALK;
         return switch (move.kind()) {
             case WALK -> new Controls(key(forward(s, flat)), 0, yaw, 0, riseJump(s) || heldJump(s), false,
-                    sprint && !back, walk, s.flying);
+                    sprint && !back, walk, keepFlying(s));
             case DROP -> new Controls(key(forward(s, flat)), 0, yaw, 0, false, false, sprint && s.onGround && !back,
-                    walk, s.flying);
+                    walk, keepFlying(s));
             case JUMP -> jump(s, yaw, flat, dy, sprint, walk);
             case LEAP -> leap(s, yaw, flat, sprint || gait == Gait.RUN);
             case MANTLE -> mantle(s, yaw, flat, dy);
             case SWIM -> swim(s, yaw, flat, dy);
             case CLIMB -> climb(s, yaw, flat, dy);
-            case FLY -> new Controls(flat > 0.3 ? Math.min(1, flat) : 0, 0, yaw, 0, dy > 0.25, dy < -0.25, sprint, false,
-                    true);
+            // Down to a point is down until it - onto the ground under it, where the trip ends standing.
+            case FLY -> new Controls(flat > 0.3 ? Math.min(1, flat) : 0, 0, yaw, 0, dy > 0.25,
+                    dy < -0.25 || (flat < 0.3 && dy < -0.02 && !s.onGround), sprint, false, true);
         };
+    }
+
+    /** A move afoot keeps a flight under way only while flight is switched on: off, the body comes down. */
+    private boolean keepFlying(BodyState s) {
+        return s.flying && physics.flightOn.getAsBoolean();
     }
 
     /**
@@ -412,7 +418,8 @@ final class Pilot {
             return true;
         }
         return switch (move.kind()) {
-            case FLY -> dist < (through ? 0.6 : 0.35);
+            // The last of a flight is over standing on the point - not hovering over it: a trip ends on its feet.
+            case FLY -> through ? dist < 0.6 : dist < 0.35 && (dy > -0.05 || s.onGround);
             // In the water near is enough; out of it, onto a bank, the body has to have come down.
             // On a bank it has to have stopped, as on any ground: a jump out lands still moving.
             case SWIM -> (s.inFluid && !s.onGround && dist < 0.6) || (s.onGround && flat < near && Math.abs(dy) < 0.6
