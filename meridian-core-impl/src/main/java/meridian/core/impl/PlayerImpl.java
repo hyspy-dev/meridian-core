@@ -231,6 +231,12 @@ final class PlayerImpl implements Player {
     }
 
     @Override
+    public boolean placesBlock(String itemId) {
+        ItemBase item = itemId == null ? null : items.item(itemId).orElse(null);
+        return item != null && item.blockId > 0 && !item.consumable && item.tool == null && item.weapon == null;
+    }
+
+    @Override
     public double toolPower(int slot, BlockView block) {
         BlockBreaking breaking = breaking(block);
         if (breaking == null) {
