@@ -172,4 +172,13 @@ public interface Player {
 
     /** Stops a {@link #holdPosition} hold; the player's real position is reported again. */
     void clearHold();
+
+    /**
+     * Whether the item is a block of the world - one it places as a block (the server gives it a
+     * block type) that is no food or potion, no tool and no weapon: building stuff, not gear. A core
+     * too old to tell: no.
+     */
+    default boolean placesBlock(String itemId) {
+        return false;
+    }
 }
