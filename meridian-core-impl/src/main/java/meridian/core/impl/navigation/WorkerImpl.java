@@ -105,6 +105,14 @@ public final class WorkerImpl implements Worker {
     private volatile CompletableFuture<?> breaking;
     /** Core's urgent holds: a job begun before one waits while it is held ({@link Movement#takeFirst}). */
     private final meridian.core.impl.movement.Urgency urgency;
+    /** The game's items, for a tool's break shape ({@link #shapeCells}); {@code null}: none known. */
+    private volatile java.util.function.Function<String, java.util.Optional<meridian.protocol.ItemBase>> items;
+
+    /** The game's items, by id: a tool's break shape is read from them. */
+    public void items(java.util.function.Function<String, java.util.Optional<meridian.protocol.ItemBase>> items) {
+        this.items = items;
+    }
+
     /** The stamp of the job the calling thread runs ({@link #held}); {@code null} off a job's thread. */
     private static final ThreadLocal<Long> BORN = new ThreadLocal<>();
 
@@ -615,11 +623,105 @@ public final class WorkerImpl implements Worker {
             log.info("meridian-core: {} is out of reach ({})", text(pos), String.format(Locale.ROOT, "%.1f", reach));
             return false;
         }
+        // A tool with a break shape (a drill) breaks the cells round the one aimed at too: what of
+        // them is there now is reported broken with it once gone - the drops lie there as well.
+        Player player = world.player().orElse(null);
+        List<BlockPos> shape = player == null ? null : shapeCells(player.heldItem(), pos, eye);
+        List<BlockPos> there = new ArrayList<>();
+        if (shape != null) {
+            for (BlockPos c : shape) {
+                if (!c.equals(pos) && world.known(c.x(), c.y(), c.z()) && !world.blockAt(c.x(), c.y(), c.z()).isAir()) {
+                    there.add(c);
+                }
+            }
+        }
         if (!breakOne(pos)) {
             return false;
         }
         broken.add(pos);
+        if (!there.isEmpty()) {
+            long until = System.currentTimeMillis() + SHAPE_SETTLE_MS;
+            List<BlockPos> waiting = new ArrayList<>(there);
+            while (true) {
+                waiting.removeIf(c -> {
+                    if (world.blockAt(c.x(), c.y(), c.z()).isAir()) {
+                        broken.add(c);
+                        return true;
+                    }
+                    return false;
+                });
+                if (waiting.isEmpty() || System.currentTimeMillis() > until) {
+                    break;
+                }
+                Thread.sleep(25);
+            }
+        }
         return true;
+    }
+
+    /** How long the cells of a swing's break shape are waited for, after the one aimed at went. */
+    static final long SHAPE_SETTLE_MS = 300;
+
+    /**
+     * The cells a swing with {@code itemId} at {@code target} breaks, looked at from {@code eye}: the
+     * item's box break shape laid out as the server lays it ({@code BreakShape.forEachBlock}, the
+     * View orientation - the look's main axis forward, up the screen's up, right across, the shape
+     * shifted off the block aimed at by its offset). {@code null} for a tool without one (it breaks
+     * the one block) or a shape core does not lay out (a cylinder, the Surface orientation).
+     */
+    List<BlockPos> shapeCells(String itemId, BlockPos target, Vec3 eye) {
+        var lookup = items;
+        if (itemId == null || lookup == null || eye == null) {
+            return null;
+        }
+        meridian.protocol.ItemBase item = lookup.apply(itemId).orElse(null);
+        if (item == null || item.tool == null
+                || !(item.tool.breakShape instanceof meridian.protocol.BoxBreakShape box)
+                || box.orientation != meridian.protocol.BreakShapeOrientation.View) {
+            return null;
+        }
+        double dx = target.x() + 0.5 - eye.x();
+        double dy = target.y() + 0.5 - eye.y();
+        double dz = target.z() + 0.5 - eye.z();
+        int[] f = new int[3];
+        int[] u = new int[3];
+        double ax = Math.abs(dx);
+        double ay = Math.abs(dy);
+        double az = Math.abs(dz);
+        if (ay >= ax && ay >= az) {
+            f[1] = dy >= 0 ? 1 : -1;
+            int sign = f[1] > 0 ? -1 : 1;           // verticalUp
+            if (ax >= az) {
+                u[0] = dx >= 0 ? sign : -sign;
+            } else {
+                u[2] = dz >= 0 ? sign : -sign;
+            }
+        } else if (ax >= az) {
+            f[0] = dx >= 0 ? 1 : -1;
+            u[1] = 1;
+        } else {
+            f[2] = dz >= 0 ? 1 : -1;
+            u[1] = 1;
+        }
+        int[] r = {u[1] * f[2] - u[2] * f[1], u[2] * f[0] - u[0] * f[2], u[0] * f[1] - u[1] * f[0]};
+        int ox = box.offset == null ? 0 : Math.round(box.offset.x());
+        int oy = box.offset == null ? 0 : Math.round(box.offset.y());
+        int oz = box.offset == null ? 0 : Math.round(box.offset.z());
+        int bx = target.x() + r[0] * ox + u[0] * oy + f[0] * oz;
+        int by = target.y() + r[1] * ox + u[1] * oy + f[1] * oz;
+        int bz = target.z() + r[2] * ox + u[2] * oy + f[2] * oz;
+        int uLow = box.centered ? -((box.width - 1) / 2) : 0;
+        int vLow = box.centered ? -((box.height - 1) / 2) : 0;
+        List<BlockPos> out = new ArrayList<>();
+        for (int w = 0; w < box.depth; w++) {
+            for (int a = uLow; a < uLow + box.width; a++) {
+                for (int v = vLow; v < vLow + box.height; v++) {
+                    out.add(new BlockPos(bx + r[0] * a + u[0] * v + f[0] * w, by + r[1] * a + u[1] * v + f[1] * w,
+                            bz + r[2] * a + u[2] * v + f[2] * w));
+                }
+            }
+        }
+        return out;
     }
 
     /**
@@ -646,11 +748,24 @@ public final class WorkerImpl implements Worker {
      */
     private int toolFor(Player player, BlockPos pos, BlockView type, Rules rules) {
         BlockBox within = rules.access().within();
-        java.util.function.Predicate<String> safe = id -> within == null || !interactions.digSweeps(id)
-                || !spills(player, id, pos, within);
-        String part = type == null || type.gatherType() == null ? null : rules.tools().prefer().get(type.gatherType());
+        java.util.function.Predicate<String> safe = id -> within == null
+                || ((!interactions.digSweeps(id) || !spills(player, id, pos, within)) && !shapeSpills(id, pos, within));
+        String part = type == null || type.gatherType() == null ? null
+                : rules.tools().prefer().getOrDefault(type.gatherType(), rules.tools().prefer().get("*"));
         if (part != null) {
             int slot = player.bestToolSlot(type, id -> id.contains(part) && safe.test(id));
+            // A tool with a break shape is worth it while what it takes a swing - its power times the
+            // cells of the shape it breaks - is at least the best single tool's: a drill on rock,
+            // not on the hardest ores, where a pickaxe goes faster.
+            int best = player.bestToolSlot(type, safe);
+            if (slot >= 0 && best >= 0 && best != slot) {
+                List<BlockPos> shape = shapeCells(player.hotbarItem(slot), pos, eye());
+                int cells = shape == null ? 1 : (int) shape.stream().filter(c -> c.equals(pos)
+                        || (world.known(c.x(), c.y(), c.z()) && !world.blockAt(c.x(), c.y(), c.z()).isAir())).count();
+                if (shape != null && player.toolPower(slot, type) * Math.max(1, cells) < player.toolPower(best, type)) {
+                    slot = -1;
+                }
+            }
             if (slot >= 0) {
                 return slot;
             }
@@ -666,6 +781,29 @@ public final class WorkerImpl implements Worker {
             }
         }
         return best;
+    }
+
+    /**
+     * Whether a swing with a tool with a break shape at {@code pos} breaks a block outside the box -
+     * one there, that the tool breaks in earnest.
+     */
+    private boolean shapeSpills(String itemId, BlockPos pos, BlockBox within) {
+        Player player = world.player().orElse(null);
+        List<BlockPos> shape = player == null ? null : shapeCells(itemId, pos, eye());
+        if (shape == null) {
+            return false;
+        }
+        int slot = player.hotbarSlotOf(itemId);
+        for (BlockPos c : shape) {
+            if (within.contains(c.x(), c.y(), c.z()) || !world.known(c.x(), c.y(), c.z())) {
+                continue;
+            }
+            Block n = world.blockAt(c.x(), c.y(), c.z());
+            if (!n.isAir() && (slot < 0 || player.toolPower(slot, n.type()) >= SWEEP_BREAKS)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

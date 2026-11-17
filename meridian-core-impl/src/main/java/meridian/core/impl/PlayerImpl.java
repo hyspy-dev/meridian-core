@@ -220,7 +220,8 @@ final class PlayerImpl implements Player {
             if (reach.isEmpty()) {
                 continue;     // a bow, a shield: no swing that hits
             }
-            double score = item.itemLevel * 100.0 + item.qualityIndex + reach.getAsDouble();
+            double score = item.itemLevel * 100.0 + item.qualityIndex + reach.getAsDouble()
+                    - (inventory.hotbarSpent(e.getKey()) ? 1e6 : 0);   // repaired as far as it goes: last
             if (score > bestScore) {
                 bestScore = score;
                 best = e.getKey();
@@ -258,7 +259,10 @@ final class PlayerImpl implements Player {
      */
     private int strongest(Map<Integer, String> hotbar, BlockBreaking breaking,
                           java.util.function.Predicate<String> among) {
+        // A tool worn out (none of its durability left) or repaired as far as it goes comes last: one
+        // of the same use in good order is taken first, whatever their powers.
         int best = -1;
+        int bestTier = Integer.MAX_VALUE;
         double bestPower = 0;
         float bestSpeed = 0;
         for (Map.Entry<Integer, String> e : hotbar.entrySet()) {
@@ -270,9 +274,12 @@ final class PlayerImpl implements Player {
             if (p <= 0) {
                 continue;                           // no tool for it, or none at all
             }
+            int tier = inventory.hotbarBroken(e.getKey()) ? 2 : inventory.hotbarSpent(e.getKey()) ? 1 : 0;
             float speed = item.tool.speed;
-            if (p > bestPower || (p == bestPower && best >= 0 && speed > bestSpeed)) {
+            if (tier < bestTier || (tier == bestTier
+                    && (p > bestPower || (p == bestPower && best >= 0 && speed > bestSpeed)))) {
                 best = e.getKey();
+                bestTier = tier;
                 bestPower = p;
                 bestSpeed = speed;
             }
