@@ -259,12 +259,7 @@ final class PlayerImpl implements Player {
      */
     private int strongest(Map<Integer, String> hotbar, BlockBreaking breaking,
                           java.util.function.Predicate<String> among) {
-        // A tool worn out (none of its durability left) or repaired as far as it goes comes last: one
-        // of the same use in good order is taken first, whatever their powers.
-        int best = -1;
-        int bestTier = Integer.MAX_VALUE;
-        double bestPower = 0;
-        float bestSpeed = 0;
+        java.util.List<ToolChoice> candidates = new java.util.ArrayList<>();
         for (Map.Entry<Integer, String> e : hotbar.entrySet()) {
             if (!among.test(e.getValue())) {
                 continue;
@@ -274,17 +269,17 @@ final class PlayerImpl implements Player {
             if (p <= 0) {
                 continue;                           // no tool for it, or none at all
             }
-            int tier = inventory.hotbarBroken(e.getKey()) ? 2 : inventory.hotbarSpent(e.getKey()) ? 1 : 0;
-            float speed = item.tool.speed;
-            if (tier < bestTier || (tier == bestTier
-                    && (p > bestPower || (p == bestPower && best >= 0 && speed > bestSpeed)))) {
-                best = e.getKey();
-                bestTier = tier;
-                bestPower = p;
-                bestSpeed = speed;
-            }
+            candidates.add(new ToolChoice(e.getKey(), kindOf(e.getValue()), p, item.tool.speed,
+                    inventory.hotbarBroken(e.getKey()), inventory.hotbarSpent(e.getKey())));
         }
-        return best;
+        return ToolChoice.pick(candidates);
+    }
+
+    /** A tool's kind: its id up to the material - {@code Tool_Pickaxe_} of {@code Tool_Pickaxe_Iron}. */
+    static String kindOf(String itemId) {
+        int first = itemId.indexOf('_');
+        int second = first < 0 ? -1 : itemId.indexOf('_', first + 1);
+        return second < 0 ? itemId : itemId.substring(0, second + 1);
     }
 
     /**
