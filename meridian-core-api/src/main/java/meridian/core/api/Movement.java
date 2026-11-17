@@ -139,6 +139,16 @@ public interface Movement {
     Capabilities capabilities();
 
     /**
+     * Whether the player has flight switched on - the Fly of meridian-client-control, which switches it
+     * through core ({@code ClientSpoof.setFlight}). A trip flies only with it on and the server letting
+     * the body fly ({@link Capabilities#canFly}): in creative with it off, the body walks, and one in the
+     * air comes straight down first. A core too old to tell: flight as the server allows it.
+     */
+    default boolean flightOn() {
+        return true;
+    }
+
+    /**
      * Where the player's feet are when it stands in cell {@code cell} - on the floor in it or
      * under it, with room for the whole body above - or empty when it cannot stand there: no
      * floor, no room, a fluid at the head, or a part of the world core has not been sent.

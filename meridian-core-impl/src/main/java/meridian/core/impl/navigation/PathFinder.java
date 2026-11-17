@@ -104,6 +104,9 @@ final class PathFinder {
         Movement.State now = movement.state();
         Mode startMode = now.swimming() ? Mode.WATER : now.climbing() ? Mode.CLIMB
                 : now.flying() ? Mode.AIR : Mode.GROUND;
+        if (startMode == Mode.AIR && !(caps.canFly() && movement.flightOn()) && w.stand(sx, sy, sz).isPresent()) {
+            startMode = Mode.GROUND;       // flight off, flying just over the ground: on from it afoot
+        }
         Node start = new Node(sx, sy, sz, startMode, feet, 0, guess(sx, sy, sz, goal, caps), null, null, null);
         open.add(start);
         best.put(key(sx, sy, sz, startMode), 0.0);
@@ -137,8 +140,10 @@ final class PathFinder {
                 case CLIMB -> climbs(n, caps, w, goal, next);
                 case AIR -> { }
             }
-            if (caps.canFly()) {
+            if (caps.canFly() && movement.flightOn()) {
                 flights(n, caps, w, goal, next);
+            } else if (n.mode() == Mode.AIR) {
+                descend(n, caps, w, goal, next);   // flight off: in the air, only straight down to land
             }
             for (Node m : next) {
                 // From the block the move starts at: a leap's run-up goes before it.
@@ -663,6 +668,25 @@ final class PathFinder {
     // ------------------------------------------------------------------
     // Flying
     // ------------------------------------------------------------------
+
+    /**
+     * Flight off, the body in the air (it flew before - creative): straight down a cell at a time,
+     * flying, until it stands - then on afoot.
+     */
+    private void descend(Node n, Movement.Capabilities caps, World w, Goal goal, List<Node> out) {
+        int x = n.x();
+        int y = n.y() - 1;
+        int z = n.z();
+        if (!w.fits(x + 0.5, y, z + 0.5, caps.height())) {
+            return;
+        }
+        double cost = 1 / Math.max(0.1, caps.flySpeed() > 0 ? caps.flySpeed() : caps.runSpeed());
+        OptionalDouble stand = w.stand(x, y, z);
+        out.add(stand.isPresent()
+                ? new Node(x, y, z, Mode.GROUND, stand.getAsDouble(), n.g() + cost + 0.2, guess(x, y, z, goal, caps), n,
+                        Kind.FLY, Gait.RUN)
+                : new Node(x, y, z, Mode.AIR, y, n.g() + cost, guess(x, y, z, goal, caps), n, Kind.FLY, Gait.RUN));
+    }
 
     private void flights(Node n, Movement.Capabilities caps, World w, Goal goal, List<Node> out) {
         double speed = caps.flySpeed();
