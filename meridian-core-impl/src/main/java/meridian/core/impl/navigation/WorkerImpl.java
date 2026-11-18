@@ -454,6 +454,86 @@ public final class WorkerImpl implements Worker {
     }
 
     /**
+     * A walk to {@code goal} is this many times longer than the straight line at most before the way is
+     * dug instead - out of a pit, up a cliff: a staircase, as a player cuts one.
+     */
+    static final double DETOUR = 2.0;
+    /** ... and a little more than that, for a short trip where any way round is long by the ratio. */
+    static final double DETOUR_SLACK = 4.0;
+
+    /**
+     * Goes to {@code goal}: walks there - unless the walk goes a long way round ({@link #DETOUR}) and
+     * a way dug there is shorter; then that is dug, a move at a time (its blocks broken, then the move
+     * made, as a tunnel to a block is), and the rest walked.
+     */
+    private NavResult travel(int id, Goal goal, Rules rules, List<BlockPos> broken) throws Exception {
+        return travel(id, goal, a -> goal.reachedBy(a.x(), a.y(), a.z()), null, rules, broken);
+    }
+
+    /**
+     * {@link #travel(int, Goal, Rules, List)} where a way dug ends at a place {@code arrived} takes -
+     * beside a chest, not merely near it through the rock - {@code keep} never broken.
+     */
+    private NavResult travel(int id, Goal goal, java.util.function.Predicate<BlockPos> arrived, BlockPos keep,
+                             Rules rules, List<BlockPos> broken) throws Exception {
+        Vec3 me = movement.position();
+        if (me == null) {
+            return go(goal).get(3, TimeUnit.MINUTES);
+        }
+        double straight = Math.sqrt(distSq(me, new Vec3(goal.x() + 0.5, goal.y(), goal.z() + 0.5)));
+        List<Navigator.Step> walk = navigator.plan(goal);
+        double walked = 0;
+        Vec3 at = me;
+        for (Navigator.Step st : walk) {
+            Vec3 to = new Vec3(st.x() + 0.5, st.feet(), st.z() + 0.5);
+            walked += Math.sqrt(distSq(at, to));
+            at = to;
+        }
+        Navigator.Step last = walk.isEmpty() ? null : walk.get(walk.size() - 1);
+        boolean walks = last != null && goal.reachedBy(last.x(), last.y(), last.z());
+        if (walks && walked <= DETOUR * straight + DETOUR_SLACK) {
+            return go(goal).get(3, TimeUnit.MINUTES);
+        }
+        BlockPos aim = new BlockPos(goal.x(), goal.y(), goal.z());
+        List<TunnelStep> dug = tunnelPlan(aim, arrived, keep);
+        double cost = 0;
+        if (dug != null) {
+            for (TunnelStep st : dug) {
+                cost += 1 + TUNNEL_PER_BLOCK * st.breaks().size();
+            }
+        }
+        if (dug == null || (walks && cost >= walked)) {
+            return go(goal).get(3, TimeUnit.MINUTES);
+        }
+        log.info("meridian-core: {} - a way dug instead ({} move(s), {} block(s); the walk {} long, straight {})",
+                text(aim), dug.size(), dug.stream().mapToInt(st -> st.breaks().size()).sum(),
+                walks ? String.format(Locale.ROOT, "%.0f", walked) : "none",
+                String.format(Locale.ROOT, "%.0f", straight));
+        for (TunnelStep st : dug) {
+            for (BlockPos c : st.breaks()) {
+                if (!live(id)) {
+                    return new NavResult(NavResult.Status.INTERRUPTED, movement.position(), 0, 0);
+                }
+                if (world.blockAt(c.x(), c.y(), c.z()).isAir()) {
+                    continue;
+                }
+                if (nearLava(c) || !breakInReach(c, rules, broken)) {
+                    return go(goal).get(3, TimeUnit.MINUTES);     // could not dig on: walk the rest
+                }
+            }
+            NavResult r = go(Goal.at(st.to())).get(1, TimeUnit.MINUTES);
+            if (!live(id)) {
+                return r;
+            }
+            if (r.status() != NavResult.Status.ARRIVED) {
+                return go(goal).get(3, TimeUnit.MINUTES);
+            }
+        }
+        // At the way's end: there, where it was dug to.
+        return new NavResult(NavResult.Status.ARRIVED, movement.position(), dug.size(), 0);
+    }
+
+    /**
      * A tunnel to the block: from where the body stands, moves along the axes - level, a step up, a
      * step down - each through a way the body's height, breaking what is there, to a place with the
      * block beside it at the feet or the head, or over the head. A move costs 1 and each block to break
@@ -463,6 +543,25 @@ public final class WorkerImpl implements Worker {
      * within {@link #TUNNEL_MOST} moves.
      */
     private List<TunnelStep> tunnelPlan(BlockPos target) {
+        return tunnelPlan(target, beside(target), target);
+    }
+
+    /** A place with the block beside it at the feet or the head, or over the head: where it is got at. */
+    private static java.util.function.Predicate<BlockPos> beside(BlockPos target) {
+        return a -> {
+            int hx = Math.abs(a.x() - target.x()) + Math.abs(a.z() - target.z());
+            return (hx == 1 && (target.y() == a.y() || target.y() == a.y() + 1))
+                    || (hx == 0 && target.y() == a.y() + 2);
+        };
+    }
+
+    /**
+     * A way dug from where the body stands to a place {@code arrived} takes - the same moves as a tunnel
+     * to a block ({@link #tunnelPlan(BlockPos)}), led toward {@code aim}, {@code keep} never broken
+     * ({@code null}: nothing kept).
+     */
+    private List<TunnelStep> tunnelPlan(BlockPos aim, java.util.function.Predicate<BlockPos> arrived, BlockPos keep) {
+        BlockPos target = aim;
         Vec3 me = movement.position();
         Player player = world.player().orElse(null);
         if (me == null || player == null || !movement.onGround()) {
@@ -484,9 +583,7 @@ public final class WorkerImpl implements Worker {
                 continue;
             }
             BlockPos a = n.at();
-            int hx = Math.abs(a.x() - target.x()) + Math.abs(a.z() - target.z());
-            if ((hx == 1 && (target.y() == a.y() || target.y() == a.y() + 1))
-                    || (hx == 0 && target.y() == a.y() + 2)) {
+            if (arrived.test(a)) {
                 List<TunnelStep> out = new ArrayList<>();
                 for (TunnelNode k = n; k.parent() != null; k = k.parent()) {
                     out.add(0, new TunnelStep(k.at(), k.breaks()));
@@ -511,14 +608,14 @@ public final class WorkerImpl implements Worker {
                     cells.add(new BlockPos(x, y, z));
                     BlockPos floor = new BlockPos(x, y - 1, z);
                     if (!world.known(floor.x(), floor.y(), floor.z()) || !movement.cell(floor).solid()
-                            || floor.equals(target)) {
+                            || floor.equals(keep)) {
                         continue;
                     }
                     List<BlockPos> breaks = new ArrayList<>();
                     double extra = 0;
                     boolean ok = true;
                     for (BlockPos cell : cells) {
-                        Boolean pass = clear.computeIfAbsent(cell, k -> tunnelCell(k, target, player));
+                        Boolean pass = clear.computeIfAbsent(cell, k -> tunnelCell(k, keep, player));
                         if (pass == null || !pass) {
                             ok = false;
                             break;
@@ -554,8 +651,8 @@ public final class WorkerImpl implements Worker {
      * Whether a tunnel may go through the cell: air with no fluid, or a block the hotbar breaks that is
      * not the target, with no fluid and no lava beside it.
      */
-    private Boolean tunnelCell(BlockPos cell, BlockPos target, Player player) {
-        if (cell.equals(target) || !world.known(cell.x(), cell.y(), cell.z())) {
+    private Boolean tunnelCell(BlockPos cell, BlockPos keep, Player player) {
+        if (cell.equals(keep) || !world.known(cell.x(), cell.y(), cell.z())) {
             return false;
         }
         Movement.Cell m = movement.cell(cell);
@@ -1275,11 +1372,12 @@ public final class WorkerImpl implements Worker {
                 || !world.known(chest.x(), chest.y(), chest.z()) || world.blockAt(chest.x(), chest.y(), chest.z()).isAir()) {
             return Map.of();
         }
-        Map<String, Integer> before = held();
         int window = openContainer(id, chest);
         if (window < 0) {
             return Map.of();
         }
+        // What is held once there: the way there may have been dug, its drops picked up on it.
+        Map<String, Integer> before = held();
         try {
             Map<String, Integer> left = new HashMap<>(want);
             for (Map.Entry<String, PlayerState.Section> e : inventory.inventories().entrySet()) {
@@ -1808,8 +1906,10 @@ public final class WorkerImpl implements Worker {
         double reach = Math.max(1.0, interactions.useReach(player == null ? null : player.heldItem())
                 .orElse(DEFAULT_REACH) - REACH_MARGIN);
         if (distSq(eye, centre(chest)) > reach * reach) {
-            NavResult r = go(Goal.near(chest, 2)).get(3, TimeUnit.MINUTES);
-            if (!live(id) || r.status() != NavResult.Status.ARRIVED) {
+            travel(id, Goal.near(chest, 2), beside(chest), chest, new Rules(Access.ANY, Tools.BEST), new ArrayList<>());
+            // Within reach is what counts - a way dug up to it may end short of the goal's ground.
+            Vec3 now = eye();
+            if (!live(id) || now == null || distSq(now, centre(chest)) > (reach + REACH_SLACK) * (reach + REACH_SLACK)) {
                 return -1;
             }
         }
