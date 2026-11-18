@@ -108,6 +108,7 @@ public class MeridianCoreModule implements ProxyModule {
         }
         meridian.core.impl.assets.GameAssetsImpl gameAssets =
                 new meridian.core.impl.assets.GameAssetsImpl(gameDir, userDir, ctx.offloadExecutor());
+        final java.util.Optional<java.nio.file.Path> userDirFinal = userDir;
         ctx.services().provide(meridian.core.api.GameAssets.class, gameAssets);
         // The one block property the server never sends - how a block folds a mirror - read from
         // the same files, in the background, once per installation.
@@ -228,7 +229,7 @@ public class MeridianCoreModule implements ProxyModule {
         // answered: assets, ready, pings, teleports. Early, so what another handler drops is still
         // answered; an ordinary session passes straight through.
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
-                (direction, session) -> new HeadlessClientHandler(entityTracker));
+                (direction, session) -> new HeadlessClientHandler(entityTracker, userDirFinal));
 
         // Movement: the headless player's body - what the ground allows (the blocks' own collision
         // shapes) and moves along it, reported tick by tick as the client reports them.
