@@ -281,7 +281,13 @@ public final class WorkerImpl implements Worker {
 
     @Override
     public CompletableFuture<Map<String, Integer>> deposit(BlockPos chest, Map<String, Integer> items) {
-        return held(id -> depositNow(id, chest, items), Map.of());
+        return depositOpened(chest, items).thenApply(o -> o.orElse(Map.of()));
+    }
+
+    @Override
+    public CompletableFuture<java.util.Optional<Map<String, Integer>>> depositOpened(BlockPos chest,
+                                                                                    Map<String, Integer> items) {
+        return held(id -> depositNow(id, chest, items), java.util.Optional.empty());
     }
 
     /** What a dig may break on the way, and the tools it takes. */
@@ -365,7 +371,10 @@ public final class WorkerImpl implements Worker {
             log.info("meridian-core: {} to be broken from {}{} (cost {})", text(target), text(s.cell()),
                     s.here() ? ", where the body is" : "", String.format(Locale.ROOT, "%.1f", s.cost()));
             if (!s.here()) {
-                NavResult r = go(Goal.at(s.cell())).get(3, TimeUnit.MINUTES);
+                // Walked - or, with no walk there at all (into a pit with sheer walls, back from a chest
+                // above it), a way dug there: a staircase down, as a player cuts one. A long way round is
+                // walked: what is dug here is the job's, nothing else.
+                NavResult r = travel(id, Goal.at(s.cell()), a -> s.cell().equals(a), null, false, rules, broken);
                 if (!live(id)) {
                     return Outcome.INTERRUPTED;
                 }
@@ -470,12 +479,18 @@ public final class WorkerImpl implements Worker {
         return travel(id, goal, a -> goal.reachedBy(a.x(), a.y(), a.z()), null, rules, broken);
     }
 
-    /**
-     * {@link #travel(int, Goal, Rules, List)} where a way dug ends at a place {@code arrived} takes -
-     * beside a chest, not merely near it through the rock - {@code keep} never broken.
-     */
     private NavResult travel(int id, Goal goal, java.util.function.Predicate<BlockPos> arrived, BlockPos keep,
                              Rules rules, List<BlockPos> broken) throws Exception {
+        return travel(id, goal, arrived, keep, true, rules, broken);
+    }
+
+    /**
+     * {@link #travel(int, Goal, Rules, List)} where a way dug ends at a place {@code arrived} takes -
+     * beside a chest, not merely near it through the rock - {@code keep} never broken; with no
+     * {@code shortcut}, a way is dug only when there is no walk there at all, never for a long way round.
+     */
+    private NavResult travel(int id, Goal goal, java.util.function.Predicate<BlockPos> arrived, BlockPos keep,
+                             boolean shortcut, Rules rules, List<BlockPos> broken) throws Exception {
         Vec3 me = movement.position();
         if (me == null) {
             return go(goal).get(3, TimeUnit.MINUTES);
@@ -491,7 +506,7 @@ public final class WorkerImpl implements Worker {
         }
         Navigator.Step last = walk.isEmpty() ? null : walk.get(walk.size() - 1);
         boolean walks = last != null && goal.reachedBy(last.x(), last.y(), last.z());
-        if (walks && walked <= DETOUR * straight + DETOUR_SLACK) {
+        if (walks && (!shortcut || walked <= DETOUR * straight + DETOUR_SLACK)) {
             return go(goal).get(3, TimeUnit.MINUTES);
         }
         BlockPos aim = new BlockPos(goal.x(), goal.y(), goal.z());
@@ -1366,15 +1381,19 @@ public final class WorkerImpl implements Worker {
      * PutInHotbarOrWindow}: from the hotbar or the storage into the open window first) and closes
      * it; how many of each went in, by what the player holds before and after.
      */
-    private Map<String, Integer> depositNow(int id, BlockPos chest, Map<String, Integer> want) throws Exception {
+    private java.util.Optional<Map<String, Integer>> depositNow(int id, BlockPos chest, Map<String, Integer> want)
+            throws Exception {
         ProxySession s = session.get();
-        if (containers == null || inventory == null || s == null || want == null || want.isEmpty()
+        if (containers == null || inventory == null || s == null
                 || !world.known(chest.x(), chest.y(), chest.z()) || world.blockAt(chest.x(), chest.y(), chest.z()).isAir()) {
-            return Map.of();
+            return java.util.Optional.empty();
+        }
+        if (want == null || want.isEmpty()) {
+            return java.util.Optional.of(Map.of());
         }
         int window = openContainer(id, chest);
         if (window < 0) {
-            return Map.of();
+            return java.util.Optional.empty();
         }
         // What is held once there: the way there may have been dug, its drops picked up on it.
         Map<String, Integer> before = held();
@@ -1411,7 +1430,7 @@ public final class WorkerImpl implements Worker {
                 }
                 moved = now;
             }
-            return moved;
+            return java.util.Optional.of(moved);
         } finally {
             close(s, window);
         }
@@ -1913,7 +1932,13 @@ public final class WorkerImpl implements Worker {
                 return -1;
             }
         }
-        faceNow(chest).get(2, TimeUnit.SECONDS);
+        // The head on the container as on a block to break - on the part of it the eyes see, not the middle
+        // behind a chest stacked beside it - and all the way: a small chest is less than a block, and a
+        // look stopped short of its middle may pass over it. A server's guard may open it only to a look
+        // on it, and put the player back otherwise.
+        Vec3 from = eye();
+        Vec3 aim = from == null ? centre(chest) : sight(from, chest).aim();
+        faceNow(aim, Movement.FACE_WITHIN).get(2, TimeUnit.SECONDS);
         int window = containers.windowAt(chest);
         if (window < 0) {
             containers.reaching(chest);
