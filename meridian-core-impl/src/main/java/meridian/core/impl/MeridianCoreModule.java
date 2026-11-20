@@ -384,6 +384,24 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.registerHandler(Direction.BOTH, HandlerPosition.NORMAL,
                 (direction, session) -> interactionControl.newObserver());
 
+        RangedCombatImpl ranged = new RangedCombatImpl(entityTracker, inventoryTracker, playerState,
+                interactionControl, movement, terrain, ctx.scheduler(), ctx.offloadExecutor());
+        interactionControl.projectiles(ranged);
+        ctx.services().provide(meridian.core.api.RangedCombat.class, ranged);
+        ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR, (direction, session) -> {
+            return new meridian.api.packet.PacketHandler() {
+                @Override public Action handleS2C(io.netty.channel.ChannelHandlerContext channel,
+                        meridian.api.packet.Packet packet, meridian.api.session.ProxySession connection) {
+                    if (packet instanceof meridian.protocol.packets.setup.WorldSettings) ranged.reset();
+                    if (packet instanceof meridian.protocol.packets.player.JoinWorld) ranged.worldChanged();
+                    if (packet instanceof meridian.protocol.packets.assets.UpdateProjectileConfigs configs) ranged.update(configs);
+                    if (packet instanceof meridian.protocol.packets.setup.SetTimeDilation time) ranged.timeDilation(time.timeDilation);
+                    if (packet instanceof meridian.protocol.packets.entities.EntityUpdates) ranged.observeMotion();
+                    return Action.FORWARD;
+                }
+            };
+        });
+
         // --- World: position-addressed facade over the trackers --------------
         // Block / Player building blocks — a Layer-2 module queries and acts,
         // writing its own logic.

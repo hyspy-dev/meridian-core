@@ -141,8 +141,9 @@ public final class Body {
                 || current != null || !queue.isEmpty() || held != null) {
             return CompletableFuture.completedFuture(false);
         }
+        answerTurns(false);
         lookTo = new float[] {yaw, pitch};
-        lookWithin = Math.max(Neck.LEAST, within);
+        lookWithin = Math.max(1e-6, within);
         lookTicks = 0;
         CompletableFuture<Boolean> done = new CompletableFuture<>();
         turns.add(done);
@@ -426,8 +427,10 @@ public final class Body {
                     answerTurns(false);
                 } else if (lookTo == null || ++lookTicks >= LOOK_MAX_TICKS
                         || Neck.apart(state.yaw, state.pitch, lookTo[0], lookTo[1]) <= lookWithin + 1e-6) {
+                    boolean reached = lookTo == null || Neck.apart(state.yaw, state.pitch,
+                            lookTo[0], lookTo[1]) <= lookWithin + 1e-6;
                     lookTo = null;
-                    answerTurns(true);
+                    answerTurns(reached);
                 }
             }
             c.ticked(state);

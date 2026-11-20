@@ -96,6 +96,11 @@ final class InteractionSimulator {
         /** The compiled replacement root, or {@code null} if unavailable. */
         CompiledInteraction resolve(int rootId);
 
+        default double timeDilation() { return 1; }
+
+        /** The live projectile snapshot; offline walks leave it empty. */
+        default void projectile(meridian.protocol.ProjectileInteraction node, InteractionSyncData data, double chargeSeconds) { }
+
         /** The combo step a {@code ChainingInteraction} is to take - the first, unless told otherwise. */
         default int chainingIndex(ChainingInteraction node, int interactionId) {
             return 0;

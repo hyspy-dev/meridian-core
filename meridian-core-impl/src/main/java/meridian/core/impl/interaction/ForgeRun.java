@@ -128,7 +128,7 @@ final class ForgeRun {
             this.forkedId = forkedId;
             this.key = path(forkedId);
             this.type = type;
-            this.walk = walk;
+            this.walk = walk == null ? null : walk.realtime();
             this.data = data;
             this.wrapped = wrapped;
             this.startTick = startTick;
