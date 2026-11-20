@@ -169,6 +169,16 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.services().provide(EntityTracker.class, entityTracker);
         ctx.services().provide(CameraControl.class, cameraControl);
         ctx.services().provide(DebugRender.class, debugRender);
+        // PacketTap: packets as bytes, for a module that records them (what the server sent, before
+        // the proxy changes it; what went to the server, as it went).
+        PacketTapImpl packetTap = new PacketTapImpl(ctx.getLogger());
+        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY, (direction, session) -> packetTap.fromServer());
+        ctx.registerHandler(Direction.C2S, HandlerPosition.MONITOR, (direction, session) -> packetTap.toServer());
+        ctx.services().provide(meridian.core.api.PacketTap.class, packetTap);
+        // EntityLabels: a short text over an entity, drawn over walls (the game's pop-up text layer).
+        EntityLabelsImpl entityLabels = new EntityLabelsImpl(sessionHolder, ctx.scheduler());
+        ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR, (direction, session) -> entityLabels);
+        ctx.services().provide(meridian.core.api.EntityLabels.class, entityLabels);
 
         // PlayerState: the player as the server keeps them - where, how, and carrying what.
         // Who they are comes from the token they log in with, which is what the server goes by.
@@ -498,7 +508,7 @@ public class MeridianCoreModule implements ProxyModule {
 
         // The services above on the proxy's command channel: core <conn> ..., for driving and
         // checking the forged chains from outside the game.
-        CoreCommands.register(ctx, sessionHolder, anonymizer);
+        CoreCommands.register(ctx, sessionHolder, anonymizer, entityLabels);
 
         // Last of core's handlers, at MONITOR: core's readers - the entity tracker among them, which
         // watches at MONITOR - have seen the real names by then, and only what goes on to the game

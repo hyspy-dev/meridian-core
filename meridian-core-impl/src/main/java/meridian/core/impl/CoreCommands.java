@@ -37,6 +37,7 @@ final class CoreCommands {
             + "predict <kind> <x y z> [gait] [trace] | hold <forward> <strafe> <yaw> [jump] [crouch] [sprint] [walk] [fly] | hold off | halt | "
             + "spoof [gamemode <creative|adventure|off> | flight|stamina|death|dropflying|swimming|nofall <on|off>] | "
             + "rotation <index> [rotate <x|y|z> [quarters] | mirror <x|y|z>] | matches <x y z> <name|id> [rotation] | "
+            + "labels [show <entity> <rrggbb> <text> | hide <entity> | clear | font <size>] | "
             + "glow <name-contains> [r g b] | glow off | flip <block name> | "
             + "prefab capture <x0 y0 z0> <x1 y1 z1> <file> | prefab read <file> | "
             + "prefab turned <file> [rotate <x|y|z> [quarters] | flip <x|y|z>]...";
@@ -44,17 +45,19 @@ final class CoreCommands {
     private final ModuleContext ctx;
     private final SessionHolder sessions;
     private final Anonymizer anonymizer;
+    private final EntityLabelsImpl labels;
 
-    private CoreCommands(ModuleContext ctx, SessionHolder sessions, Anonymizer anonymizer) {
+    private CoreCommands(ModuleContext ctx, SessionHolder sessions, Anonymizer anonymizer, EntityLabelsImpl labels) {
         this.ctx = ctx;
         this.sessions = sessions;
         this.anonymizer = anonymizer;
+        this.labels = labels;
     }
 
     /** Offers the commands; a proxy without a command channel - or too old to have one - has none. */
-    static void register(ModuleContext ctx, SessionHolder sessions, Anonymizer anonymizer) {
+    static void register(ModuleContext ctx, SessionHolder sessions, Anonymizer anonymizer, EntityLabelsImpl labels) {
         try {
-            CoreCommands c = new CoreCommands(ctx, sessions, anonymizer);
+            CoreCommands c = new CoreCommands(ctx, sessions, anonymizer, labels);
             ctx.registerCommand("core", USAGE, c::run);
         } catch (NoSuchMethodError olderProxy) {
             // no command channel there
@@ -83,6 +86,7 @@ final class CoreCommands {
             case "inv" -> CompletableFuture.completedFuture(inventory());
             case "stats" -> CompletableFuture.completedFuture(stats());
             case "anon" -> CompletableFuture.completedFuture(anon(args));
+            case "labels" -> CompletableFuture.completedFuture(labels.command(args));
             case "hits" -> CompletableFuture.completedFuture(hits(args));
             case "swings" -> CompletableFuture.completedFuture(swings(args));
             case "fightitem" -> CompletableFuture.completedFuture(fightItem(args));
