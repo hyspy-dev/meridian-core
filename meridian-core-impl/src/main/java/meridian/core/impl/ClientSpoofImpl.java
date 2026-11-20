@@ -210,15 +210,8 @@ final class ClientSpoofImpl implements ClientSpoof {
 
     /** The flags and the fall speed of one of the player's movement reports; whether it changed. */
     boolean rewrite(ClientMovement m) {
-        boolean changed = false;
-        if (dropFlying) {
-            changed |= clearFlying(m.movementStates);
-            changed |= clearFlying(m.riderMovementStates);
-        }
-        if (addSwimming) {
-            changed |= setSwimming(m.movementStates);
-            changed |= setSwimming(m.riderMovementStates);
-        }
+        boolean changed = rewrite(m.movementStates);
+        changed |= rewrite(m.riderMovementStates);
         if (noFall && m.velocity != null && m.velocity.y < 0.0) {
             // The server's fall damage goes by the speed the client says it landed with.
             m.velocity.y = 0.0;
@@ -229,30 +222,30 @@ final class ClientSpoofImpl implements ClientSpoof {
 
     /** The flags of a mount's movement report; whether it changed. */
     boolean rewrite(MountMovement m) {
-        boolean changed = false;
-        if (dropFlying) {
-            changed |= clearFlying(m.movementStates);
+        return rewrite(m.movementStates);
+    }
+
+    /**
+     * One set of flags. Swimming is added only where the client itself said it flies - told in
+     * place of the flight, never on a walk - and read before the flight is dropped. The client
+     * sends its flags whole and only when they change, so the flight's end (flying false) takes
+     * the added swimming away as well.
+     */
+    private boolean rewrite(MovementStates states) {
+        if (states == null) {
+            return false;
         }
-        if (addSwimming) {
-            changed |= setSwimming(m.movementStates);
+        boolean flies = states.flying;
+        boolean changed = false;
+        if (dropFlying && flies) {
+            states.flying = false;
+            changed = true;
+        }
+        if (addSwimming && flies && !states.swimming) {
+            states.swimming = true;
+            changed = true;
         }
         return changed;
-    }
-
-    private static boolean clearFlying(MovementStates states) {
-        if (states != null && states.flying) {
-            states.flying = false;
-            return true;
-        }
-        return false;
-    }
-
-    private static boolean setSwimming(MovementStates states) {
-        if (states != null && !states.swimming) {
-            states.swimming = true;
-            return true;
-        }
-        return false;
     }
 
     // ------------------------------------------------------------------

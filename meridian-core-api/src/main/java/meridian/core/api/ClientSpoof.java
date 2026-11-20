@@ -78,7 +78,11 @@ public interface ClientSpoof {
 
     boolean dropFlying();
 
-    /** Sets the swimming flag on every movement report that carries the flags. */
+    /**
+     * Sets the swimming flag on the movement reports where the client says it flies - the server
+     * told "swimming" in place of "flying" (with {@link #setDropFlying} the flight itself is gone
+     * too). A walk, a jump or a fall is left as it is.
+     */
     void setAddSwimming(boolean on);
 
     boolean addSwimming();
