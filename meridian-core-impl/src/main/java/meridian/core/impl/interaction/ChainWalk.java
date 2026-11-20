@@ -83,6 +83,35 @@ final class ChainWalk {
      * hold - each charge just long enough for its first tier.
      */
     private float hold = Float.NaN;
+    private float draw = Float.NaN;
+    private java.util.function.DoubleFunction<Boolean> releaseReady = t -> true;
+    private boolean drawCancelled;
+    private boolean realtime;
+    private float releasedCharge;
+    private static final class ChargeClock {
+        long nanos;
+        double seconds;
+        ChargeClock(long now) { nanos = now; }
+    }
+    private final Map<Integer, ChargeClock> chargeStarts = new HashMap<>();
+
+    /** A live charge reports elapsed stopwatch time, including a delayed scheduler tick. */
+    ChainWalk realtime() { realtime = true; return this; }
+
+    private java.util.function.Consumer<java.util.UUID> launched = id -> { };
+    // Kept across a replay: an operation never creates a second prediction.
+    private final Map<Integer, InteractionSyncData> projectiles = new HashMap<>();
+
+    /** Draw time is measured from Charging, after the server has nocked the arrow. */
+    ChainWalk draw(float seconds, java.util.function.DoubleFunction<Boolean> ready,
+                   java.util.function.Consumer<java.util.UUID> listener) {
+        draw = seconds;
+        hold = Float.POSITIVE_INFINITY;
+        releaseReady = ready;
+        launched = listener;
+        return this;
+    }
+
     /** The body a live walk pushes ({@code ApplyForceInteraction}); none for a prediction. */
     private ForceBody body;
     /** How the push under way stands: waiting, or ended on the ground or by its time. */
@@ -353,6 +382,14 @@ final class ChainWalk {
                 continue;
             }
             FlatOp.Node node = (FlatOp.Node) op;
+            if (realtime && node.interaction() instanceof ChargingInteraction) {
+                long nowNanos = System.nanoTime();
+                ChargeClock clock = chargeStarts.computeIfAbsent(flatIndex, index -> new ChargeClock(nowNanos));
+                double dilation = resolver == null ? 1 : resolver.timeDilation();
+                clock.seconds += (nowNanos - clock.nanos) / 1e9 * dilation;
+                clock.nanos = nowNanos;
+                opTime = (float) clock.seconds;
+            }
             InteractionSyncData verdict = verdictFor(flatIndex);
             InteractionState state;
             if (verdict != null) {
@@ -376,7 +413,10 @@ final class ChainWalk {
                 // and the hold carries on into what follows.
                 float top = highestKey(charge);
                 boolean capped = !charge.allowIndefiniteHold && top > 0f && opTime >= top;
-                state = held(now) && !capped ? InteractionState.NotFinished : InteractionState.Finished;
+                Boolean release = !Float.isNaN(draw) && opTime >= draw ? releaseReady.apply(opTime) : null;
+                drawCancelled = Boolean.FALSE.equals(release);
+                state = !Float.isNaN(draw) ? (release != null ? InteractionState.Finished : InteractionState.NotFinished)
+                        : held(now) && !capped ? InteractionState.NotFinished : InteractionState.Finished;
             } else {
                 state = InteractionSimulator.tickState(node.interaction(), ctx, opTime);
                 // Tap/hold gate: a plain SimpleInteraction whose failed branch enters a
@@ -400,9 +440,23 @@ final class ChainWalk {
                 sd.chargeValue = state == InteractionState.NotFinished ? InteractionSimulator.CHARGING_HELD
                         : Float.isNaN(hold) ? InteractionSimulator.lowestChargeKey(charging) : released;
             }
+            if (drawCancelled && node.interaction() instanceof ChargingInteraction) sd.chargeValue = -2f;
+            if (node.interaction() instanceof ChargingInteraction && state != InteractionState.NotFinished) releasedCharge = sd.chargeValue;
             if (node.interaction() instanceof ApplyForceInteraction) {
                 sd.applyForceState = verdict != null ? verdict.applyForceState
                         : body != null ? forceState : ApplyForceState.Timer;
+            }
+            if (node.interaction() instanceof meridian.protocol.ProjectileInteraction projectile && resolver != null) {
+                InteractionSyncData launch = projectiles.get(flatIndex);
+                if (launch == null) {
+                    launch = new InteractionSyncData();
+                    resolver.projectile(projectile, launch, releasedCharge);
+                    projectiles.put(flatIndex, launch);
+                    if (launch.generatedUUID != null) launched.accept(launch.generatedUUID);
+                }
+                sd.generatedUUID = launch.generatedUUID;
+                sd.attackerPos = launch.attackerPos;
+                sd.attackerRot = launch.attackerRot;
             }
             ops.add(sd);
 
