@@ -19,6 +19,9 @@ import meridian.protocol.packets.setup.ClientFeature;
  */
 final class Physics {
 
+    /** Whether flight is switched on (client-control's Fly): with it off, a move afoot stops flying. */
+    volatile java.util.function.BooleanSupplier flightOn = () -> true;
+
     static final double DT = 1.0 / 60.0;
     /** The server's gravity ({@code PhysicsConstants.GRAVITY_ACCELERATION}). */
     static final double GRAVITY = 32;

@@ -144,6 +144,18 @@ public interface Worker {
     }
 
     /**
+     * {@link #deposit} telling a container that took nothing because it is full from one that was
+     * never opened - not got to, or the server would not open it (a server's guard may want the head
+     * on it, and put the player back when it is not): nothing is known of that one.
+     *
+     * @return how many of each went in; empty when the container was not opened
+     */
+    default CompletableFuture<java.util.Optional<java.util.Map<String, Integer>>> depositOpened(BlockPos chest,
+            java.util.Map<String, Integer> items) {
+        return deposit(chest, items).thenApply(java.util.Optional::of);
+    }
+
+    /**
      * Walks over the drops lying in {@code area}, nearest first, into each one's own cell (the
      * server picks one up within 1.75 of the feet), until none is left there that can be got to.
      *

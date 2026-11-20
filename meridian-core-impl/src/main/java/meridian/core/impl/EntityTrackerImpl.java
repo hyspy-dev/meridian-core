@@ -80,6 +80,7 @@ final class EntityTrackerImpl implements EntityTracker {
      * last model; none for a model without one.
      */
     private final Map<Integer, double[]> hitboxes = new ConcurrentHashMap<>();
+    private final Map<Integer, ModelUpdate> projectileModels = new ConcurrentHashMap<>();
     /** The stack's item id of each dropped item on the ground ({@code Item} component). */
     private final Map<Integer, String> items = new ConcurrentHashMap<>();
     /** ... and how many it is. */
@@ -124,6 +125,7 @@ final class EntityTrackerImpl implements EntityTracker {
                 interactions.remove(id);
                 effects.remove(id);
                 hitboxes.remove(id);
+                projectileModels.remove(id);
                 items.remove(id);
                 quantities.remove(id);
                 firstSeen.remove(id);
@@ -161,7 +163,9 @@ final class EntityTrackerImpl implements EntityTracker {
                         interactions.put(update.networkId, Map.copyOf(entityInteractions.interactions));
                     } else if (component instanceof ModelUpdate modelUpdate && modelUpdate.model == null) {
                         hitboxes.remove(update.networkId);      // the model taken away, its box too
+                        projectileModels.remove(update.networkId);
                     } else if (component instanceof ModelUpdate modelUpdate) {
+                        projectileModels.put(update.networkId, modelUpdate);
                         double[] box = hitbox(modelUpdate.model, modelUpdate.entityScale);
                         if (box != null) {
                             hitboxes.put(update.networkId, box);
@@ -314,6 +318,35 @@ final class EntityTrackerImpl implements EntityTracker {
             k = Float.isFinite(model.scale) && model.scale > 0 ? entityScale / model.scale : entityScale;
         }
         return new double[] {h.minX * k, h.minY * k, h.minZ * k, h.maxX * k, h.maxY * k, h.maxZ * k};
+    }
+
+    /** One collision detail of the current model; only the offset turns with body yaw in 0.7. */
+    record ProjectileBox(String detail, Box box) { }
+
+    java.util.List<ProjectileBox> projectileBoxesOf(int id) {
+        ModelUpdate update = projectileModels.get(id);
+        Vec3 at = positions.get(id);
+        if (at == null || update == null) return java.util.List.of();
+        var details = update.model.detailBoxes;
+        if (details == null || details.isEmpty()) return boundsOf(id)
+                .map(b -> java.util.List.of(new ProjectileBox(null, b))).orElse(java.util.List.of());
+        double k = update.entityScale > 0 && Float.isFinite(update.entityScale)
+                ? (Float.isFinite(update.model.scale) && update.model.scale > 0
+                    ? update.entityScale / update.model.scale : update.entityScale) : 1;
+        double yaw = bodies.getOrDefault(id, new Direction()).yaw;
+        java.util.List<ProjectileBox> boxes = new java.util.ArrayList<>();
+        for (var entry : details.entrySet()) for (var detail : entry.getValue()) {
+            if (detail == null || detail.box == null) continue;
+            var h = detail.box;
+            double x = detail.offset.x() * k, y = detail.offset.y() * k, z = detail.offset.z() * k;
+            double ox = at.x() + x * Math.cos(yaw) + z * Math.sin(yaw);
+            double oy = at.y() + y;
+            double oz = at.z() - x * Math.sin(yaw) + z * Math.cos(yaw);
+            boxes.add(new ProjectileBox(entry.getKey(), new Box(
+                    new Vec3(ox + h.minX * k, oy + h.minY * k, oz + h.minZ * k),
+                    new Vec3(ox + h.maxX * k, oy + h.maxY * k, oz + h.maxZ * k))));
+        }
+        return java.util.List.copyOf(boxes);
     }
 
     private static Vec3 positionOf(ModelTransform transform) {

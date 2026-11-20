@@ -75,6 +75,7 @@ final class GameWheel {
             }
             observers.accept(m);
             s.sendToServer(m);
+            reported.accept(m);
         }
 
         @Override
@@ -87,6 +88,11 @@ final class GameWheel {
         this.body = body;
         this.teleports = teleports;
     }
+
+    private Consumer<ClientMovement> reported = m -> { };
+
+    /** The report has been passed to the server connection. */
+    void reported(Consumer<ClientMovement> callback) { reported = callback; }
 
     /** What core's own observers of the client's movement make of the body's reports. */
     void observers(Consumer<ClientMovement> observers) {

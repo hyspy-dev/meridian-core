@@ -12,6 +12,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import meridian.api.module.Scheduler;
 import meridian.api.packet.PacketHandler;
 import meridian.api.session.ProxySession;
@@ -125,6 +126,10 @@ public final class InteractionControlImpl implements InteractionControl {
     private final WorldStateImpl worldState;
     private final ItemRegistry items;
     private final Scheduler scheduler;
+    private volatile ProjectilePlayback projectiles;
+
+    /** Predicted projectile playback for this session. */
+    public void projectiles(ProjectilePlayback playback) { projectiles = playback; }
     /** Network id &rarr; that entity as an aim (where it stands, its own interactions), or {@code null}. */
     private final EntityLookup entities;
     /** The player's eyes above its feet: its model's, as core's movement keeps it. */
@@ -146,6 +151,15 @@ public final class InteractionControlImpl implements InteractionControl {
         @Override
         public CompiledInteraction resolve(int rootId) {
             return compileRoot(rootId);
+        }
+
+        @Override
+        public double timeDilation() { return projectiles == null ? 1 : projectiles.timeDilation(); }
+
+        @Override
+        public void projectile(meridian.protocol.ProjectileInteraction node, InteractionSyncData data, double chargeSeconds) {
+            ProjectilePlayback playback = projectiles;
+            if (playback != null) playback.prepare(node, data, chargeSeconds);
         }
 
         @Override
@@ -1035,6 +1049,89 @@ public final class InteractionControlImpl implements InteractionControl {
         return out;
     }
 
+    /** One ordinary draw branch, resolved through this item's variables. */
+    public record BowTier(float seconds, String config) { }
+
+    /** Draw tiers from the server's charge graph, never from a numeric preset. */
+    public List<BowTier> bowTiers(String item) {
+        if (item == null || !item.startsWith("Weapon_Shortbow_")) return List.of();
+        List<meridian.protocol.Interaction> ops = reached(item, InteractionType.Primary, false);
+        if (ops == null) return List.of();
+        List<BowTier> tiers = new ArrayList<>();
+        for (var op : ops) {
+            if (!(op instanceof meridian.protocol.ChargingInteraction charge) || charge.chargedNext == null) continue;
+            List<BowTier> found = new ArrayList<>();
+            for (var branch : charge.chargedNext.entrySet()) {
+                if (branch.getKey() <= 0) continue;
+                var configs = new java.util.HashSet<String>();
+                collectProjectiles(branch.getValue(), false, items.varsFor(item), new java.util.HashSet<>(), configs);
+                if (configs.size() == 1) found.add(new BowTier(branch.getKey(), configs.iterator().next()));
+            }
+            if (found.size() > tiers.size()) tiers = found;
+        }
+        return tiers.stream().sorted(java.util.Comparator.comparingDouble(BowTier::seconds)).toList();
+    }
+
+    private void collectProjectiles(int id, boolean root, Map<String, Integer> vars,
+                                    Set<String> seen, Set<String> configs) {
+        if (id == Integer.MIN_VALUE || seen.size() > 256 || !seen.add((root ? "r" : "n") + id)) return;
+        CompiledInteraction compiled = root ? compileRoot(id) : InteractionFlattener.compile(-1, new int[] {id},
+                n -> registry.interaction(n).orElse(null));
+        if (compiled == null) return;
+        for (FlatOp op : compiled.ops()) {
+            if (!(op instanceof FlatOp.Node node)) continue;
+            var i = node.interaction();
+            if (i instanceof meridian.protocol.ProjectileInteraction p && p.configId != null) configs.add(p.configId);
+            else if (i instanceof meridian.protocol.ReplaceInteraction r) {
+                collectProjectiles(vars.getOrDefault(r.variable, r.defaultValue), true, vars, seen, configs);
+            } else if (i instanceof meridian.protocol.RunRootInteraction r) {
+                collectProjectiles(r.rootInteraction, true, vars, seen, configs);
+            }
+        }
+    }
+
+    /** The ammunition removed by the server's ordinary primary graph. */
+    public String bowAmmo(String item) {
+        List<meridian.protocol.Interaction> ops = reached(item, InteractionType.Primary, false);
+        if (ops != null) for (var op : ops) {
+            if (op instanceof meridian.protocol.ModifyInventoryInteraction m && m.itemToRemove != null
+                    && m.itemToRemove.itemId != null) return m.itemToRemove.itemId;
+        }
+        return null;
+    }
+
+    /** Plays Primary with charge time measured after nocking, waiting for a reported release aim. */
+    public CompletableFuture<InteractionOutcome> draw(float seconds, java.util.function.DoubleFunction<Boolean> ready,
+                                                       java.util.function.Consumer<UUID> launched) {
+        return enqueueForge(() -> {
+            ForgeRun run = startRun(null, InteractionType.Primary, DataKind.NONE, inventory.itemInHandId(),
+                    BlockFace.None, null, Map.of(), BlockFace.None, null, Integer.MIN_VALUE, Float.NaN,
+                    w -> w.draw(seconds, ready, launched));
+            return run == null ? Started.NOTHING : Started.of(run);
+        });
+    }
+
+    /** Starts a new client contact chain using the projectile's own root and prediction UUID. */
+    public CompletableFuture<InteractionOutcome> projectileContact(int root, InteractionType type,
+                                                                   InteractionChainData data) {
+        CompiledInteraction compiled = compileRoot(root);
+        if (session == null || compiled == null) return CompletableFuture.completedFuture(InteractionOutcome.notSent());
+        InteractionContext ctx = contextFor(type, data.blockPosition, DataKind.BLOCK,
+                inventory.itemInHandId(), BlockFace.Up);
+        if (data.entityId >= 0) {
+            EntityTarget target = entities.target(data.entityId);
+            if (target != null) ctx = ctx.withEntity(target);
+        }
+        ForgeRun.Header header = new ForgeRun.Header(inventory.activeHotbarSlot(), inventory.activeUtilitySlot(),
+                inventory.activeToolsSlot(), inventory.itemInHandId(), inventory.utilityItemId(), inventory.toolsItemId());
+        int id = nat.allocateForged();
+        ForgeRun run = new ForgeRun(host, id, header, type, new ChainWalk(compiled, ctx, resolver, Map.of()).live(forceBody),
+                data, ctx, Map.of());
+        runs.put(id, run);
+        run.start();
+        return run.outcome();
+    }
+
     @Override
     public java.util.OptionalDouble hitReach(String itemId) {
         String item = itemId == null || itemId.isEmpty() ? null : itemId;
@@ -1552,6 +1649,83 @@ public final class InteractionControlImpl implements InteractionControl {
     }
 
     // ------------------------------------------------------------------
+    // The hands held by one short operation
+    // ------------------------------------------------------------------
+
+    /** What an operation holding the hands does with them; nothing else gets in between. */
+    public interface Hands {
+        CompletableFuture<InteractionOutcome> switchHotbarSlot(int slot);
+        CompletableFuture<InteractionOutcome> useItem();
+    }
+
+    /** Longest the hands are held: past it they are let go whatever the operation is doing. */
+    static final long HANDS_MAX_MS = 20_000;
+    /** The operation holding the hands, or {@code null}; guarded by {@code this}. */
+    private Object handsHolder;
+    /** Others' forges asked for while the hands were held, in order; guarded by {@code this}. */
+    private final ArrayDeque<QueuedItem> heldBack = new ArrayDeque<>();
+    /** Done when the last operation that asked for the hands has let them go; guarded by {@code this}. */
+    private CompletableFuture<Void> handsFree = CompletableFuture.completedFuture(null);
+
+    /**
+     * Runs a short operation of several steps - a repair: slot to the kit, the kit used, the server's
+     * page answered, the slot back - with the hands to itself. Forges asked for meanwhile by anyone
+     * else (a guard turning to a mob, a dig) wait and run after, in the order asked; a forge pressed
+     * now does not cut the operation's chain short. Operations asking while one holds the hands take
+     * turns. The hands are let go when the operation's future completes, or after
+     * {@link #HANDS_MAX_MS} at the latest.
+     */
+    public <T> CompletableFuture<T> withHands(java.util.function.Function<Hands, CompletableFuture<T>> operation) {
+        Object holder = new Object();
+        CompletableFuture<Void> mine = new CompletableFuture<>();
+        CompletableFuture<Void> before;
+        synchronized (this) {
+            before = handsFree;
+            handsFree = mine;
+        }
+        Hands hands = new Hands() {
+            @Override public CompletableFuture<InteractionOutcome> switchHotbarSlot(int slot) {
+                return enqueueForge(() -> doSwitchHotbarSlot(slot), Press.QUEUED, holder);
+            }
+            @Override public CompletableFuture<InteractionOutcome> useItem() {
+                return enqueueForge(() -> forgeAim(-1, InteractionType.Secondary), Press.QUEUED, holder);
+            }
+        };
+        CompletableFuture<T> result = before.thenCompose(v -> {
+            synchronized (this) {
+                handsHolder = holder;
+            }
+            try {
+                return operation.apply(hands).orTimeout(HANDS_MAX_MS, TimeUnit.MILLISECONDS);
+            } catch (RuntimeException e) {
+                return CompletableFuture.failedFuture(e);
+            }
+        });
+        result.whenComplete((r, e) -> {
+            letGo(holder);
+            mine.complete(null);
+        });
+        return result;
+    }
+
+    /** The hands let go: what was held back goes on the queue, in the order it was asked for. */
+    private synchronized void letGo(Object holder) {
+        if (handsHolder != holder) {
+            return;
+        }
+        handsHolder = null;
+        if (heldBack.isEmpty()) {
+            return;
+        }
+        log.info("meridian-core: hands let go - {} forge(s) held back go on", heldBack.size());
+        forgeQueue.addAll(heldBack);
+        heldBack.clear();
+        if (!forging) {
+            runNextForge();
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Forge queue — core owns the chain-start cadence
     // ------------------------------------------------------------------
 
@@ -1571,8 +1745,21 @@ public final class InteractionControlImpl implements InteractionControl {
      * nothing else waiting, cuts the chain in flight short where that chain's rules let it - as the
      * game cuts a swing short when the guard is raised in it - and starts at once.
      */
-    private synchronized CompletableFuture<InteractionOutcome> enqueueForge(QueuedForge forge, Press press) {
+    private CompletableFuture<InteractionOutcome> enqueueForge(QueuedForge forge, Press press) {
+        return enqueueForge(forge, press, null);
+    }
+
+    /**
+     * {@link #enqueueForge(QueuedForge, Press)} for the operation holding the hands ({@code holder},
+     * {@link #withHands}), or for anyone ({@code null}): while another holds them, the forge is held
+     * back - not run, and not cutting anything short - until they are let go.
+     */
+    private synchronized CompletableFuture<InteractionOutcome> enqueueForge(QueuedForge forge, Press press, Object holder) {
         CompletableFuture<InteractionOutcome> done = new CompletableFuture<>();
+        if (handsHolder != null && handsHolder != holder) {
+            heldBack.addLast(new QueuedItem(forge, done));
+            return done;
+        }
         forgeQueue.addLast(new QueuedItem(forge, done));
         if (!forging) {
             runNextForge();
@@ -1646,6 +1833,8 @@ public final class InteractionControlImpl implements InteractionControl {
             synchronized (this) {
                 forging = false;
                 dropped = new ArrayList<>(forgeQueue);
+                dropped.addAll(heldBack);
+                heldBack.clear();
                 forgeQueue.clear();
             }
             log.warn("meridian-core: forge scheduler is shut down (module torn down?) — "
@@ -1837,6 +2026,8 @@ public final class InteractionControlImpl implements InteractionControl {
                 }
             }
             s.sendToServer(packet);
+            ProjectilePlayback playback = projectiles;
+            if (playback != null) playback.sent(packet);
         }
     }
 
@@ -1957,6 +2148,14 @@ public final class InteractionControlImpl implements InteractionControl {
                               BlockFace face, List<BlockPos> hitBlocks, Map<Integer, Integer> hitBlockMap,
                               BlockFace orientFace, EntityTarget entity, int targetSlot,
                               float holdSeconds) {
+        return startRun(pos, type, dataKind, itemId, face, hitBlocks, hitBlockMap, orientFace,
+                entity, targetSlot, holdSeconds, w -> { });
+    }
+
+    private ForgeRun startRun(BlockPos pos, InteractionType type, DataKind dataKind, String itemId,
+                              BlockFace face, List<BlockPos> hitBlocks, Map<Integer, Integer> hitBlockMap,
+                              BlockFace orientFace, EntityTarget entity, int targetSlot, float holdSeconds,
+                              java.util.function.Consumer<ChainWalk> setup) {
         OptionalInt rootId = resolveRoot(type, itemId);
         if (rootId.isEmpty()) {
             log.warn("meridian-core: no root for {} with item {} — item catalog not "
@@ -2009,8 +2208,9 @@ public final class InteractionControlImpl implements InteractionControl {
                 inventory.activeUtilitySlot(), inventory.activeToolsSlot(), inventory.itemInHandId(),
                 inventory.utilityItemId(), inventory.toolsItemId());
         int forgedId = nat.allocateForged();
-        ForgeRun run = new ForgeRun(host, forgedId, header, type,
-                new ChainWalk(compiled, ctx, resolver, hitBlockMap).live(forceBody).hold(holdSeconds), data, ctx, hitBlockMap);
+        ChainWalk walk = new ChainWalk(compiled, ctx, resolver, hitBlockMap).live(forceBody).hold(holdSeconds);
+        setup.accept(walk);
+        ForgeRun run = new ForgeRun(host, forgedId, header, type, walk, data, ctx, hitBlockMap);
         runs.put(forgedId, run);
         log.info("meridian-core: forged {} chain {} (root {}, item {}) at {} — live", type, forgedId,
                 rootId.getAsInt(), itemId,

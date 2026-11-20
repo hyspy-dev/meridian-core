@@ -105,6 +105,14 @@ public final class WorkerImpl implements Worker {
     private volatile CompletableFuture<?> breaking;
     /** Core's urgent holds: a job begun before one waits while it is held ({@link Movement#takeFirst}). */
     private final meridian.core.impl.movement.Urgency urgency;
+    /** The game's items, for a tool's break shape ({@link #shapeCells}); {@code null}: none known. */
+    private volatile java.util.function.Function<String, java.util.Optional<meridian.protocol.ItemBase>> items;
+
+    /** The game's items, by id: a tool's break shape is read from them. */
+    public void items(java.util.function.Function<String, java.util.Optional<meridian.protocol.ItemBase>> items) {
+        this.items = items;
+    }
+
     /** The stamp of the job the calling thread runs ({@link #held}); {@code null} off a job's thread. */
     private static final ThreadLocal<Long> BORN = new ThreadLocal<>();
 
@@ -273,7 +281,13 @@ public final class WorkerImpl implements Worker {
 
     @Override
     public CompletableFuture<Map<String, Integer>> deposit(BlockPos chest, Map<String, Integer> items) {
-        return held(id -> depositNow(id, chest, items), Map.of());
+        return depositOpened(chest, items).thenApply(o -> o.orElse(Map.of()));
+    }
+
+    @Override
+    public CompletableFuture<java.util.Optional<Map<String, Integer>>> depositOpened(BlockPos chest,
+                                                                                    Map<String, Integer> items) {
+        return held(id -> depositNow(id, chest, items), java.util.Optional.empty());
     }
 
     /** What a dig may break on the way, and the tools it takes. */
@@ -357,7 +371,10 @@ public final class WorkerImpl implements Worker {
             log.info("meridian-core: {} to be broken from {}{} (cost {})", text(target), text(s.cell()),
                     s.here() ? ", where the body is" : "", String.format(Locale.ROOT, "%.1f", s.cost()));
             if (!s.here()) {
-                NavResult r = go(Goal.at(s.cell())).get(3, TimeUnit.MINUTES);
+                // Walked - or, with no walk there at all (into a pit with sheer walls, back from a chest
+                // above it), a way dug there: a staircase down, as a player cuts one. A long way round is
+                // walked: what is dug here is the job's, nothing else.
+                NavResult r = travel(id, Goal.at(s.cell()), a -> s.cell().equals(a), null, false, rules, broken);
                 if (!live(id)) {
                     return Outcome.INTERRUPTED;
                 }
@@ -446,6 +463,92 @@ public final class WorkerImpl implements Worker {
     }
 
     /**
+     * A walk to {@code goal} is this many times longer than the straight line at most before the way is
+     * dug instead - out of a pit, up a cliff: a staircase, as a player cuts one.
+     */
+    static final double DETOUR = 2.0;
+    /** ... and a little more than that, for a short trip where any way round is long by the ratio. */
+    static final double DETOUR_SLACK = 4.0;
+
+    /**
+     * Goes to {@code goal}: walks there - unless the walk goes a long way round ({@link #DETOUR}) and
+     * a way dug there is shorter; then that is dug, a move at a time (its blocks broken, then the move
+     * made, as a tunnel to a block is), and the rest walked.
+     */
+    private NavResult travel(int id, Goal goal, Rules rules, List<BlockPos> broken) throws Exception {
+        return travel(id, goal, a -> goal.reachedBy(a.x(), a.y(), a.z()), null, rules, broken);
+    }
+
+    private NavResult travel(int id, Goal goal, java.util.function.Predicate<BlockPos> arrived, BlockPos keep,
+                             Rules rules, List<BlockPos> broken) throws Exception {
+        return travel(id, goal, arrived, keep, true, rules, broken);
+    }
+
+    /**
+     * {@link #travel(int, Goal, Rules, List)} where a way dug ends at a place {@code arrived} takes -
+     * beside a chest, not merely near it through the rock - {@code keep} never broken; with no
+     * {@code shortcut}, a way is dug only when there is no walk there at all, never for a long way round.
+     */
+    private NavResult travel(int id, Goal goal, java.util.function.Predicate<BlockPos> arrived, BlockPos keep,
+                             boolean shortcut, Rules rules, List<BlockPos> broken) throws Exception {
+        Vec3 me = movement.position();
+        if (me == null) {
+            return go(goal).get(3, TimeUnit.MINUTES);
+        }
+        double straight = Math.sqrt(distSq(me, new Vec3(goal.x() + 0.5, goal.y(), goal.z() + 0.5)));
+        List<Navigator.Step> walk = navigator.plan(goal);
+        double walked = 0;
+        Vec3 at = me;
+        for (Navigator.Step st : walk) {
+            Vec3 to = new Vec3(st.x() + 0.5, st.feet(), st.z() + 0.5);
+            walked += Math.sqrt(distSq(at, to));
+            at = to;
+        }
+        Navigator.Step last = walk.isEmpty() ? null : walk.get(walk.size() - 1);
+        boolean walks = last != null && goal.reachedBy(last.x(), last.y(), last.z());
+        if (walks && (!shortcut || walked <= DETOUR * straight + DETOUR_SLACK)) {
+            return go(goal).get(3, TimeUnit.MINUTES);
+        }
+        BlockPos aim = new BlockPos(goal.x(), goal.y(), goal.z());
+        List<TunnelStep> dug = tunnelPlan(aim, arrived, keep);
+        double cost = 0;
+        if (dug != null) {
+            for (TunnelStep st : dug) {
+                cost += 1 + TUNNEL_PER_BLOCK * st.breaks().size();
+            }
+        }
+        if (dug == null || (walks && cost >= walked)) {
+            return go(goal).get(3, TimeUnit.MINUTES);
+        }
+        log.info("meridian-core: {} - a way dug instead ({} move(s), {} block(s); the walk {} long, straight {})",
+                text(aim), dug.size(), dug.stream().mapToInt(st -> st.breaks().size()).sum(),
+                walks ? String.format(Locale.ROOT, "%.0f", walked) : "none",
+                String.format(Locale.ROOT, "%.0f", straight));
+        for (TunnelStep st : dug) {
+            for (BlockPos c : st.breaks()) {
+                if (!live(id)) {
+                    return new NavResult(NavResult.Status.INTERRUPTED, movement.position(), 0, 0);
+                }
+                if (world.blockAt(c.x(), c.y(), c.z()).isAir()) {
+                    continue;
+                }
+                if (nearLava(c) || !breakInReach(c, rules, broken)) {
+                    return go(goal).get(3, TimeUnit.MINUTES);     // could not dig on: walk the rest
+                }
+            }
+            NavResult r = go(Goal.at(st.to())).get(1, TimeUnit.MINUTES);
+            if (!live(id)) {
+                return r;
+            }
+            if (r.status() != NavResult.Status.ARRIVED) {
+                return go(goal).get(3, TimeUnit.MINUTES);
+            }
+        }
+        // At the way's end: there, where it was dug to.
+        return new NavResult(NavResult.Status.ARRIVED, movement.position(), dug.size(), 0);
+    }
+
+    /**
      * A tunnel to the block: from where the body stands, moves along the axes - level, a step up, a
      * step down - each through a way the body's height, breaking what is there, to a place with the
      * block beside it at the feet or the head, or over the head. A move costs 1 and each block to break
@@ -455,6 +558,25 @@ public final class WorkerImpl implements Worker {
      * within {@link #TUNNEL_MOST} moves.
      */
     private List<TunnelStep> tunnelPlan(BlockPos target) {
+        return tunnelPlan(target, beside(target), target);
+    }
+
+    /** A place with the block beside it at the feet or the head, or over the head: where it is got at. */
+    private static java.util.function.Predicate<BlockPos> beside(BlockPos target) {
+        return a -> {
+            int hx = Math.abs(a.x() - target.x()) + Math.abs(a.z() - target.z());
+            return (hx == 1 && (target.y() == a.y() || target.y() == a.y() + 1))
+                    || (hx == 0 && target.y() == a.y() + 2);
+        };
+    }
+
+    /**
+     * A way dug from where the body stands to a place {@code arrived} takes - the same moves as a tunnel
+     * to a block ({@link #tunnelPlan(BlockPos)}), led toward {@code aim}, {@code keep} never broken
+     * ({@code null}: nothing kept).
+     */
+    private List<TunnelStep> tunnelPlan(BlockPos aim, java.util.function.Predicate<BlockPos> arrived, BlockPos keep) {
+        BlockPos target = aim;
         Vec3 me = movement.position();
         Player player = world.player().orElse(null);
         if (me == null || player == null || !movement.onGround()) {
@@ -476,9 +598,7 @@ public final class WorkerImpl implements Worker {
                 continue;
             }
             BlockPos a = n.at();
-            int hx = Math.abs(a.x() - target.x()) + Math.abs(a.z() - target.z());
-            if ((hx == 1 && (target.y() == a.y() || target.y() == a.y() + 1))
-                    || (hx == 0 && target.y() == a.y() + 2)) {
+            if (arrived.test(a)) {
                 List<TunnelStep> out = new ArrayList<>();
                 for (TunnelNode k = n; k.parent() != null; k = k.parent()) {
                     out.add(0, new TunnelStep(k.at(), k.breaks()));
@@ -503,14 +623,14 @@ public final class WorkerImpl implements Worker {
                     cells.add(new BlockPos(x, y, z));
                     BlockPos floor = new BlockPos(x, y - 1, z);
                     if (!world.known(floor.x(), floor.y(), floor.z()) || !movement.cell(floor).solid()
-                            || floor.equals(target)) {
+                            || floor.equals(keep)) {
                         continue;
                     }
                     List<BlockPos> breaks = new ArrayList<>();
                     double extra = 0;
                     boolean ok = true;
                     for (BlockPos cell : cells) {
-                        Boolean pass = clear.computeIfAbsent(cell, k -> tunnelCell(k, target, player));
+                        Boolean pass = clear.computeIfAbsent(cell, k -> tunnelCell(k, keep, player));
                         if (pass == null || !pass) {
                             ok = false;
                             break;
@@ -546,8 +666,8 @@ public final class WorkerImpl implements Worker {
      * Whether a tunnel may go through the cell: air with no fluid, or a block the hotbar breaks that is
      * not the target, with no fluid and no lava beside it.
      */
-    private Boolean tunnelCell(BlockPos cell, BlockPos target, Player player) {
-        if (cell.equals(target) || !world.known(cell.x(), cell.y(), cell.z())) {
+    private Boolean tunnelCell(BlockPos cell, BlockPos keep, Player player) {
+        if (cell.equals(keep) || !world.known(cell.x(), cell.y(), cell.z())) {
             return false;
         }
         Movement.Cell m = movement.cell(cell);
@@ -615,11 +735,54 @@ public final class WorkerImpl implements Worker {
             log.info("meridian-core: {} is out of reach ({})", text(pos), String.format(Locale.ROOT, "%.1f", reach));
             return false;
         }
+        // A tool with a break shape (a drill) breaks the cells round the one aimed at too: what of
+        // them is there now is reported broken with it once gone - the drops lie there as well.
+        Player player = world.player().orElse(null);
+        List<BlockPos> shape = player == null ? null : shapeCells(player.heldItem(), pos, eye);
+        List<BlockPos> there = new ArrayList<>();
+        if (shape != null) {
+            for (BlockPos c : shape) {
+                if (!c.equals(pos) && world.known(c.x(), c.y(), c.z()) && !world.blockAt(c.x(), c.y(), c.z()).isAir()) {
+                    there.add(c);
+                }
+            }
+        }
         if (!breakOne(pos)) {
             return false;
         }
         broken.add(pos);
+        if (!there.isEmpty()) {
+            long until = System.currentTimeMillis() + SHAPE_SETTLE_MS;
+            List<BlockPos> waiting = new ArrayList<>(there);
+            while (true) {
+                waiting.removeIf(c -> {
+                    if (world.blockAt(c.x(), c.y(), c.z()).isAir()) {
+                        broken.add(c);
+                        return true;
+                    }
+                    return false;
+                });
+                if (waiting.isEmpty() || System.currentTimeMillis() > until) {
+                    break;
+                }
+                Thread.sleep(25);
+            }
+        }
         return true;
+    }
+
+    /** How long the cells of a swing's break shape are waited for, after the one aimed at went. */
+    static final long SHAPE_SETTLE_MS = 300;
+
+    /**
+     * The cells a swing with {@code itemId} at {@code target} breaks, looked at from {@code eye}: the
+     * item's box break shape laid out as the server lays it ({@code BreakShape.forEachBlock}, the
+     * View orientation - the look's main axis forward, up the screen's up, right across, the shape
+     * shifted off the block aimed at by its offset). {@code null} for a tool without one (it breaks
+     * the one block) or a shape core does not lay out (a cylinder, the Surface orientation).
+     */
+    List<BlockPos> shapeCells(String itemId, BlockPos target, Vec3 eye) {
+        return null; // 0.5.9: tools carry no break shape - every tool breaks the one block
     }
 
     /**
@@ -646,11 +809,24 @@ public final class WorkerImpl implements Worker {
      */
     private int toolFor(Player player, BlockPos pos, BlockView type, Rules rules) {
         BlockBox within = rules.access().within();
-        java.util.function.Predicate<String> safe = id -> within == null || !interactions.digSweeps(id)
-                || !spills(player, id, pos, within);
-        String part = type == null || type.gatherType() == null ? null : rules.tools().prefer().get(type.gatherType());
+        java.util.function.Predicate<String> safe = id -> within == null
+                || ((!interactions.digSweeps(id) || !spills(player, id, pos, within)) && !shapeSpills(id, pos, within));
+        String part = type == null || type.gatherType() == null ? null
+                : rules.tools().prefer().getOrDefault(type.gatherType(), rules.tools().prefer().get("*"));
         if (part != null) {
             int slot = player.bestToolSlot(type, id -> id.contains(part) && safe.test(id));
+            // A tool with a break shape is worth it while what it takes a swing - its power times the
+            // cells of the shape it breaks - is at least the best single tool's: a drill on rock,
+            // not on the hardest ores, where a pickaxe goes faster.
+            int best = player.bestToolSlot(type, safe);
+            if (slot >= 0 && best >= 0 && best != slot) {
+                List<BlockPos> shape = shapeCells(player.hotbarItem(slot), pos, eye());
+                int cells = shape == null ? 1 : (int) shape.stream().filter(c -> c.equals(pos)
+                        || (world.known(c.x(), c.y(), c.z()) && !world.blockAt(c.x(), c.y(), c.z()).isAir())).count();
+                if (shape != null && player.toolPower(slot, type) * Math.max(1, cells) < player.toolPower(best, type)) {
+                    slot = -1;
+                }
+            }
             if (slot >= 0) {
                 return slot;
             }
@@ -666,6 +842,29 @@ public final class WorkerImpl implements Worker {
             }
         }
         return best;
+    }
+
+    /**
+     * Whether a swing with a tool with a break shape at {@code pos} breaks a block outside the box -
+     * one there, that the tool breaks in earnest.
+     */
+    private boolean shapeSpills(String itemId, BlockPos pos, BlockBox within) {
+        Player player = world.player().orElse(null);
+        List<BlockPos> shape = player == null ? null : shapeCells(itemId, pos, eye());
+        if (shape == null) {
+            return false;
+        }
+        int slot = player.hotbarSlotOf(itemId);
+        for (BlockPos c : shape) {
+            if (within.contains(c.x(), c.y(), c.z()) || !world.known(c.x(), c.y(), c.z())) {
+                continue;
+            }
+            Block n = world.blockAt(c.x(), c.y(), c.z());
+            if (!n.isAir() && (slot < 0 || player.toolPower(slot, n.type()) >= SWEEP_BREAKS)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1131,17 +1330,22 @@ public final class WorkerImpl implements Worker {
      * PutInHotbarOrWindow}: from the hotbar or the storage into the open window first) and closes
      * it; how many of each went in, by what the player holds before and after.
      */
-    private Map<String, Integer> depositNow(int id, BlockPos chest, Map<String, Integer> want) throws Exception {
+    private java.util.Optional<Map<String, Integer>> depositNow(int id, BlockPos chest, Map<String, Integer> want)
+            throws Exception {
         ProxySession s = session.get();
-        if (containers == null || inventory == null || s == null || want == null || want.isEmpty()
+        if (containers == null || inventory == null || s == null
                 || !world.known(chest.x(), chest.y(), chest.z()) || world.blockAt(chest.x(), chest.y(), chest.z()).isAir()) {
-            return Map.of();
+            return java.util.Optional.empty();
         }
-        Map<String, Integer> before = held();
+        if (want == null || want.isEmpty()) {
+            return java.util.Optional.of(Map.of());
+        }
         int window = openContainer(id, chest);
         if (window < 0) {
-            return Map.of();
+            return java.util.Optional.empty();
         }
+        // What is held once there: the way there may have been dug, its drops picked up on it.
+        Map<String, Integer> before = held();
         try {
             Map<String, Integer> left = new HashMap<>(want);
             for (Map.Entry<String, PlayerState.Section> e : inventory.inventories().entrySet()) {
@@ -1175,7 +1379,7 @@ public final class WorkerImpl implements Worker {
                 }
                 moved = now;
             }
-            return moved;
+            return java.util.Optional.of(moved);
         } finally {
             close(s, window);
         }
@@ -1670,12 +1874,20 @@ public final class WorkerImpl implements Worker {
         double reach = Math.max(1.0, interactions.useReach(player == null ? null : player.heldItem())
                 .orElse(DEFAULT_REACH) - REACH_MARGIN);
         if (distSq(eye, centre(chest)) > reach * reach) {
-            NavResult r = go(Goal.near(chest, 2)).get(3, TimeUnit.MINUTES);
-            if (!live(id) || r.status() != NavResult.Status.ARRIVED) {
+            travel(id, Goal.near(chest, 2), beside(chest), chest, new Rules(Access.ANY, Tools.BEST), new ArrayList<>());
+            // Within reach is what counts - a way dug up to it may end short of the goal's ground.
+            Vec3 now = eye();
+            if (!live(id) || now == null || distSq(now, centre(chest)) > (reach + REACH_SLACK) * (reach + REACH_SLACK)) {
                 return -1;
             }
         }
-        faceNow(chest).get(2, TimeUnit.SECONDS);
+        // The head on the container as on a block to break - on the part of it the eyes see, not the middle
+        // behind a chest stacked beside it - and all the way: a small chest is less than a block, and a
+        // look stopped short of its middle may pass over it. A server's guard may open it only to a look
+        // on it, and put the player back otherwise.
+        Vec3 from = eye();
+        Vec3 aim = from == null ? centre(chest) : sight(from, chest).aim();
+        faceNow(aim, Movement.FACE_WITHIN).get(2, TimeUnit.SECONDS);
         int window = containers.windowAt(chest);
         if (window < 0) {
             containers.reaching(chest);

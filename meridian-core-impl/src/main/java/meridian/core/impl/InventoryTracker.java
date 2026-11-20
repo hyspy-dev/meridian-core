@@ -35,6 +35,14 @@ public final class InventoryTracker {
     private final Map<Integer, String> tools = new ConcurrentHashMap<>();
     /** The hotbar's stacks that have worn out: a durability, and none of it left. */
     private final java.util.Set<Integer> brokenHotbar = ConcurrentHashMap.newKeySet();
+    /**
+     * The hotbar's stacks repaired as far as they go: a kit's repair takes from the most durability
+     * the stack has, and at {@link #REPAIR_FLOOR} it is held there - a repair gives it no more than
+     * that ({@code RepairItemInteraction}).
+     */
+    private final java.util.Set<Integer> spentHotbar = ConcurrentHashMap.newKeySet();
+    /** The most durability a repair leaves a stack at the least ({@code RepairItemInteraction}). */
+    public static final double REPAIR_FLOOR = 10;
 
     /** How many slots the hotbar has, as the server last said. */
     private volatile int hotbarCapacity = 9;
@@ -52,9 +60,13 @@ public final class InventoryTracker {
         load(packet.hotbar, hotbar);
         if (packet.hotbar != null && packet.hotbar.items != null) {
             brokenHotbar.clear();
+            spentHotbar.clear();
             packet.hotbar.items.forEach((slot, item) -> {
                 if (item != null && item.maxDurability > 0 && item.durability <= 0) {
                     brokenHotbar.add(slot);
+                }
+                if (item != null && item.maxDurability > 0 && item.maxDurability <= REPAIR_FLOOR) {
+                    spentHotbar.add(slot);
                 }
             });
         }
@@ -154,6 +166,11 @@ public final class InventoryTracker {
     /** Whether the stack in hotbar {@code slot} has worn out - a durability with none of it left. */
     public boolean hotbarBroken(int slot) {
         return brokenHotbar.contains(slot);
+    }
+
+    /** Whether the stack in hotbar {@code slot} is repaired as far as it goes ({@link #REPAIR_FLOOR}). */
+    public boolean hotbarSpent(int slot) {
+        return spentHotbar.contains(slot);
     }
 
     /** How many slots the hotbar has. */
