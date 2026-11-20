@@ -108,6 +108,7 @@ public class MeridianCoreModule implements ProxyModule {
         }
         meridian.core.impl.assets.GameAssetsImpl gameAssets =
                 new meridian.core.impl.assets.GameAssetsImpl(gameDir, userDir, ctx.offloadExecutor());
+        final java.util.Optional<java.nio.file.Path> userDirFinal = userDir;
         ctx.services().provide(meridian.core.api.GameAssets.class, gameAssets);
         // The one block property the server never sends - how a block folds a mirror - read from
         // the same files, in the background, once per installation.
@@ -168,6 +169,16 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.services().provide(EntityTracker.class, entityTracker);
         ctx.services().provide(CameraControl.class, cameraControl);
         ctx.services().provide(DebugRender.class, debugRender);
+        // PacketTap: packets as bytes, for a module that records them (what the server sent, before
+        // the proxy changes it; what went to the server, as it went).
+        PacketTapImpl packetTap = new PacketTapImpl(ctx.getLogger());
+        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY, (direction, session) -> packetTap.fromServer());
+        ctx.registerHandler(Direction.C2S, HandlerPosition.MONITOR, (direction, session) -> packetTap.toServer());
+        ctx.services().provide(meridian.core.api.PacketTap.class, packetTap);
+        // EntityLabels: a short text over an entity, drawn over walls (the game's pop-up text layer).
+        EntityLabelsImpl entityLabels = new EntityLabelsImpl(sessionHolder, ctx.scheduler());
+        ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR, (direction, session) -> entityLabels);
+        ctx.services().provide(meridian.core.api.EntityLabels.class, entityLabels);
 
         // PlayerState: the player as the server keeps them - where, how, and carrying what.
         // Who they are comes from the token they log in with, which is what the server goes by.
@@ -228,7 +239,7 @@ public class MeridianCoreModule implements ProxyModule {
         // answered: assets, ready, pings, teleports. Early, so what another handler drops is still
         // answered; an ordinary session passes straight through.
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
-                (direction, session) -> new HeadlessClientHandler(entityTracker));
+                (direction, session) -> new HeadlessClientHandler(entityTracker, userDirFinal));
 
         // Movement: the headless player's body - what the ground allows (the blocks' own collision
         // shapes) and moves along it, reported tick by tick as the client reports them.
@@ -241,6 +252,8 @@ public class MeridianCoreModule implements ProxyModule {
                 () -> entityTracker.localPosition().orElse(null),
                 entityTracker::localEntityId, entityTracker::effectsOf, clientTeleports);
         ctx.services().provide(meridian.core.api.Movement.class, movement);
+        // A trip flies only with flight switched on (client-control's Fly): in creative it walks.
+        movement.flightOn(clientSpoof::flight);
         movementRef[0] = movement;
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY, (direction, session) -> movement.observer());
         // Last on the client side: what actually goes out - a teleport's answer, core's own teleport.
@@ -371,6 +384,24 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.registerHandler(Direction.BOTH, HandlerPosition.NORMAL,
                 (direction, session) -> interactionControl.newObserver());
 
+        RangedCombatImpl ranged = new RangedCombatImpl(entityTracker, inventoryTracker, playerState,
+                interactionControl, movement, terrain, ctx.scheduler(), ctx.offloadExecutor());
+        interactionControl.projectiles(ranged);
+        ctx.services().provide(meridian.core.api.RangedCombat.class, ranged);
+        ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR, (direction, session) -> {
+            return new meridian.api.packet.PacketHandler() {
+                @Override public Action handleS2C(io.netty.channel.ChannelHandlerContext channel,
+                        meridian.api.packet.Packet packet, meridian.api.session.ProxySession connection) {
+                    if (packet instanceof meridian.protocol.packets.setup.WorldSettings) ranged.reset();
+                    if (packet instanceof meridian.protocol.packets.player.JoinWorld) ranged.worldChanged();
+                    if (packet instanceof meridian.protocol.packets.assets.UpdateProjectileConfigs configs) ranged.update(configs);
+                    if (packet instanceof meridian.protocol.packets.setup.SetTimeDilation time) ranged.timeDilation(time.timeDilation);
+                    if (packet instanceof meridian.protocol.packets.entities.EntityUpdates) ranged.observeMotion();
+                    return Action.FORWARD;
+                }
+            };
+        });
+
         // --- World: position-addressed facade over the trackers --------------
         // Block / Player building blocks — a Layer-2 module queries and acts,
         // writing its own logic.
@@ -447,6 +478,7 @@ public class MeridianCoreModule implements ProxyModule {
         meridian.core.impl.navigation.WorkerImpl worker = new meridian.core.impl.navigation.WorkerImpl(
                 movement, world, interactionControl, entityTracker, walker, containers, playerState,
                 () -> sessionHolder.get().orElse(null), ctx.offloadExecutor(), ctx.getLogger());
+        worker.items(itemRegistry::item);
         ctx.services().provide(meridian.core.api.Worker.class, worker);
         meridian.core.impl.navigation.NavigationPanel navigation =
                 new meridian.core.impl.navigation.NavigationPanel(walker, worker, movement, interactionControl);
@@ -483,12 +515,23 @@ public class MeridianCoreModule implements ProxyModule {
                 .liveText("No-clip", () -> noClip.isEnabled() ? "on (client-side)" : "off");
         // --- end 0.6+ only ----------------------------------------------------------
 
+        // Players' names starred in what reaches the game (registered last, below).
+        Anonymizer anonymizer = new Anonymizer(playerState::name, entityTracker::isPlayer);
+        settings.bool("anonymize", "Anonymise players (names as stars, own included)", false,
+                anonymizer::setEnabled);
+        settings.persistent("anonymize");
+
         settings.section("Go to a point", navigation.section());
         ctx.registerSettings(settings.build());
 
         // The services above on the proxy's command channel: core <conn> ..., for driving and
         // checking the forged chains from outside the game.
-        CoreCommands.register(ctx, sessionHolder);
+        CoreCommands.register(ctx, sessionHolder, anonymizer, entityLabels);
+
+        // Last of core's handlers, at MONITOR: core's readers - the entity tracker among them, which
+        // watches at MONITOR - have seen the real names by then, and only what goes on to the game
+        // is starred. A module's MONITOR handler, registered after core, sees the stars.
+        ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR, (direction, session) -> anonymizer.handler());
 
         ctx.getLogger().info("meridian-core ready (WorldState, EntityTracker, CameraControl, "
                 + "InteractionRegistry, InventoryTracker, ChunkTracker, ItemRegistry, "

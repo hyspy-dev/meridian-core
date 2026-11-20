@@ -32,27 +32,32 @@ final class CoreCommands {
             + "use|plant|water <x y z> | hit|dig <x y z> [times] | break <x y z> [maxSwings] | place <x y z> [face] [orient] | "
             + "hits [seconds] | swings [seconds] | fightitem [item] | repair <item> | urgent <seconds> | wheel <seconds> | "
             + "swingguard <entity> [after <ms>] [hold <s>] [overpower] | "
-            + "entities [range] [players] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | dodge | assets | asset <path> | "
+            + "bow <entity>|<x y z>|status | entities [range] [players] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | dodge | assets | asset <path> | "
             + "movement | body | stand <x y z> | surface <x z> [wait <s>] | safe <x y z> [radius] | hurts <x y z> | move <walk|jump|mantle|drop|leap|swim|climb|fly> <x y z> [walk|run|sprint] | "
             + "predict <kind> <x y z> [gait] [trace] | hold <forward> <strafe> <yaw> [jump] [crouch] [sprint] [walk] [fly] | hold off | halt | "
             + "spoof [gamemode <creative|adventure|off> | flight|stamina|death|dropflying|swimming|nofall <on|off>] | "
             + "rotation <index> [rotate <x|y|z> [quarters] | mirror <x|y|z>] | matches <x y z> <name|id> [rotation] | "
+            + "labels [show <entity> <rrggbb> <text> | hide <entity> | clear | font <size>] | "
             + "glow <name-contains> [r g b] | glow off | flip <block name> | "
             + "prefab capture <x0 y0 z0> <x1 y1 z1> <file> | prefab read <file> | "
             + "prefab turned <file> [rotate <x|y|z> [quarters] | flip <x|y|z>]...";
 
     private final ModuleContext ctx;
     private final SessionHolder sessions;
+    private final Anonymizer anonymizer;
+    private final EntityLabelsImpl labels;
 
-    private CoreCommands(ModuleContext ctx, SessionHolder sessions) {
+    private CoreCommands(ModuleContext ctx, SessionHolder sessions, Anonymizer anonymizer, EntityLabelsImpl labels) {
         this.ctx = ctx;
         this.sessions = sessions;
+        this.anonymizer = anonymizer;
+        this.labels = labels;
     }
 
     /** Offers the commands; a proxy without a command channel - or too old to have one - has none. */
-    static void register(ModuleContext ctx, SessionHolder sessions) {
+    static void register(ModuleContext ctx, SessionHolder sessions, Anonymizer anonymizer, EntityLabelsImpl labels) {
         try {
-            CoreCommands c = new CoreCommands(ctx, sessions);
+            CoreCommands c = new CoreCommands(ctx, sessions, anonymizer, labels);
             ctx.registerCommand("core", USAGE, c::run);
         } catch (NoSuchMethodError olderProxy) {
             // no command channel there
@@ -80,6 +85,8 @@ final class CoreCommands {
             case "look" -> CompletableFuture.completedFuture(look());
             case "inv" -> CompletableFuture.completedFuture(inventory());
             case "stats" -> CompletableFuture.completedFuture(stats());
+            case "anon" -> CompletableFuture.completedFuture(anon(args));
+            case "labels" -> CompletableFuture.completedFuture(labels.command(args));
             case "hits" -> CompletableFuture.completedFuture(hits(args));
             case "swings" -> CompletableFuture.completedFuture(swings(args));
             case "fightitem" -> CompletableFuture.completedFuture(fightItem(args));
@@ -124,6 +131,30 @@ final class CoreCommands {
             case "entities" -> CompletableFuture.completedFuture(
                     entities(args.size() > 1 ? Double.parseDouble(args.get(1)) : 32,
                             args.size() > 2 && args.get(2).equalsIgnoreCase("players")));
+            case "bow" -> {
+                var ranged = ctx.services().require(meridian.core.api.RangedCombat.class);
+                if (args.size() == 2 && args.get(1).equals("cancel")) {
+                    ranged.cancel();
+                    yield CompletableFuture.completedFuture(Map.of("cancelled", true));
+                }
+                if (args.size() == 2 && args.get(1).equals("status")) {
+                    yield CompletableFuture.completedFuture(((RangedCombatImpl) ranged).describe());
+                }
+                CompletableFuture<meridian.core.api.RangedCombat.Shot> shot = args.size() == 2
+                        ? ranged.shoot(Integer.parseInt(args.get(1)))
+                        : ranged.shoot(new Vec3(Double.parseDouble(args.get(1)), Double.parseDouble(args.get(2)), Double.parseDouble(args.get(3))));
+                yield shot.thenApply(r -> {
+                    Map<String, Object> out = new LinkedHashMap<>();
+                    out.put("status", r.status().name()); out.put("reason", r.reason());
+                    out.put("projectile", r.projectile()); out.put("entity", r.entity()); out.put("contact", r.contact());
+                    out.put("chargeSeconds", r.chargeSeconds()); out.put("flightSeconds", r.flightSeconds());
+                    if (Double.isFinite(r.damage())) out.put("damage", r.damage());
+                    out.put("primary", r.primary()); out.put("impact", r.impact());
+                    out.put("outcome", java.util.stream.Stream.of(r.primary(), r.impact())
+                            .filter(java.util.Objects::nonNull).toList());
+                    return out;
+                });
+            }
             case "attack" -> {
                 int id = Integer.parseInt(args.get(1));
                 int n = times(args, 2);
@@ -809,6 +840,18 @@ final class CoreCommands {
                     out.put("healthAfter", entityTracker().healthOf(id).map(h -> (Object) h.value()).orElse("unknown"));
                     return out;
                 });
+    }
+
+    /** {@code anon [on|off]}: "Anonymise players" switched, and the names known; {@code anon star <text>} starred. */
+    private Object anon(List<String> args) {
+        Anonymizer a = anonymizer;
+        if (args.size() >= 2 && args.get(1).equalsIgnoreCase("star")) {
+            return Map.of("text", a.star(String.join(" ", args.subList(2, args.size()))));
+        }
+        if (args.size() >= 2) {
+            a.setEnabled(args.get(1).equalsIgnoreCase("on") || args.get(1).equalsIgnoreCase("true"));
+        }
+        return Map.of("enabled", a.isEnabled(), "names", new java.util.TreeSet<>(a.names()));
     }
 
     private Object stats() {

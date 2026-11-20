@@ -115,6 +115,24 @@ public final class Terrain {
         boxesOf(b, out);
     }
 
+    /** A solid collision shape with its owning block's cell. */
+    public record ProjectileShape(int x, int y, int z, double[] bounds) { }
+
+    /** Solid shapes for a projectile; unknown cells and fluids cannot be treated as free air. */
+    public java.util.List<ProjectileShape> projectileBoxes(int x, int y, int z) {
+        if (!known(x, y, z)) throw new IllegalStateException("Unknown projectile path at " + x + "," + y + "," + z);
+        if (chunks.fluidCellAt(x, y, z) != null) throw new IllegalStateException("Projectile path enters fluid");
+        java.util.List<ProjectileShape> out = new java.util.ArrayList<>();
+        for (int cy = y - 1; cy <= y; cy++) {
+            Placed b = blockAt(x, cy, z);
+            if (b == null || b.type().material != BlockMaterial.Solid) continue;
+            java.util.List<double[]> boxes = new java.util.ArrayList<>();
+            boxesOf(b, boxes);
+            for (double[] box : boxes) out.add(new ProjectileShape(b.x(), b.y(), b.z(), box));
+        }
+        return out;
+    }
+
     /**
      * Whether the body, centred at {@code (cx, cz)} with its feet at {@code feet} and {@code height}
      * tall, hits no solid box - and stands only where core knows the world.

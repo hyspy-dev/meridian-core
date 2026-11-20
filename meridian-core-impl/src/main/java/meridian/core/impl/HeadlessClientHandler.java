@@ -67,8 +67,16 @@ final class HeadlessClientHandler implements PacketHandler {
     /** Whether a page of the server's is up on the headless client, owed an acknowledgement on its close. */
     private boolean pageUp;
 
+    /** The game's user folder: the player's own preferences ({@link PlayerPreferences}) are read from it. */
+    private final java.util.Optional<java.nio.file.Path> userDir;
+
     HeadlessClientHandler(EntityTrackerImpl pose) {
+        this(pose, java.util.Optional.empty());
+    }
+
+    HeadlessClientHandler(EntityTrackerImpl pose, java.util.Optional<java.nio.file.Path> userDir) {
         this.pose = pose;
+        this.userDir = userDir;
     }
 
     @Override
@@ -108,6 +116,13 @@ final class HeadlessClientHandler implements PacketHandler {
             ready.readyForGameplay = true;
             client.sendAsClient(ready);
             log.info("meridian-core: headless {} - entity {}, ready for gameplay", client.username(), id.clientId);
+            // The player's preferences, as the game sends them on joining: hidden armor stays hidden,
+            // picked-up items go where the player has them go.
+            PlayerPreferences.fromGame(userDir).ifPresent(prefs -> {
+                client.sendAsClient(prefs);
+                log.info("meridian-core: headless {} - the player's preferences sent (armor hidden: {} {} {} {})",
+                        client.username(), prefs.hideHelmet, prefs.hideCuirass, prefs.hideGauntlets, prefs.hidePants);
+            });
         } else if (packet instanceof ClientTeleport teleport) {
             acknowledge(client, teleport);
         } else if (packet instanceof meridian.protocol.packets.interface_.CustomPage) {

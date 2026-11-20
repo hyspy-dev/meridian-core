@@ -59,6 +59,7 @@ public final class MovementImpl implements Movement {
     private final ClientTeleports teleports;
     /** The urgent holds ({@link #takeFirst}), for what core holds back while one is held. */
     private final Urgency urgency = new Urgency();
+    private final LookReports lookReports = new LookReports();
 
     public MovementImpl(Terrain terrain, BlockHitboxes hitboxes, meridian.core.impl.FluidCatalog fluids,
                         Scheduler scheduler, Supplier<HeadlessClient> client, Supplier<Vec3> trackedFeet,
@@ -78,6 +79,7 @@ public final class MovementImpl implements Movement {
         this.reach = new BodySettings(physics);
         this.body = new Body(scheduler, physics, this::driver, this::effects);
         this.game = new GameWheel(body, teleports);
+        this.game.reported(m -> lookReports.reported(m.lookOrientation));
     }
 
     /** Who moves the body now: a headless client, a game's body core holds, or nobody. */
@@ -164,9 +166,11 @@ public final class MovementImpl implements Movement {
                     if (session.headless() == null) {
                         teleports.server(teleport.teleportId);
                     }
+                    lookReports.reset();
                     game.lost(Movement.Release.TELEPORT);
                     body.teleported(teleport.resetVelocity);
                 } else if (packet instanceof JoinWorld) {
+                    lookReports.reset();
                     game.lost(Movement.Release.WORLD);
                 } else if (packet instanceof ChangeVelocity push) {
                     body.push(push.x, push.y, push.z, push.changeType, push.config);
@@ -194,8 +198,9 @@ public final class MovementImpl implements Movement {
         return new PacketHandler() {
             @Override
             public Action handleC2S(ChannelHandlerContext ctx, Packet packet, ProxySession session) {
-                if (packet instanceof ClientMovement m && client.get() != null) {
-                    body.sentByOther(m);
+                if (packet instanceof ClientMovement m) {
+                    if (client.get() != null) body.sentByOther(m);
+                    lookReports.reported(m.lookOrientation);
                 }
                 return Action.FORWARD;
             }
@@ -424,6 +429,19 @@ public final class MovementImpl implements Movement {
     }
 
     @Override
+    public boolean flightOn() {
+        return flightOn.getAsBoolean();
+    }
+
+    /** Where flight being switched on is read from - client-control's Fly, through core's ClientSpoof. */
+    public void flightOn(java.util.function.BooleanSupplier on) {
+        this.flightOn = on == null ? () -> true : on;
+        physics.flightOn = this.flightOn;
+    }
+
+    private volatile java.util.function.BooleanSupplier flightOn = () -> true;
+
+    @Override
     public Capabilities capabilities() {
         return reach.capabilities();
     }
@@ -524,10 +542,14 @@ public final class MovementImpl implements Movement {
 
     @Override
     public CompletableFuture<Boolean> look(meridian.core.api.Look look, double within) {
-        if (look == null || !Float.isFinite(look.yaw()) || !Float.isFinite(look.pitch()) || !Double.isFinite(within)) {
+        if (look == null || !Float.isFinite(look.yaw()) || !Float.isFinite(look.pitch()) || !Double.isFinite(within) || within < 0) {
             return CompletableFuture.completedFuture(false);
         }
-        return body.look(look.yaw(), look.pitch(), within);
+        return body.look(look.yaw(), look.pitch(), within).thenCompose(turned -> {
+            if (!turned) return CompletableFuture.completedFuture(false);
+            BodyState s = body.snapshot();
+            return s == null ? CompletableFuture.completedFuture(false) : lookReports.await(s.yaw, s.pitch);
+        });
     }
 
     @Override

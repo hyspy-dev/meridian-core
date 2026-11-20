@@ -49,7 +49,7 @@ final class Repairs {
     private final InventoryTracker inventory;
     private final ItemRegistry items;
     private final PlayerState player;
-    private volatile InteractionControl hands;
+    private volatile meridian.core.impl.interaction.InteractionControlImpl hands;
     /** The repair list a repair under way waits for; {@code null} when none does. */
     private volatile CompletableFuture<CustomPage> listed;
     /** The acknowledgement of the list going out to the server. */
@@ -62,13 +62,18 @@ final class Repairs {
         this.player = player;
     }
 
-    void hands(InteractionControl hands) {
+    void hands(meridian.core.impl.interaction.InteractionControlImpl hands) {
         this.hands = hands;
     }
 
-    /** Repairs the most worn {@code itemId} the player carries with a kit from the hotbar. */
+    /**
+     * Repairs the most worn {@code itemId} the player carries with a kit from the hotbar. The hands
+     * are the repair's from the slot switch to the kit to the switch back ({@code withHands}): a guard
+     * turning to a mob meanwhile waits the few seconds - 20.11 one switched the slot away from the kit
+     * between the switch and the use, the repair came to nothing and the pickaxe broke.
+     */
     synchronized CompletableFuture<Boolean> repair(String itemId) {
-        InteractionControl h = hands;
+        meridian.core.impl.interaction.InteractionControlImpl h = hands;
         ProxySession live = session.get().orElse(null);
         if (h == null || live == null || itemId == null || itemId.isEmpty()) {
             return CompletableFuture.completedFuture(false);
@@ -77,6 +82,17 @@ final class Repairs {
         double worn = worst(itemId);
         if (kit < 0 || !(worn < 1)) {
             log.info("meridian-core: repair of {} - {}", itemId, kit < 0 ? "no repair kit in the hotbar" : "nothing worn");
+            return CompletableFuture.completedFuture(false);
+        }
+        return h.withHands(hand -> repairHolding(hand, live, itemId));
+    }
+
+    /** The repair's steps, with the hands held. */
+    private CompletableFuture<Boolean> repairHolding(meridian.core.impl.interaction.InteractionControlImpl.Hands h,
+                                                     ProxySession live, String itemId) {
+        int kit = kitSlot();
+        double worn = worst(itemId);
+        if (kit < 0 || !(worn < 1)) {
             return CompletableFuture.completedFuture(false);
         }
         int back = inventory.activeHotbarSlot();

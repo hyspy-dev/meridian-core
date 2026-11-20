@@ -1,0 +1,285 @@
+{
+ "note": "Recorded 17.11.2026 16:51, game 0.7 (build 258), Weapon_Shortbow_Adamantite, live server through the proxy. t = seconds of day (client-side capture at the proxy). Shots: release packet (Primary chain op with generatedUUID): attackerPos/attackerRot (radians) and chargeValue. Contacts: first ProjectileHit/ProjectileMiss chain per arrow, sent by the client.",
+ "shots": [
+  {
+   "uuid": "b8d7476d-cfc1-435d-8c0d-71d275483cb6",
+   "t": 60675.72,
+   "attackerPos": {
+    "x": -16.281450271606445,
+    "y": 5.599999904632568,
+    "z": -15.719743728637695
+   },
+   "attackerRot": {
+    "yaw": 3.1339855,
+    "pitch": 0.0017500151,
+    "roll": 0.0
+   },
+   "rootInteraction": 4886,
+   "charge": 1.807871
+  },
+  {
+   "uuid": "be0776f9-6f37-413a-9f80-7a747650c9ba",
+   "t": 60677.537,
+   "attackerPos": {
+    "x": -16.2987117767334,
+    "y": 5.599999904632568,
+    "z": -15.333163261413574
+   },
+   "attackerRot": {
+    "yaw": 3.049986,
+    "pitch": 0.021000015,
+    "roll": 0.0
+   },
+   "rootInteraction": 4885,
+   "charge": 1.034298
+  },
+  {
+   "uuid": "6e32ca78-f757-4f39-bcae-293734d123fd",
+   "t": 60683.513,
+   "attackerPos": {
+    "x": -27.283830642700195,
+    "y": 5.599999904632568,
+    "z": 2.351508378982544
+   },
+   "attackerRot": {
+    "yaw": 2.4812384,
+    "pitch": 0.036750015,
+    "roll": 0.0
+   },
+   "rootInteraction": 4885,
+   "charge": 0.9007013
+  },
+  {
+   "uuid": "7f33ff2f-54e5-4e2b-b857-71685e04dcb8",
+   "t": 60685.07,
+   "attackerPos": {
+    "x": -28.98316192626953,
+    "y": 5.599999904632568,
+    "z": 6.0864057540893555
+   },
+   "attackerRot": {
+    "yaw": 2.4689884,
+    "pitch": 0.033250015,
+    "roll": 0.0
+   },
+   "rootInteraction": 4884,
+   "charge": 0.7668582
+  },
+  {
+   "uuid": "73f73996-43fd-4c56-bb17-e1622792cb29",
+   "t": 60686.771,
+   "attackerPos": {
+    "x": -29.69697380065918,
+    "y": 5.599999904632568,
+    "z": 6.986935138702393
+   },
+   "attackerRot": {
+    "yaw": 2.4689884,
+    "pitch": 0.18200018,
+    "roll": 0.0
+   },
+   "rootInteraction": 4885,
+   "charge": 0.9003438
+  }
+ ],
+ "contacts": [
+  {
+   "uuid": "b8d7476d-cfc1-435d-8c0d-71d275483cb6",
+   "type": "ProjectileHit",
+   "t": 60676.104,
+   "entityId": 23599,
+   "hitLocation": {
+    "x": -16.538845,
+    "y": 4.8568463,
+    "z": 12.287059
+   },
+   "hitNormal": {
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.0
+   },
+   "blockPosition": {
+    "x": -17.0,
+    "y": 4.0,
+    "z": 12.0
+   },
+   "hitDetail": "null"
+  },
+  {
+   "uuid": "be0776f9-6f37-413a-9f80-7a747650c9ba",
+   "type": "ProjectileMiss",
+   "t": 60677.986,
+   "entityId": -1,
+   "hitLocation": {
+    "x": -18.16621,
+    "y": 4.0790734,
+    "z": 4.4271145
+   },
+   "hitNormal": {
+    "x": 0.0,
+    "y": 1.0,
+    "z": 0.0
+   },
+   "blockPosition": {
+    "x": -19.0,
+    "y": 3.0,
+    "z": 4.0
+   },
+   "hitDetail": "null"
+  },
+  {
+   "uuid": "5de7b356-25a4-4dc0-9472-772ed120a311",
+   "type": "ProjectileHit",
+   "t": 60680.253,
+   "entityId": 23599,
+   "hitLocation": {
+    "x": -38.95457,
+    "y": 4.5822186,
+    "z": 19.332249
+   },
+   "hitNormal": {
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.0
+   },
+   "blockPosition": {
+    "x": -39.0,
+    "y": 4.0,
+    "z": 19.0
+   },
+   "hitDetail": "null"
+  },
+  {
+   "uuid": "9af2dd31-33c3-40c3-baf6-83682fdca8a4",
+   "type": "ProjectileHit",
+   "t": 60682.333,
+   "entityId": 23599,
+   "hitLocation": {
+    "x": -40.119873,
+    "y": 5.386394,
+    "z": 18.031878
+   },
+   "hitNormal": {
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.0
+   },
+   "blockPosition": {
+    "x": -41.0,
+    "y": 5.0,
+    "z": 18.0
+   },
+   "hitDetail": "null"
+  },
+  {
+   "uuid": "6e32ca78-f757-4f39-bcae-293734d123fd",
+   "type": "ProjectileHit",
+   "t": 60683.993,
+   "entityId": 23599,
+   "hitLocation": {
+    "x": -40.595024,
+    "y": 3.972027,
+    "z": 19.40716
+   },
+   "hitNormal": {
+    "x": 0.0,
+    "y": 1.0,
+    "z": 0.0
+   },
+   "blockPosition": {
+    "x": -41.0,
+    "y": 3.0,
+    "z": 19.0
+   },
+   "hitDetail": "null"
+  },
+  {
+   "uuid": "7f33ff2f-54e5-4e2b-b857-71685e04dcb8",
+   "type": "ProjectileMiss",
+   "t": 60685.454,
+   "entityId": -1,
+   "hitLocation": {
+    "x": -36.9075,
+    "y": 4.0799336,
+    "z": 15.886717
+   },
+   "hitNormal": {
+    "x": 0.0,
+    "y": 1.0,
+    "z": 0.0
+   },
+   "blockPosition": {
+    "x": -37.0,
+    "y": 3.0,
+    "z": 15.0
+   },
+   "hitDetail": "null"
+  },
+  {
+   "uuid": "73f73996-43fd-4c56-bb17-e1622792cb29",
+   "type": "ProjectileMiss",
+   "t": 60687.522,
+   "entityId": -1,
+   "hitLocation": {
+    "x": -48.744324,
+    "y": 5.092676,
+    "z": 30.883371
+   },
+   "hitNormal": {
+    "x": 0.0,
+    "y": 0.0,
+    "z": -1.0
+   },
+   "blockPosition": {
+    "x": -49.0,
+    "y": 5.0,
+    "z": 31.0
+   },
+   "hitDetail": "null"
+  },
+  {
+   "uuid": "e10a3eed-b844-4e2f-b30e-2510890371c3",
+   "type": "ProjectileHit",
+   "t": 60689.108,
+   "entityId": 23599,
+   "hitLocation": {
+    "x": -39.940277,
+    "y": 4.256779,
+    "z": 20.096848
+   },
+   "hitNormal": {
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.0
+   },
+   "blockPosition": {
+    "x": -40.0,
+    "y": 4.0,
+    "z": 20.0
+   },
+   "hitDetail": "null"
+  },
+  {
+   "uuid": "44c0f3a1-6702-4067-82e2-56baf440de92",
+   "type": "ProjectileHit",
+   "t": 60691.642,
+   "entityId": 23599,
+   "hitLocation": {
+    "x": -39.947296,
+    "y": 5.05988,
+    "z": 20.190266
+   },
+   "hitNormal": {
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.0
+   },
+   "blockPosition": {
+    "x": -40.0,
+    "y": 5.0,
+    "z": 20.0
+   },
+   "hitDetail": "null"
+  }
+ ]
+}

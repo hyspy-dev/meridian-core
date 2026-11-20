@@ -220,13 +220,20 @@ final class PlayerImpl implements Player {
             if (reach.isEmpty()) {
                 continue;     // a bow, a shield: no swing that hits
             }
-            double score = item.itemLevel * 100.0 + item.qualityIndex + reach.getAsDouble();
+            double score = item.itemLevel * 100.0 + item.qualityIndex + reach.getAsDouble()
+                    - (inventory.hotbarSpent(e.getKey()) ? 1e6 : 0);   // repaired as far as it goes: last
             if (score > bestScore) {
                 bestScore = score;
                 best = e.getKey();
             }
         }
         return best;
+    }
+
+    @Override
+    public boolean placesBlock(String itemId) {
+        ItemBase item = itemId == null ? null : items.item(itemId).orElse(null);
+        return item != null && item.blockId > 0 && !item.consumable && item.tool == null && item.weapon == null;
     }
 
     @Override
@@ -258,9 +265,7 @@ final class PlayerImpl implements Player {
      */
     private int strongest(Map<Integer, String> hotbar, BlockBreaking breaking,
                           java.util.function.Predicate<String> among) {
-        int best = -1;
-        double bestPower = 0;
-        float bestSpeed = 0;
+        java.util.List<ToolChoice> candidates = new java.util.ArrayList<>();
         for (Map.Entry<Integer, String> e : hotbar.entrySet()) {
             if (!among.test(e.getValue())) {
                 continue;
@@ -270,14 +275,17 @@ final class PlayerImpl implements Player {
             if (p <= 0) {
                 continue;                           // no tool for it, or none at all
             }
-            float speed = item.tool.speed;
-            if (p > bestPower || (p == bestPower && best >= 0 && speed > bestSpeed)) {
-                best = e.getKey();
-                bestPower = p;
-                bestSpeed = speed;
-            }
+            candidates.add(new ToolChoice(e.getKey(), kindOf(e.getValue()), p, item.tool.speed,
+                    inventory.hotbarBroken(e.getKey()), inventory.hotbarSpent(e.getKey())));
         }
-        return best;
+        return ToolChoice.pick(candidates);
+    }
+
+    /** A tool's kind: its id up to the material - {@code Tool_Pickaxe_} of {@code Tool_Pickaxe_Iron}. */
+    static String kindOf(String itemId) {
+        int first = itemId.indexOf('_');
+        int second = first < 0 ? -1 : itemId.indexOf('_', first + 1);
+        return second < 0 ? itemId : itemId.substring(0, second + 1);
     }
 
     /**
