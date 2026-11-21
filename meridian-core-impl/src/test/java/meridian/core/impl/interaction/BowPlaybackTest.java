@@ -48,7 +48,26 @@ public final class BowPlaybackTest {
 
         var cancelled = new ChainWalk(chargingRoot, ctx, null, Map.of()).draw(0, t -> false, uuid -> { });
         check(cancelled.tick().ops().getFirst().chargeValue == -2f, "cancel did not use CHARGING_CANCELED");
-        System.out.println("PASS BowPlayback: stable UUID, replay, real elapsed charge and cancel");
+        // The old bow has no zero-charge label. A release below its first tier finishes
+        // without jumping to any label; the enclosing Serial can then return reserved Ammo.
+        charge.chargedNext = Map.of(0.1f, 3);
+        var oldBow = InteractionFlattener.compile(3, new int[] {2}, n -> n == 2 ? charge : projectile);
+        AtomicInteger oldLaunches = new AtomicInteger();
+        var oldResolver = new InteractionSimulator.RootResolver() {
+            public CompiledInteraction resolve(int rootId) { return oldBow; }
+            public void projectile(ProjectileInteraction node, InteractionSyncData data, double seconds) {
+                oldLaunches.incrementAndGet();
+            }
+        };
+        var tap = new ChainWalk(oldBow, ctx, oldResolver, Map.of()).hold(0);
+        var zero = tap.tick().ops().getFirst();
+        for (int i = 0; i < 30 && !tap.done(); i++) tap.tick();
+        check(tap.done() && zero.chargeValue == 0 && oldLaunches.get() == 0,
+                "tap took the first positive charge tier");
+        var minimum = new ChainWalk(oldBow, ctx, oldResolver, Map.of());
+        for (int i = 0; i < 30 && !minimum.done(); i++) minimum.tick();
+        check(minimum.done() && oldLaunches.get() == 1, "default minimum hold stopped firing");
+        System.out.println("PASS BowPlayback: stable UUID, replay, elapsed charge, cancel, tap below first tier");
     }
     private static void check(boolean condition, String reason) {
         if (!condition) throw new AssertionError(reason);

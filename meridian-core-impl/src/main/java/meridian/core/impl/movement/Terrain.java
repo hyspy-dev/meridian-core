@@ -214,7 +214,14 @@ public final class Terrain {
      * above it.
      */
     public OptionalInt surfaceAt(int x, int z) {
-        if (!chunks.columnKnown(x, z)) {
+        if (!chunks.columnKnown(x, z) || chunks.columnHeightsPending(x, z)) {
+            return OptionalInt.empty();
+        }
+        // A known air section above a cave does not prove that a higher, unknown section is air.
+        // Wait for the top advertised by the server's heightmap before landing on a lower shelf.
+        int advertised = chunks.columnHeightAt(x, z);
+        if (advertised >= COLUMN_BOTTOM && (!chunks.receivedSection(x, advertised, z)
+                || !cellKnown(x, advertised, z))) {
             return OptionalInt.empty();
         }
         int unknown = Integer.MAX_VALUE;    // the lowest cell not known, of those passed

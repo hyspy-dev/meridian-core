@@ -107,8 +107,9 @@ public final class InteractionControlImpl implements InteractionControl {
      * How a forge is pressed: as one more in the queue, or now, cutting short the chain in flight
      * where that chain's rules let a chain of its type interrupt it ({@link ChainRules}).
      */
-    private record Press(InteractionType type, boolean now) {
-        static final Press QUEUED = new Press(null, false);
+    private record Press(InteractionType type, boolean now, boolean waitForServer) {
+        static final Press QUEUED = new Press(null, false, false);
+        static final Press AFTER_SERVER = new Press(null, false, true);
     }
 
     /** A unit of forging work on the serialized queue: builds the chain and starts playing it. */
@@ -118,7 +119,7 @@ public final class InteractionControlImpl implements InteractionControl {
     }
 
     /** A forge waiting on the queue, paired with the future its caller holds. */
-    private record QueuedItem(QueuedForge forge, CompletableFuture<InteractionOutcome> done) {}
+    private record QueuedItem(QueuedForge forge, CompletableFuture<InteractionOutcome> done, boolean waitForServer) {}
 
     private final InteractionRegistry registry;
     private final InventoryTracker inventory;
@@ -1289,7 +1290,7 @@ public final class InteractionControlImpl implements InteractionControl {
     @Override
     public CompletableFuture<InteractionOutcome> useItem(Duration hold, boolean interrupt) {
         return enqueueForge(() -> forgeAim(-1, InteractionType.Secondary, seconds(hold)),
-                interrupt ? new Press(InteractionType.Secondary, true) : Press.QUEUED);
+                interrupt ? new Press(InteractionType.Secondary, true, false) : Press.AFTER_SERVER);
     }
 
     @Override
@@ -1757,10 +1758,10 @@ public final class InteractionControlImpl implements InteractionControl {
     private synchronized CompletableFuture<InteractionOutcome> enqueueForge(QueuedForge forge, Press press, Object holder) {
         CompletableFuture<InteractionOutcome> done = new CompletableFuture<>();
         if (handsHolder != null && handsHolder != holder) {
-            heldBack.addLast(new QueuedItem(forge, done));
+            heldBack.addLast(new QueuedItem(forge, done, press.waitForServer()));
             return done;
         }
-        forgeQueue.addLast(new QueuedItem(forge, done));
+        forgeQueue.addLast(new QueuedItem(forge, done, press.waitForServer()));
         if (!forging) {
             runNextForge();
         } else if (press.now() && forgeQueue.size() == 1) {
@@ -1798,13 +1799,21 @@ public final class InteractionControlImpl implements InteractionControl {
      * plugin's choice. Called only with the {@code this} monitor held.
      */
     private synchronized void runNextForge() {
-        QueuedItem next = forgeQueue.pollFirst();
+        QueuedItem next = forgeQueue.peekFirst();
         if (next == null) {
             forging = false;
-            inFlight = null;
+            if (inFlight == null || inFlight.outcome().isDone()) inFlight = null;
             return;
         }
         forging = true;
+        if (next.waitForServer() && inFlight != null && !inFlight.outcome().isDone()) {
+            // interrupt=false promises the preceding swing will finish on the server too. Its
+            // last client packet can arrive a server tick before the chain/forks actually end;
+            // the old guard's Interrupting:Primary rule would otherwise cancel that tail.
+            inFlight.outcome().whenComplete((v, error) -> nextForgeIn(Duration.ZERO));
+            return;
+        }
+        forgeQueue.removeFirst();
         Started started;
         try {
             started = next.forge().start();
@@ -2198,9 +2207,12 @@ public final class InteractionControlImpl implements InteractionControl {
         // The main chain carries the clicked block, and the slot a hotbar switch goes to.
         data.blockPosition = pos != null ? new BlockPosition(pos.x(), pos.y(), pos.z()) : null;
         data.targetSlot = targetSlot;
-        if (entity != null) {
+        if (entity != null && entity.inReach()) {
             // Aimed at an entity: the server puts it in the chain's context as the target
             // (InteractionManager: data.entityId, data.hitLocation).
+            // Only within reach on 0.5.9: its server does not check the reach of a hit
+            // (DamageEntityInteraction has no canPlayerInteractWithEntity before 0.6), so the
+            // client's own limit is the only one - a client picks no entity past its reach.
             data.entityId = entity.networkId();
             data.hitLocation = new org.joml.Vector3f(entity.hitLocation());
         }

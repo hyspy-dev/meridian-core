@@ -60,6 +60,7 @@ public final class MovementImpl implements Movement {
     /** The urgent holds ({@link #takeFirst}), for what core holds back while one is held. */
     private final Urgency urgency = new Urgency();
     private final LookReports lookReports = new LookReports();
+    private java.util.UUID worldId;
 
     public MovementImpl(Terrain terrain, BlockHitboxes hitboxes, meridian.core.impl.FluidCatalog fluids,
                         Scheduler scheduler, Supplier<HeadlessClient> client, Supplier<Vec3> trackedFeet,
@@ -125,6 +126,10 @@ public final class MovementImpl implements Movement {
 
     /** Core's teleport of a game's player while core holds the body: the body goes there. */
     public boolean teleportHeld(double x, double y, double z) {
+        if (client.get() != null && body.placed()) {
+            body.placeAt(x, y, z);
+            return true;
+        }
         return game.teleport(x, y, z);
     }
 
@@ -168,10 +173,16 @@ public final class MovementImpl implements Movement {
                     }
                     lookReports.reset();
                     game.lost(Movement.Release.TELEPORT);
-                    body.teleported(teleport.resetVelocity);
-                } else if (packet instanceof JoinWorld) {
+                    if (session.headless() != null) body.serverTeleport(teleport.resetVelocity);
+                    else body.teleported(teleport.resetVelocity);
+                } else if (packet instanceof JoinWorld join) {
                     lookReports.reset();
                     game.lost(Movement.Release.WORLD);
+                    if (session.headless() != null
+                            && (join.clearWorld || !java.util.Objects.equals(worldId, join.worldUuid))) {
+                        body.reset();
+                    }
+                    worldId = join.worldUuid;
                 } else if (packet instanceof ChangeVelocity push) {
                     body.push(push.x, push.y, push.z, push.changeType, push.config);
                 } else if (packet instanceof UpdateFluidFX fx) {
