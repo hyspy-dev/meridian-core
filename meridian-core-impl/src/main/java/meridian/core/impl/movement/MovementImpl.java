@@ -173,7 +173,7 @@ public final class MovementImpl implements Movement {
                     }
                     lookReports.reset();
                     game.lost(Movement.Release.TELEPORT);
-                    if (session.headless() != null) body.serverTeleport(teleport.resetVelocity);
+                    if (session.headless() != null) body.serverTeleport(teleport.teleportId, teleport.resetVelocity);
                     else body.teleported(teleport.resetVelocity);
                 } else if (packet instanceof JoinWorld join) {
                     lookReports.reset();

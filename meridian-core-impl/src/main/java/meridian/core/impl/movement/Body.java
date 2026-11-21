@@ -52,7 +52,7 @@ public final class Body {
     private long ticks;
     private boolean quiet;
     /** No old-world tick may be queued after a server teleport's acknowledgement. */
-    private boolean teleportPending;
+    private final ArrayDeque<Byte> pendingTeleports = new ArrayDeque<>();
     /**
      * Where the body's own last reports put it, so the client-side watch does not take them for a
      * teleport (the packet reaching the watch need not be the object sent).
@@ -216,8 +216,8 @@ public final class Body {
     }
 
     /** Freeze before the headless handler queues the acknowledgement onto the client stream. */
-    synchronized void serverTeleport(boolean resetVelocity) {
-        teleportPending = true;
+    synchronized void serverTeleport(byte id, boolean resetVelocity) {
+        pendingTeleports.addLast(id);
         teleported(resetVelocity);
         own.clear();
     }
@@ -230,11 +230,17 @@ public final class Body {
         if (m.absolutePosition == null) {
             return;
         }
-        if (teleportPending && m.teleportAck == null) {
-            return;                         // an old report already queued before the server teleport
-        }
-        if (m.teleportAck != null) {
-            teleportPending = false;
+        if (!pendingTeleports.isEmpty()) {
+            if (m.teleportAck == null || m.teleportAck.teleportId != pendingTeleports.peekFirst()) {
+                return;                     // an old report, or an ACK left over from the previous world
+            }
+            pendingTeleports.removeFirst();
+            if (!pendingTeleports.isEmpty()) {
+                // Several S2C teleports can precede their queued C2S answers. Resuming on the
+                // first ACK would let an intermediate body's report get queued after the last
+                // ACK and put the server and tracker back at that intermediate position.
+                return;
+            }
         }
         // Body reports always carry velocity. Bare absolute reports are explicit teleports
         // or initial placement, even if they revisit a point the body reported before.
@@ -281,7 +287,7 @@ public final class Body {
     synchronized void takeOver(double x, double y, double z, float yaw, float pitch, float bodyYaw,
                                boolean onGround, boolean flying) {
         stop();
-        teleportPending = false;
+        pendingTeleports.clear();
         lookTo = null;
         answerTurns(false);
         state = new BodyState();
@@ -353,7 +359,7 @@ public final class Body {
     /** The session went away. */
     synchronized void reset() {
         stop();
-        teleportPending = false;
+        pendingTeleports.clear();
         own.clear();
         lookTo = null;
         answerTurns(false);
@@ -424,7 +430,7 @@ public final class Body {
                 looping = false;
                 return;
             }
-            if (teleportPending) {
+            if (!pendingTeleports.isEmpty()) {
                 looping = false;             // the acknowledgement's sentByOther wakes it again
                 return;
             }
