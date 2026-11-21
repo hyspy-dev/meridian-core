@@ -82,6 +82,8 @@ public final class WorkerImpl implements Worker {
     static final double FACE_IN = 0.4;
     /** A drop is walked to within this of where it lies, feet to it: inside the server's 1.75. */
     static final double PICKUP_REACH = 1.5;
+    /** The server's default pickup radius; a short approach is checked by physics before it is made. */
+    static final double PICKUP_RADIUS = 1.75;
     /** How long a container is waited for to open, and the stacks moved in to arrive. */
     static final long WINDOW_WAIT_MS = 2500;
 
@@ -1255,7 +1257,8 @@ public final class WorkerImpl implements Worker {
                         continue;
                     }
                     Vec3 at = new Vec3(cell.x() + 0.5, feet.getAsDouble(), cell.z() + 0.5);
-                    if (distSq(at, drop) > PICKUP_REACH * PICKUP_REACH) {
+                    if (distSq(at, drop) > PICKUP_REACH * PICKUP_REACH
+                            && distSq(pickupSpot(at, drop), drop) > PICKUP_RADIUS * PICKUP_RADIUS) {
                         continue;
                     }
                     double d = distSq(me, at);
@@ -1267,6 +1270,32 @@ public final class WorkerImpl implements Worker {
             }
         }
         return best == null ? null : Goal.at(best);
+    }
+
+    /** Towards the drop, within a quarter block of this standing cell's centre. */
+    private static Vec3 pickupSpot(Vec3 at, Vec3 drop) {
+        int[] c = Walker.cellOf(at);
+        return new Vec3(Math.max(c[0] + 0.25, Math.min(c[0] + 0.75, drop.x())), at.y(),
+                Math.max(c[2] + 0.25, Math.min(c[2] + 0.75, drop.z())));
+    }
+
+    /** A head-high drop at the back of an alcove can be just outside pickup radius at cell centre. */
+    private void approachPickup(int id, int item) throws Exception {
+        pause();
+        Vec3 at = movement.position();
+        Vec3 drop = entities.positionOf(item).orElse(null);
+        if (!live(id) || at == null || drop == null || entities.itemOf(item).isEmpty()
+                || distSq(at, drop) <= PICKUP_REACH * PICKUP_REACH) return;
+        Movement.Move step = new Movement.Move(Movement.Kind.WALK, pickupSpot(at, drop), Movement.Gait.WALK);
+        Movement.Prediction prediction = movement.predict(step);
+        Vec3 end = prediction.result().at();
+        if (prediction.hurt() || !prediction.result().arrived() || end == null
+                || Math.abs(end.y() - at.y()) > 0.1
+                || distSq(end, drop) > PICKUP_RADIUS * PICKUP_RADIUS) return;
+        int[] from = Walker.cellOf(at), to = Walker.cellOf(end);
+        if (from[0] != to[0] || from[2] != to[2]) return;
+        // The real physics keeps the body out of the wall, as in the prediction; no block is broken.
+        movement.move(step).get(3, TimeUnit.MINUTES);
     }
 
     /** A nearby standing cell can be on the other side of the wall containing the drop. */
@@ -1366,6 +1395,9 @@ public final class WorkerImpl implements Worker {
             }
             if (!live(id)) {
                 break;
+            }
+            if (r.status() == NavResult.Status.ARRIVED) {
+                approachPickup(id, best);
             }
             boolean gone = false;
             for (long waited = 0; waited < PICKUP_WAIT_MS && !gone; waited += 100) {
