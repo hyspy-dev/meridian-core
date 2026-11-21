@@ -39,6 +39,10 @@ final class WorldChunksHandler implements PacketHandler {
             chunks.onSection(c.x, c.y, c.z, c.data, c.localLight, c.globalLight);
         } else if (packet instanceof SetFluids f) {
             chunks.onFluids(f.x, f.y, f.z, f.data);
+        } else if (packet instanceof meridian.protocol.packets.world.SetColumn c) {
+            chunks.onHeightmap(c.x, c.z, c.heightmap);
+            chunks.onTintmap(c.x, c.z, c.tintmap);
+            chunks.onEnvironments(c.x, c.z, c.environments);
         } else if (packet instanceof SetChunkHeightmap h) {
             chunks.onHeightmap(h.x, h.z, h.heightmap);
         } else if (packet instanceof SetChunkTintmap t) {

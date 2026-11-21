@@ -5,6 +5,7 @@ import meridian.api.packet.Packet;
 import meridian.api.packet.PacketHandler;
 import meridian.api.session.ProxySession;
 import meridian.protocol.packets.entities.EntityUpdates;
+import meridian.protocol.packets.player.JoinWorld;
 import meridian.protocol.packets.player.SetClientId;
 
 /**
@@ -29,7 +30,9 @@ final class ServerObserver implements PacketHandler {
         // SetClientId / EntityUpdates travel on the Default channel — binding the
         // camera / debug-render session only on these keeps it off the Chunks
         // (or any other) stream, so their packets go out on Default.
-        if (packet instanceof SetClientId setClientId) {
+        if (packet instanceof JoinWorld join) {
+            tracker.onJoinWorld(join.worldUuid, join.clearWorld);
+        } else if (packet instanceof SetClientId setClientId) {
             camera.bind(session);
             debugRender.bind(session);
             tracker.onSetClientId(setClientId);

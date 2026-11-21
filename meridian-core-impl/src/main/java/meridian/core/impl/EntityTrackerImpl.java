@@ -108,6 +108,32 @@ final class EntityTrackerImpl implements EntityTracker {
     // Ingest — called by the observers
     // ------------------------------------------------------------------
 
+    private java.util.UUID worldId;
+
+    /** A world transfer replaces the entity scope without removing each old network id. */
+    void onJoinWorld(java.util.UUID id, boolean clearing) {
+        if (!clearing && java.util.Objects.equals(worldId, id)) return;
+        worldId = id;
+        positions.clear();
+        types.clear();
+        modelAssetIds.clear();
+        nameplates.clear();
+        players.clear();
+        bodies.clear();
+        interactions.clear();
+        effects.clear();
+        hitboxes.clear();
+        projectileModels.clear();
+        items.clear();
+        quantities.clear();
+        firstSeen.clear();
+        stats.clear();
+        held.clear();
+        localId = Integer.MIN_VALUE;
+        localPos = null;
+        haveLook = false;
+    }
+
     void onSetClientId(SetClientId packet) {
         localId = packet.clientId;
         log.info("meridian-core: local entity id = {}", localId);

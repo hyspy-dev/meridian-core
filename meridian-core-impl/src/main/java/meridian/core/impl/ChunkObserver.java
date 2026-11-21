@@ -34,6 +34,10 @@ final class ChunkObserver implements PacketHandler {
     public Action handleS2C(ChannelHandlerContext ctx, Packet packet, ProxySession session) {
         if (packet instanceof SetChunk setChunk) {
             tracker.onSetChunk(setChunk);
+        } else if (packet instanceof meridian.protocol.packets.world.SetColumn column) {
+            tracker.onColumnHeights(column.x, column.z, HeightmapDecoder.decode(column.heightmap));
+        } else if (packet instanceof meridian.protocol.packets.world.SetChunkHeightmap map) {
+            tracker.onColumnHeights(map.x, map.z, HeightmapDecoder.decode(map.heightmap));
         } else if (packet instanceof SetAbsentChunks absent) {
             tracker.onSetAbsentChunks(absent);
         } else if (packet instanceof ClearChunks) {

@@ -125,6 +125,13 @@ final class MovementControlImpl {
             log.warn("meridian-core: teleport requested but no client session yet — ignored");
             return;
         }
+        HeldBody held = heldBody;
+        if (held != null && held.teleport(x, y, z)) {
+            // Acquire the body's lock before a new position is queued. This orders all old
+            // reports ahead of the teleport, including reports still being encoded.
+            log.info("meridian-core: teleport of core's body -> ({}, {}, {})", x, y, z);
+            return;
+        }
         HeadlessClient bot = HeadlessClientHandler.headlessOf(s);
         if (bot != null) {
             // The same teleport for a headless client, with nothing in its way: no game whose view
@@ -133,12 +140,6 @@ final class MovementControlImpl {
             // client-to-server chain, so core's own pose follows it as well.
             bot.sendAsClient(buildAbsolute(x, y, z));
             log.info("meridian-core: headless {} - teleport -> ({}, {}, {})", bot.username(), x, y, z);
-            return;
-        }
-        HeldBody held = heldBody;
-        if (held != null && held.teleport(x, y, z)) {
-            // Core moves the body: it reports the place, and the game is shown it on the next tick.
-            log.info("meridian-core: teleport of the held body -> ({}, {}, {})", x, y, z);
             return;
         }
         // Move the player's own view with ClientTeleport — but repeated over

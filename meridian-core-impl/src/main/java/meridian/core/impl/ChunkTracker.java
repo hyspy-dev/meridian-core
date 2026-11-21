@@ -93,6 +93,40 @@ public final class ChunkTracker {
 
     /** Columns (by section x, z) the server has sent sections of. */
     private final Set<Long> columns = ConcurrentHashMap.newKeySet();
+    /** The server's column tops, used to distinguish a cave ceiling from a surface still loading. */
+    private final Map<Long, int[]> heights = new ConcurrentHashMap<>();
+    private volatile boolean heightmapsSent;
+
+    void onColumnHeights(int x, int z, int[] data) {
+        if (data == null || data.length != 1024) return;
+        heightmapsSent = true;
+        heights.put(column(x, z), data.clone());
+        changedColumn(x, z);
+    }
+
+    void onColumnHeight(int x, int z, int height) {
+        heights.computeIfPresent(column(x >> 5, z >> 5), (k, old) -> {
+            int[] updated = old.clone();
+            updated[(z & 31) * 32 + (x & 31)] = height;
+            return updated;
+        });
+        changedColumn(x >> 5, z >> 5);
+    }
+
+    public int columnHeightAt(int x, int z) {
+        int[] data = heights.get(column(x >> 5, z >> 5));
+        return data == null ? Integer.MIN_VALUE : data[(z & 31) * 32 + (x & 31)];
+    }
+
+    public boolean columnHeightsPending(int x, int z) {
+        return heightmapsSent && !heights.containsKey(column(x >> 5, z >> 5));
+    }
+
+    /** Explicitly received, unlike the old protocol's implicit air in an unfinished column. */
+    public boolean receivedSection(int x, int y, int z) {
+        SectionKey key = new SectionKey(x >> 5, y >> 5, z >> 5);
+        return sections.containsKey(key) || absent.contains(key);
+    }
     /**
      * Sections the server said hold nothing ({@code SetAbsentChunks}): known, and all air, without
      * a {@code SetChunk} of their own.
@@ -209,6 +243,7 @@ public final class ChunkTracker {
         fluidSections.clear();
         fluidLevels.clear();
         columns.clear();
+        heights.clear();
         absent.clear();
         airOnly.clear();
     }
@@ -511,6 +546,7 @@ public final class ChunkTracker {
     /** Everything standing over one column of the world, at every height. */
     private void unloadColumn(int chunkX, int chunkZ) {
         columns.remove(column(chunkX, chunkZ));
+        heights.remove(column(chunkX, chunkZ));
         sections.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
         rotations.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);
         fillers.keySet().removeIf(k -> k.x() == chunkX && k.z() == chunkZ);

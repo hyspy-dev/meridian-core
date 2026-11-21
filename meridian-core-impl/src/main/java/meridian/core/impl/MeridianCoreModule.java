@@ -235,12 +235,6 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
                 (direction, session) -> new ChunkObserver(chunkTracker, fluidCatalog));
 
-        // A headless session - no game behind it - needs the game's side of the conversation
-        // answered: assets, ready, pings, teleports. Early, so what another handler drops is still
-        // answered; an ordinary session passes straight through.
-        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
-                (direction, session) -> new HeadlessClientHandler(entityTracker, userDirFinal));
-
         // Movement: the headless player's body - what the ground allows (the blocks' own collision
         // shapes) and moves along it, reported tick by tick as the client reports them.
         meridian.core.impl.movement.BlockHitboxes blockHitboxes = new meridian.core.impl.movement.BlockHitboxes();
@@ -256,6 +250,10 @@ public class MeridianCoreModule implements ProxyModule {
         movement.flightOn(clientSpoof::flight);
         movementRef[0] = movement;
         ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY, (direction, session) -> movement.observer());
+        // Stop old body reports before the headless handler queues a teleport ACK. Both are
+        // early, but their order matters: sendAsClient queues onto the connection's event loop.
+        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY,
+                (direction, session) -> new HeadlessClientHandler(entityTracker, userDirFinal));
         // Last on the client side: what actually goes out - a teleport's answer, core's own teleport.
         ctx.registerHandler(Direction.C2S, HandlerPosition.MONITOR, (direction, session) -> movement.clientObserver());
         // First on the client side: a game's movement, held back while core holds its body, before
