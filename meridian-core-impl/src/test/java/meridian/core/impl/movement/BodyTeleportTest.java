@@ -74,7 +74,7 @@ public class BodyTeleportTest {
 
     public void testServerTeleportPausesOldPhysicsUntilAcknowledged() {
         var r = new Rig();
-        r.body.serverTeleport(true);
+        r.body.serverTeleport((byte) 1, true);
         r.clock.tasks.removeFirst().run();
         check(r.clock.tasks.isEmpty() && r.reports.isEmpty(), "old-world ticks continued before ACK");
         var stale = at(7);
@@ -85,6 +85,52 @@ public class BodyTeleportTest {
         ack.teleportAck = new TeleportAck((byte) 1);
         r.body.sentByOther(ack);
         check(r.body.snapshot().x == 10 && !r.clock.tasks.isEmpty(), "ACK did not resume at the target");
+    }
+
+    public void testEarlierAcknowledgementDoesNotResumeBetweenServerTeleports() {
+        var r = new Rig();
+        // Both S2C packets can be read before the queued C2S acknowledgements run.
+        r.body.serverTeleport((byte) 1, true);
+        r.body.serverTeleport((byte) 2, true);
+        r.clock.tasks.removeFirst().run();
+        var first = at(0);
+        first.teleportAck = new TeleportAck((byte) 1);
+        r.body.sentByOther(first);
+        check(r.clock.tasks.isEmpty(), "the first ACK resumed physics before the second ACK");
+        var last = at(10);
+        last.teleportAck = new TeleportAck((byte) 2);
+        r.body.sentByOther(last);
+        check(r.body.snapshot().x == 10 && !r.clock.tasks.isEmpty(), "the last ACK did not resume at its target");
+    }
+
+    public void testPendingServerTeleportsAcrossTheWireIdWrap() {
+        var r = new Rig();
+        for (int i = 0; i < 258; i++) r.body.serverTeleport((byte) i, true);
+        r.clock.tasks.removeFirst().run();
+        for (int i = 0; i < 258; i++) {
+            var ack = at(i);
+            ack.teleportAck = new TeleportAck((byte) i);
+            r.body.sentByOther(ack);
+            if (i < 257) check(r.clock.tasks.isEmpty(), "resumed at intermediate ACK " + i);
+        }
+        check(r.body.snapshot().x == 257 && !r.clock.tasks.isEmpty(), "wrapped final ACK did not resume");
+    }
+
+    public void testOldWorldAcknowledgementDoesNotReleaseANewTeleport() {
+        var r = new Rig();
+        r.body.serverTeleport((byte) 1, true);
+        r.body.reset();
+        r.body.takeOver(0, 1, 0, 0, 0, 0, true, false);
+        r.body.serverTeleport((byte) 2, true);
+        r.clock.tasks.removeFirst().run();
+        var old = at(7);
+        old.teleportAck = new TeleportAck((byte) 1);
+        r.body.sentByOther(old);
+        check(r.body.snapshot().x == 0 && r.clock.tasks.isEmpty(), "old-world ACK released the new teleport");
+        var ack = at(10);
+        ack.teleportAck = new TeleportAck((byte) 2);
+        r.body.sentByOther(ack);
+        check(r.body.snapshot().x == 10 && !r.clock.tasks.isEmpty(), "new-world ACK did not resume");
     }
 
     static ClientMovement at(double x) {
