@@ -172,7 +172,9 @@ final class CoreCommands {
             }
             case "swing" -> {
                 java.time.Duration hold = hold(args);
-                yield (hold == null ? interactions().swing() : interactions().swing(hold))
+                // No hold in the command means a tap. The API's no-argument overload instead
+                // holds to the first charge tier, which already fires the old shortbow.
+                yield interactions().swing(hold == null ? java.time.Duration.ZERO : hold)
                         .thenApply(List::of).thenApply(this::withPos);
             }
             case "dodge" -> interactions().dodge().thenApply(List::of).thenApply(this::withPos);

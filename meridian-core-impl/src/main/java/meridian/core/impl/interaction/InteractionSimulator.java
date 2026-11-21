@@ -729,14 +729,17 @@ final class InteractionSimulator {
         }
 
         EntityTarget entity = ctx.entity();
-        if (entity != null && node.interaction() instanceof SelectInteraction) {
+        // The header is not the only target source: 0.5.9 trusts a selector's hitEntities and
+        // forks damage from it even when the main chain named no entity. Omit distant targets
+        // on each operation as well, so the local reach verdict and the wire agree.
+        if (entity != null && entity.inReach() && node.interaction() instanceof SelectInteraction) {
             // A player's SelectInteraction takes its entity hits from the client
             // (ClientSourcedSelector): the entity it hit, and where both stood - the damage that
             // forks off reads its angles and knockback from these.
             data.hitEntities = new SelectedHitEntity[] {entity.hit()};
             data.attackerPos = new Position(entity.attackerPos().x, entity.attackerPos().y, entity.attackerPos().z);
             data.attackerRot = new Direction(entity.attackerRot().yaw, entity.attackerRot().pitch, entity.attackerRot().roll);
-        } else if (entity != null && node.interaction() instanceof UseEntityInteraction) {
+        } else if (entity != null && entity.inReach() && node.interaction() instanceof UseEntityInteraction) {
             // UseEntityInteraction finds its target by the id the client names.
             data.entityId = entity.networkId();
         }

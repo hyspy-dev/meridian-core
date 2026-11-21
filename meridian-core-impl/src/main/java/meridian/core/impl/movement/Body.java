@@ -51,6 +51,8 @@ public final class Body {
     private long baseNanos;
     private long ticks;
     private boolean quiet;
+    /** No old-world tick may be queued after a server teleport's acknowledgement. */
+    private boolean teleportPending;
     /**
      * Where the body's own last reports put it, so the client-side watch does not take them for a
      * teleport (the packet reaching the watch need not be the object sent).
@@ -192,6 +194,8 @@ public final class Body {
     synchronized void teleported(boolean resetVelocity) {
         if (state != null && resetVelocity) {
             state.vx = state.vy = state.vz = 0;
+            state.mvx = state.mvy = state.mvz = 0;
+            reportV = new double[] {0, 0, 0};
             state.ramp = 0;
             state.pushes.clear();
         }
@@ -211,10 +215,14 @@ public final class Body {
         }
     }
 
-    /**
-     * A position the client side sent that the body did not: it is there now (a teleport's
-     * answer, a teleport core made). Takes the body's place from it.
-     */
+    /** Freeze before the headless handler queues the acknowledgement onto the client stream. */
+    synchronized void serverTeleport(boolean resetVelocity) {
+        teleportPending = true;
+        teleported(resetVelocity);
+        own.clear();
+    }
+
+    /** A client position the body did not send: initial placement or a teleport's answer. */
     synchronized void sentByOther(ClientMovement m) {
         // The answer to a server teleport is never the body's own report, even where it lands on a
         // place the body reported once - a teleport back to where it stood: taken for its own, the
@@ -222,7 +230,15 @@ public final class Body {
         if (m.absolutePosition == null) {
             return;
         }
-        if (ownReport(m.absolutePosition)) {
+        if (teleportPending && m.teleportAck == null) {
+            return;                         // an old report already queued before the server teleport
+        }
+        if (m.teleportAck != null) {
+            teleportPending = false;
+        }
+        // Body reports always carry velocity. Bare absolute reports are explicit teleports
+        // or initial placement, even if they revisit a point the body reported before.
+        if (m.velocity != null && ownReport(m.absolutePosition)) {
             if (m.teleportAck == null) {
                 return;
             }
@@ -265,6 +281,7 @@ public final class Body {
     synchronized void takeOver(double x, double y, double z, float yaw, float pitch, float bodyYaw,
                                boolean onGround, boolean flying) {
         stop();
+        teleportPending = false;
         lookTo = null;
         answerTurns(false);
         state = new BodyState();
@@ -297,6 +314,7 @@ public final class Body {
         state.y = y;
         state.z = z;
         teleported(true);
+        sentPos = null;                      // an explicit teleport always refreshes the upstream pose
         quiet = false;
         wake();
     }
@@ -335,6 +353,8 @@ public final class Body {
     /** The session went away. */
     synchronized void reset() {
         stop();
+        teleportPending = false;
+        own.clear();
         lookTo = null;
         answerTurns(false);
         state = null;
@@ -402,6 +422,10 @@ public final class Body {
             if (c == null || state == null) {
                 reset();
                 looping = false;
+                return;
+            }
+            if (teleportPending) {
+                looping = false;             // the acknowledgement's sentByOther wakes it again
                 return;
             }
             Controls controls = controls();
