@@ -1242,7 +1242,7 @@ public final class WorkerImpl implements Worker {
      * ceiling, in a hole: of the places round it the body stands in, with the feet within
      * {@link #PICKUP_REACH} of it, the nearest to the body. {@code null} when there is none.
      */
-    private Goal pickupFrom(Vec3 drop, Vec3 me) {
+    Goal pickupFrom(Vec3 drop, Vec3 me) {
         int[] c = Walker.cellOf(drop);
         BlockPos best = null;
         double bestD = Double.MAX_VALUE;
@@ -1259,7 +1259,7 @@ public final class WorkerImpl implements Worker {
                         continue;
                     }
                     double d = distSq(me, at);
-                    if (d < bestD) {
+                    if (d < bestD && pickupReachable(Goal.at(cell), me)) {
                         bestD = d;
                         best = cell;
                     }
@@ -1267,6 +1267,16 @@ public final class WorkerImpl implements Worker {
             }
         }
         return best == null ? null : Goal.at(best);
+    }
+
+    /** A nearby standing cell can be on the other side of the wall containing the drop. */
+    private boolean pickupReachable(Goal goal, Vec3 me) {
+        int[] here = Walker.cellOf(me);
+        if (goal.reachedBy(here[0], here[1], here[2])) return true;
+        List<Navigator.Step> path = navigator.plan(goal);
+        if (path.isEmpty()) return false;
+        Navigator.Step last = path.getLast();
+        return goal.reachedBy(last.x(), last.y(), last.z());
     }
 
     /**
@@ -1347,6 +1357,13 @@ public final class WorkerImpl implements Worker {
                 continue;
             }
             NavResult r = go(goal).get(3, TimeUnit.MINUTES);
+            if (live(id) && r.status() != NavResult.Status.ARRIVED) {
+                Vec3 now = movement.position();
+                Goal alternative = now == null ? null : pickupFrom(bestAt, now);
+                if (alternative != null && !alternative.equals(goal)) {
+                    r = go(alternative).get(3, TimeUnit.MINUTES);
+                }
+            }
             if (!live(id)) {
                 break;
             }
