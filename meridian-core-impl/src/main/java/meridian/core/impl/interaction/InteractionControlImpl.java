@@ -321,6 +321,12 @@ public final class InteractionControlImpl implements InteractionControl {
         onPlayerLook(m.lookOrientation);
     }
 
+    /** Whether the body's last report to the server said it crouches. */
+    public boolean crouchingTold() {
+        MovementStates m = movementStates;
+        return m != null && m.crouching;
+    }
+
     /** Tracks the player's movement state — {@code ConditionInteraction}'s input. */
     void onMovementStates(MovementStates states) {
         if (states != null) {
@@ -990,6 +996,28 @@ public final class InteractionControlImpl implements InteractionControl {
     @Override
     public CompletableFuture<Boolean> repair(String itemId) {
         return repairer.apply(itemId);
+    }
+
+    @Override
+    public boolean placedCrouching(String itemId) {
+        OptionalInt root = itemId == null ? OptionalInt.empty() : resolveRoot(InteractionType.Secondary, itemId);
+        CompiledInteraction compiled = root.isEmpty() ? null : compileRoot(root.getAsInt());
+        if (compiled == null) {
+            return false;
+        }
+        for (FlatOp op : compiled.ops()) {
+            if (op instanceof FlatOp.Node n) {
+                // The use's first question: "is the body standing?" - yes, the item's own doing (a throw);
+                // no, the block is put down.
+                if (n.interaction() instanceof meridian.protocol.ConditionInteraction c && c.crouching != null
+                        && !c.crouching) {
+                    GameMode mode = entities.selfGameMode();
+                    return c.requiredGameMode == null || mode == null || c.requiredGameMode == mode;
+                }
+                return false;
+            }
+        }
+        return false;
     }
 
     /** Where the effects and the stat names come from: core's own catalogs of them. */
@@ -1940,6 +1968,24 @@ public final class InteractionControlImpl implements InteractionControl {
             onClient.activeSlot = slot;
             session.sendToClient(onClient);
         }
+        // A switch the server did not run - cancelled: the hand's item changed under it (a rubble taken
+        // up into the empty slot in hand while the switch was on its way, 22.11) - left the server on
+        // the slot it was on: core's picture goes back to it, so the next switch is sent and the next
+        // dig is not made with "the pickaxe" the server never took into the hand.
+        ProxySession live = session;
+        run.outcome().thenAccept(o -> {
+            if (o.status() == InteractionOutcome.Status.FINISHED || inventory.activeHotbarSlot() != slot) {
+                return;
+            }
+            log.info("meridian-core: the switch to hotbar slot {} was not made ({}) - still on slot {}", slot, o.status(), from);
+            inventory.observeActiveSlots(from, inventory.activeUtilitySlot(), inventory.activeToolsSlot());
+            if (!headless(live)) {
+                SetActiveSlot back = new SetActiveSlot();
+                back.inventorySectionId = HOTBAR_SECTION;
+                back.activeSlot = from;
+                live.sendToClient(back);
+            }
+        });
         return Started.of(run);
     }
 

@@ -54,6 +54,18 @@ final class CombatImpl implements Combat {
         this.senses = byModel;
     }
 
+    /** What explodes, by its model's name ({@code Blasts}); empty until told where from. */
+    private volatile java.util.function.Function<String, Optional<Blast>> blasts = model -> Optional.empty();
+
+    void blasts(java.util.function.Function<String, Optional<Blast>> byModel) {
+        this.blasts = byModel;
+    }
+
+    @Override
+    public Optional<Blast> blastOf(int entityId) {
+        return entities.entityModelAssetId(entityId).flatMap(blasts);
+    }
+
     @Override
     public Optional<Senses> sensesOf(int entityId) {
         if (entities.isPlayer(entityId)) {
