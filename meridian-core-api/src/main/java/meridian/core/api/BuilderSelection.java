@@ -217,6 +217,20 @@ public interface BuilderSelection {
      */
     void showPrefabPreview(List<PastePreview.Change> blocks);
 
+    /**
+     * {@code clipboard} turned as the paste tool turns what it holds ({@link PasteListener#turned}):
+     * about its anchor, each block's facing as the paste tool's {@code RotateBlock} turns it - to put
+     * a prefab down again as it was turned then.
+     */
+    default Clipboard turnedAsTool(Clipboard clipboard, Axis axis, int degrees) {
+        return clipboard.turned(axis.ordinal(), degrees / 90);
+    }
+
+    /** {@code clipboard} mirrored as the paste tool mirrors what it holds ({@link PasteListener#flipped}). */
+    default Clipboard flippedAsTool(Clipboard clipboard, Axis axis) {
+        return clipboard.flipped(axis.ordinal(), null);
+    }
+
     /** Called for what the player does with the paste tool while our clipboard is in it. */
     void onPaste(PasteListener listener);
 
