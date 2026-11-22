@@ -11,6 +11,14 @@ public interface EntityLookup {
     /** The player's own active entity effects, by effect index. */
     Set<Integer> selfEffects();
 
+    /**
+     * The player's own active entity effects by index, each with the seconds it has left (infinite
+     * for one with no end). Empty when none are known.
+     */
+    default java.util.Map<Integer, Double> selfEffectsLeft() {
+        return java.util.Map.of();
+    }
+
     /** The player's own stats, as the server last said. */
     StatSheet selfStats();
 

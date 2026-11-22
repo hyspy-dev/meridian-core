@@ -424,7 +424,12 @@ final class Pilot {
             // On a bank it has to have stopped, as on any ground: a jump out lands still moving.
             case SWIM -> (s.inFluid && !s.onGround && dist < 0.6) || (s.onGround && flat < near && Math.abs(dy) < 0.6
                     && (through || s.inFluid || Math.hypot(s.vx, s.vz) < 0.4));
-            case CLIMB -> flat < Math.max(near, 0.2) && Math.abs(dy) < 0.3 && (s.onGround || s.climbing);
+            // On a climbable the body goes up and down only - it took hold where it came to it, at the
+            // cell's edge as often as not, and no key moves it to the cell's middle: there once it is
+            // at the height, anywhere in the cell. (Waiting for the middle, it climbed a step up and a
+            // step down for ever: every ladder come at with a run was "would not make it".)
+            case CLIMB -> Math.abs(dy) < 0.3 && (s.onGround || s.climbing)
+                    && (flat < Math.max(near, 0.2) || (s.climbing && sameCell(s)));
             case MANTLE -> !s.mantling && s.onGround && flat < near && Math.abs(dy) < 0.3
                     && (through || Math.hypot(s.vx, s.vz) < 0.4);
             default -> s.onGround && flat < near && Math.abs(dy) < 0.6
@@ -536,6 +541,12 @@ final class Pilot {
         boolean press = s.onGround && flat < 1.2;
         boolean hold = !s.onGround && s.vy > 0;
         return new Controls(1, 0, yaw, 0, press || hold, false, false, false, false);
+    }
+
+    /** The body's middle is in the cell the move leads to. */
+    private boolean sameCell(BodyState s) {
+        Vec3 to = move.to();
+        return Math.floor(s.x) == Math.floor(to.x()) && Math.floor(s.z) == Math.floor(to.z());
     }
 
     private Controls climb(BodyState s, float yaw, double flat, double dy) {

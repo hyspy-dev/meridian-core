@@ -280,13 +280,21 @@ final class ClientSpoofImpl implements ClientSpoof {
         if (!ignoreDeath || !RESPAWN_PAGE_KEY.equals(page.key)) {
             return false;
         }
-        if (page.clear) {
-            deathHidden = false;          // the server revived the player itself
-        } else {
+        // The window's first packet opens it; a later one only changes what it shows (its `clear` is
+        // "replace what the page showed", not "the page is gone"). The first is what is shown later.
+        if (page.isInitial || hiddenDeathPage == null) {
             hiddenDeathPage = page;
-            deathHidden = true;
         }
+        deathHidden = true;
         return true;
+    }
+
+    /** The server closed the page it had up: a hidden death is over - it revived the player itself. */
+    void pageClosed() {
+        if (deathHidden) {
+            deathHidden = false;
+            hiddenDeathPage = null;
+        }
     }
 
     /** Whether to hold this animation back: the player's own death, while death is ignored. */

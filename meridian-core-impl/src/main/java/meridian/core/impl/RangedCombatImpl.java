@@ -142,10 +142,11 @@ final class RangedCombatImpl implements RangedCombat, ProjectilePlayback {
     }
 
     @Override public OptionalInt bowSlot() { return findBow(true); }
-    @Override public CompletableFuture<Shot> shoot(int id) { return shoot(id, null); }
-    @Override public CompletableFuture<Shot> shoot(meridian.core.api.Vec3 point) { return shoot(-1, point); }
+    @Override public CompletableFuture<Shot> shoot(int id) { return shoot(id, null, false); }
+    @Override public CompletableFuture<Shot> shoot(int id, boolean hardest) { return shoot(id, null, hardest); }
+    @Override public CompletableFuture<Shot> shoot(meridian.core.api.Vec3 point) { return shoot(-1, point, false); }
 
-    private CompletableFuture<Shot> shoot(int id, meridian.core.api.Vec3 point) {
+    private CompletableFuture<Shot> shoot(int id, meridian.core.api.Vec3 point, boolean hardest) {
         if (!busy.compareAndSet(false, true)) return CompletableFuture.completedFuture(refused(Status.BUSY, "Another shot is running"));
         AtomicBoolean cancelled = new AtomicBoolean();
         drawCancellation = cancelled;
@@ -153,7 +154,7 @@ final class RangedCombatImpl implements RangedCombat, ProjectilePlayback {
         result.whenComplete((r, e) -> { if (result.isCancelled()) cancelled.set(true); });
         try {
             executor.execute(() -> {
-                try { result.complete(play(id, point, cancelled)); }
+                try { result.complete(play(id, point, cancelled, hardest)); }
                 catch (java.util.concurrent.TimeoutException e) {
                     result.complete(refused(Status.TIMED_OUT, "Server or movement did not finish in time"));
                 } catch (Exception e) {
@@ -168,7 +169,7 @@ final class RangedCombatImpl implements RangedCombat, ProjectilePlayback {
         return result;
     }
 
-    private Shot play(int id, meridian.core.api.Vec3 point, AtomicBoolean cancelled) throws Exception {
+    private Shot play(int id, meridian.core.api.Vec3 point, AtomicBoolean cancelled, boolean hardest) throws Exception {
         long session = generation;
         if (cancelled.get()) return refused(Status.CANCELLED, "Shot cancelled");
         OptionalInt slot = findBow(false);
@@ -183,7 +184,7 @@ final class RangedCombatImpl implements RangedCombat, ProjectilePlayback {
         AimSolver.Target target = target(id, point);
         if (target == null) return refused(Status.UNKNOWN_TARGET, "Target or its model box is unknown");
         String bow = inventory.hotbarItem(slot.getAsInt());
-        Plan plan = plan(bow, target, null, 0.15);
+        Plan plan = plan(bow, target, null, 0.15, hardest);
         if (cancelled.get()) return refused(Status.CANCELLED, "Draw cancelled before starting");
         if (plan == null) return refused(Status.UNREACHABLE, "No verified low trajectory: " + lastFailure);
         Movement.State body = movement.state();
@@ -214,7 +215,7 @@ final class RangedCombatImpl implements RangedCombat, ProjectilePlayback {
                             try {
                                 if (cancelled.get() || session != generation || !wheel.held() || !bow.equals(inventory.itemInHandId())) return false;
                                 AimSolver.Target latest = target(id, point);
-                                Plan fresh = latest == null ? null : plan(bow, latest, currentTier, 0);
+                                Plan fresh = latest == null ? null : plan(bow, latest, currentTier, 0, false);
                                 return fresh != null && aim(fresh.aim());
                             } catch (Exception e) { return false; }
                         }, executor);
@@ -261,10 +262,15 @@ final class RangedCombatImpl implements RangedCombat, ProjectilePlayback {
         return new AimSolver.Target(p, velocity(id), new Aabb(vec(box.min()).subtract(p), vec(box.max()).subtract(p)), 0);
     }
 
-    private Plan plan(String bow, AimSolver.Target target, InteractionControlImpl.BowTier only, double extraDelay) {
+    /** The first draw that reaches: the shortest of the bow's - or, {@code hardest}, the longest. */
+    private Plan plan(String bow, AimSolver.Target target, InteractionControlImpl.BowTier only, double extraDelay,
+                      boolean hardest) {
         Vec3 eyes = eyes();
         if (eyes == null) return null;
-        for (var tier : hands.bowTiers(bow)) {
+        List<InteractionControlImpl.BowTier> order = new java.util.ArrayList<>(hands.bowTiers(bow));
+        order.sort(java.util.Comparator.comparingDouble(InteractionControlImpl.BowTier::seconds));
+        if (hardest) java.util.Collections.reverse(order);
+        for (var tier : order) {
             if (only != null && !only.equals(tier)) continue;
             ProjectileConfig config = configs.get(tier.config());
             if (config == null) { lastFailure = "Config missing: " + tier.config() + " (catalog " + configs.size() + ")"; continue; }

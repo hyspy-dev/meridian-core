@@ -169,6 +169,7 @@ final class PlayerStateHandler implements PacketHandler {
         section(BACKPACK, inventory.backpack);
         section(ABILITY_SLOTS, inventory.abilitySlots);
         section(RUNE_BAG, inventory.runeBag);
+        state.onInventoryTold();
     }
 
     private void activeSlot(SetActiveSlot slot) {

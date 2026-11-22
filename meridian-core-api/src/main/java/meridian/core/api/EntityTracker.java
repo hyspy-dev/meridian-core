@@ -228,6 +228,29 @@ public interface EntityTracker {
     }
 
     /**
+     * An effect on an entity, as the server last told this client of it.
+     *
+     * @param id          the effect's asset id ({@code HealthRegen_Buff_T3}); {@code #<index>} when
+     *                    core does not know the catalog yet
+     * @param secondsLeft how long it still lasts, counted down from what the server last said - it
+     *                    says again whenever the effect is applied anew; infinite for one with no end
+     * @param infinite    an effect with no end of its own
+     * @param debuff      one the game counts as harmful
+     */
+    record Effect(String id, double secondsLeft, boolean infinite, boolean debuff) {
+    }
+
+    /**
+     * The effects on an entity now, by id. The server tells each viewer of the effects on the
+     * entities it sees, and the player of its own; they come and go as it says.
+     *
+     * @return the effects; empty for none, before the server has said, and for a core too old to keep them
+     */
+    default List<Effect> effectsOf(int entityId) {
+        return List.of();
+    }
+
+    /**
      * The item an entity holds in its main hand, as the server shows it to everyone (its
      * {@code Equipment}): a player's weapon or tool, a mob's club. Empty for an empty hand, before
      * the server has said, and for a core too old to keep it.

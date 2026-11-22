@@ -340,6 +340,9 @@ public interface InteractionControl {
      */
     record Heal(double now, double overTime, double seconds) {
 
+        /** Nothing for the health. */
+        public static final Heal NONE = new Heal(0, 0, 0);
+
         public double total() {
             return now + overTime;
         }
@@ -354,6 +357,33 @@ public interface InteractionControl {
      */
     default java.util.Optional<Heal> heal(String itemId) {
         return java.util.Optional.empty();
+    }
+
+    /**
+     * The healing under way: what the player's own active effects will still give its health -
+     * {@code overTime} points over the {@code seconds} the longest of them has left
+     * ({@code now} is 0). A food's slow heal runs for minutes after the bite, and another bite
+     * of it only starts it over.
+     *
+     * @return the healing; {@link Heal#NONE} when no effect on the player heals, and for a core too old to tell
+     */
+    default Heal healing() {
+        return Heal.NONE;
+    }
+
+    /**
+     * What a use of this item would add to the player's health now, the healing under way counted:
+     * the item's chain played as the server would play it on the player's effects as they are (an
+     * effect condition sees them), each effect it applies laid over the one already on - an
+     * overwrite starts it over, so it adds only the time it puts back; an extension adds all; one
+     * the chain clears is lost. A bite of a food whose slow heal is under way adds little but its
+     * instant part.
+     *
+     * @return the gain - {@code overTime} may be 0; empty for an item whose use heals nothing. A core
+     *         too old to tell gives {@link #heal}, the item's heal on a player with nothing on
+     */
+    default java.util.Optional<Heal> healGain(String itemId) {
+        return heal(itemId);
     }
 
     /**
