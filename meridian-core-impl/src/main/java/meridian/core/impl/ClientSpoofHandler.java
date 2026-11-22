@@ -41,6 +41,11 @@ final class ClientSpoofHandler implements PacketHandler {
         if (packet instanceof CustomPage page) {
             return spoof.hides(page) ? Action.DROP : Action.FORWARD;
         }
+        if (packet instanceof meridian.protocol.packets.interface_.SetPage set
+                && set.page == meridian.protocol.packets.interface_.Page.None) {
+            spoof.pageClosed();
+            return Action.FORWARD;
+        }
         if (packet instanceof PlayAnimation animation) {
             return spoof.hides(animation) ? Action.DROP : Action.FORWARD;
         }

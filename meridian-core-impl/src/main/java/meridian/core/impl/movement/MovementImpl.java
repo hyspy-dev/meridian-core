@@ -92,24 +92,35 @@ public final class MovementImpl implements Movement {
         return game.driver();
     }
 
-    /** A headless body is core's all along: its wheel is never given back. */
-    private final Movement.Wheel headlessWheel = new Movement.Wheel() {
-        private final CompletableFuture<Movement.Release> never = new CompletableFuture<>();
+    /**
+     * A hold on a headless body. The body is core's all along - no game takes it back - so a hold ends
+     * when its taker gives it back, or when the player dies: then every hold is over
+     * ({@link Movement.Release#DEATH}), as a game's are. (They used to share one hold that never ended:
+     * no trip, dig or fight of a headless session ever learnt of a death.)
+     */
+    private final class HeadlessHold implements Movement.Wheel {
+        private final CompletableFuture<Movement.Release> over = new CompletableFuture<>();
 
         @Override
         public boolean held() {
-            return client.get() != null;
+            return client.get() != null && !over.isDone();
         }
 
         @Override
         public void release() {
+            headlessHolds.remove(this);
+            over.complete(Movement.Release.GIVEN_BACK);
         }
 
         @Override
         public CompletableFuture<Movement.Release> released() {
-            return never;
+            return over;
         }
-    };
+    }
+
+    private final Set<HeadlessHold> headlessHolds = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** The player is dead: the body is nobody's to take until the server revives them. */
+    private volatile boolean dead;
 
     /**
      * EARLY, client side: a game's movement - read while the game has its body, held back while core
@@ -133,9 +144,30 @@ public final class MovementImpl implements Movement {
         return game.teleport(x, y, z);
     }
 
-    /** The player died: a game's body core holds goes back to the game. */
+    /**
+     * The player died: every hold on the body is over - a game's body goes back to the game, a
+     * headless one's holds end - what it was doing stops, and it cannot be taken until {@link #revived}.
+     */
     public void died() {
+        dead = true;
+        body.stop();
+        for (HeadlessHold h : headlessHolds) {
+            h.over.complete(Movement.Release.DEATH);
+        }
+        headlessHolds.clear();
         game.lost(Movement.Release.DEATH);
+    }
+
+    /** While set, no urgent hold is given ({@link #takeFirst}): the going back after a death is not cut into. */
+    private volatile boolean noUrgent;
+
+    public void noUrgent(boolean on) {
+        noUrgent = on;
+    }
+
+    /** The server revived the player: the body can be taken again. */
+    public void revived() {
+        dead = false;
     }
 
     private Surroundings.EffectMotion effects() {
@@ -295,6 +327,9 @@ public final class MovementImpl implements Movement {
         if (around.settings() == null) {
             return false;
         }
+        if (dead) {
+            return false;
+        }
         return client.get() != null ? body.placed() : game.canTake();
     }
 
@@ -308,10 +343,8 @@ public final class MovementImpl implements Movement {
         return hold().map(inner -> {
             Counted c = new Counted(inner, urgency.stamp());
             counted.add(c);
-            if (inner != headlessWheel) {
-                // The game took the body (a key, a teleport, a death, a world): this hold is gone.
-                inner.released().thenRun(() -> counted.remove(c));
-            }
+            // The body gone from under it (a key, a teleport, a death, a world): this hold is gone.
+            inner.released().thenRun(() -> counted.remove(c));
             return c;
         });
     }
@@ -321,8 +354,16 @@ public final class MovementImpl implements Movement {
         if (around.settings() == null) {
             return java.util.Optional.empty();
         }
+        if (dead) {
+            return java.util.Optional.empty();
+        }
         if (client.get() != null) {
-            return body.placed() ? java.util.Optional.of(headlessWheel) : java.util.Optional.empty();
+            if (!body.placed()) {
+                return java.util.Optional.empty();
+            }
+            HeadlessHold h = new HeadlessHold();
+            headlessHolds.add(h);
+            return java.util.Optional.of(h);
         }
         return game.take();
     }
@@ -383,6 +424,11 @@ public final class MovementImpl implements Movement {
 
     @Override
     public java.util.Optional<Movement.Wheel> takeFirst() {
+        if (noUrgent) {
+            // On its way back for what it dropped when it died: nothing takes the body from that -
+            // not a fight either (it has nothing to fight with; it runs).
+            return java.util.Optional.empty();
+        }
         java.util.Optional<Movement.Wheel> taken = hold();
         if (taken.isEmpty()) {
             return taken;

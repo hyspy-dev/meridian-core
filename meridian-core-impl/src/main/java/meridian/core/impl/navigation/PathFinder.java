@@ -29,13 +29,24 @@ import meridian.core.api.Vec3;
  * for real, and a move that would not arrive is banned and the search run again.
  *
  * <p>Diagonal edges are walks and swims only, and only where both corners leave room. A search has
- * a budget of places and of time; out of budget, or out of the world core knows, it gives the way to
- * the place it saw nearest the goal, so the walker can go that far and look again.
+ * a budget of places - none of time: the same world gives the same way on a busy machine. A way that
+ * does not reach the goal says why ({@link Why}): every place a walk gets to was looked at, the budget
+ * ran out, or the world core knows ends there; it leads to the place it saw nearest the goal.
  */
 final class PathFinder {
 
-    static final int MAX_NODES = 40_000;
-    static final long BUDGET_NANOS = 1_500_000_000L;
+    /**
+     * The most places one search looks at: counted in places, never in time - the same world gives the
+     * same way on a busy machine. A search that runs out says so ({@link Why#NOT_LOOKED_THROUGH}); it is
+     * not "no way". (A place costs some 40 microseconds: this many is about five seconds at the worst.)
+     */
+    static final int MAX_NODES = 120_000;
+
+    /**
+     * Whether the search on this thread is still wanted - the trip or the job it is for still on. Looked
+     * at every so often: a death, a stop or a cancel ends a long search at once, not when it is through.
+     */
+    static final ThreadLocal<java.util.function.BooleanSupplier> WANTED = new ThreadLocal<>();
 
     private static final int[][] DIRS = {
             {1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {1, -1}, {-1, 1}, {-1, -1}
@@ -58,8 +69,31 @@ final class PathFinder {
     /** Where the body is at a place. */
     enum Mode { GROUND, WATER, CLIMB, AIR }
 
-    /** A way: its moves, and whether it reaches the goal (or only gets nearer). */
-    record Way(List<Step> steps, boolean complete) {}
+    /** Why a way ends where it does. */
+    enum Why {
+        /** At the goal. */
+        THERE,
+        /** Every place a walk gets to from here was looked at, all of them known: no walk goes there. */
+        NO_WALK,
+        /** The walk runs into the edge of the world core knows: it may go on beyond. */
+        WORLD_ENDS,
+        /** The search's budget of places ran out with places still to look at. */
+        NOT_LOOKED_THROUGH
+    }
+
+    /** A way: its moves, whether it reaches the goal (or only gets nearer), and why it ends there. */
+    record Way(List<Step> steps, boolean complete, Why why) {
+
+        Way(List<Step> steps, boolean complete) {
+            this(steps, complete, complete ? Why.THERE : Why.NOT_LOOKED_THROUGH);
+        }
+    }
+
+    /**
+     * What a walk from a place gets to: the way toward the goal, and every place on the ground or on a
+     * climbable the search stood at, each with the cost of getting there.
+     */
+    record Reach(Way way, Map<BlockPos, Double> places) {}
 
     private record Node(int x, int y, int z, Mode mode, double feet, double g, double h, Node parent, Kind kind,
                         Gait gait, BlockPos door) {
@@ -96,13 +130,36 @@ final class PathFinder {
      * leaving out the moves in {@code banned} (from one cell to another, see {@link #edge}).
      */
     Way find(int sx, int sy, int sz, double feet, Goal goal, Set<String> banned) {
+        return search(sx, sy, sz, feet, goal, banned, null, null);
+    }
+
+    /**
+     * {@link #find} from a place the body is not at - on the ground there - keeping every place the
+     * walk gets to: what a way made for the body (dug, built) may lead to, or start from.
+     */
+    Reach reach(int sx, int sy, int sz, double feet, Goal goal, boolean fromBody) {
+        return reach(sx, sy, sz, feet, goal, fromBody, Set.of());
+    }
+
+    /** {@link #reach(int, int, int, double, Goal, boolean)} with the moves in {@code banned} left out. */
+    Reach reach(int sx, int sy, int sz, double feet, Goal goal, boolean fromBody, Set<String> banned) {
+        Map<BlockPos, Double> places = new HashMap<>();
+        Way way = search(sx, sy, sz, feet, goal, banned, fromBody ? null : Mode.GROUND, places);
+        return new Reach(way, places);
+    }
+
+    /** How many places the last search looked at: what a long search cost, for the log. */
+    volatile int lastLooked;
+
+    private Way search(int sx, int sy, int sz, double feet, Goal goal, Set<String> banned, Mode startAs,
+                       Map<BlockPos, Double> places) {
         Movement.Capabilities caps = movement.capabilities();
         World w = new World(movement, ground);
         PriorityQueue<Node> open = new PriorityQueue<>((a, b) -> Double.compare(a.f(), b.f()));
         Map<Long, Double> best = new HashMap<>();
         Set<Long> closed = new HashSet<>();
         Movement.State now = movement.state();
-        Mode startMode = now.swimming() ? Mode.WATER : now.climbing() ? Mode.CLIMB
+        Mode startMode = startAs != null ? startAs : now.swimming() ? Mode.WATER : now.climbing() ? Mode.CLIMB
                 : now.flying() ? Mode.AIR : Mode.GROUND;
         if (startMode == Mode.AIR && !(caps.canFly() && movement.flightOn()) && w.stand(sx, sy, sz).isPresent()) {
             startMode = Mode.GROUND;       // flight off, flying just over the ground: on from it afoot
@@ -111,22 +168,34 @@ final class PathFinder {
         open.add(start);
         best.put(key(sx, sy, sz, startMode), 0.0);
         Node nearest = start;
-        long deadline = System.nanoTime() + BUDGET_NANOS;
         int expanded = 0;
+        boolean cut = false;
         while (!open.isEmpty()) {
             Node n = open.poll();
             long k = key(n.x(), n.y(), n.z(), n.mode());
             if (!closed.add(k)) {
                 continue;
             }
+            if (places != null && (n.mode() == Mode.GROUND || n.mode() == Mode.CLIMB)) {
+                places.putIfAbsent(new BlockPos(n.x(), n.y(), n.z()), n.g());
+            }
             if (goal.reachedBy(n.x(), n.y(), n.z()) && n.mode() != Mode.AIR && n.mode() != Mode.CLIMB) {
-                return new Way(steps(n), true);
+                lastLooked = expanded;
+                return new Way(steps(n), true, Why.THERE);
             }
             if (n.h() < nearest.h()) {
                 nearest = n;
             }
-            if (++expanded > MAX_NODES || System.nanoTime() > deadline) {
+            if (++expanded > MAX_NODES) {
+                cut = true;
                 break;
+            }
+            if ((expanded & 1023) == 0) {
+                java.util.function.BooleanSupplier wanted = WANTED.get();
+                if (wanted != null && !wanted.getAsBoolean()) {
+                    cut = true;     // nobody waits for it any more
+                    break;
+                }
             }
             List<Node> next = new ArrayList<>();
             switch (n.mode()) {
@@ -162,7 +231,8 @@ final class PathFinder {
                 }
             }
         }
-        return new Way(steps(nearest), false);
+        lastLooked = expanded;
+        return new Way(steps(nearest), false, cut ? Why.NOT_LOOKED_THROUGH : w.sawUnknown ? Why.WORLD_ENDS : Why.NO_WALK);
     }
 
     // ------------------------------------------------------------------
@@ -759,8 +829,16 @@ final class PathFinder {
             this.ground = ground;
         }
 
+        /** A place the search asked of lies beyond the world core knows: the walk may go on there. */
+        boolean sawUnknown;
+
         OptionalDouble stand(int x, int y, int z) {
-            return stands.computeIfAbsent(key(x, y, z, Mode.GROUND), k -> ground.standAt(new BlockPos(x, y, z)));
+            return stands.computeIfAbsent(key(x, y, z, Mode.GROUND), k -> {
+                if (!ground.known(x, y, z)) {
+                    sawUnknown = true;
+                }
+                return ground.standAt(new BlockPos(x, y, z));
+            });
         }
 
         Movement.Cell cell(int x, int y, int z) {

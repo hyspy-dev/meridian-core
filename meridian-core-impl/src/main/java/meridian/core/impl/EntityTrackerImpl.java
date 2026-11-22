@@ -1,5 +1,9 @@
 package meridian.core.impl;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -73,8 +77,23 @@ final class EntityTrackerImpl implements EntityTracker {
     private final Map<Integer, Direction> bodies = new ConcurrentHashMap<>();
     /** Each entity's own interaction roots by type ({@code Interactions}) - what a use on it runs. */
     private final Map<Integer, Map<InteractionType, Integer>> interactions = new ConcurrentHashMap<>();
-    /** Each entity's active effects by index - added and removed as the server says. */
-    private final Map<Integer, Set<Integer>> effects = new ConcurrentHashMap<>();
+    /**
+     * Each entity's active effects by index - added and removed as the server says - with how long
+     * each had left when it said ({@code EntityEffectUpdate.remainingTime}; sent again on each
+     * overwrite or extension).
+     */
+    private final Map<Integer, Map<Integer, Told>> effects = new ConcurrentHashMap<>();
+    /** The server's effect catalog by index - its asset ids ({@link #effectNames}). */
+    private volatile java.util.function.IntFunction<String> effectName = i -> null;
+
+    /** An effect as the server last told of it: the time it had left then, and when that was. */
+    private record Told(float remaining, boolean infinite, boolean debuff, long atNanos) {
+
+        double left(long now) {
+            return infinite ? Double.POSITIVE_INFINITY
+                    : Math.max(0, remaining - (now - atNanos) / 1e9);
+        }
+    }
     /**
      * Each entity's hitbox about its feet, sized as the server sizes it ({@link #hitbox}), from its
      * last model; none for a model without one.
@@ -174,14 +193,15 @@ final class EntityTrackerImpl implements EntityTracker {
                         }
                     } else if (component instanceof EntityEffectsUpdate effectUpdates
                             && effectUpdates.entityEffectUpdates != null) {
-                        Set<Integer> active = effects.computeIfAbsent(update.networkId,
-                                k -> ConcurrentHashMap.newKeySet());
+                        Map<Integer, Told> active = effects.computeIfAbsent(update.networkId,
+                                k -> new ConcurrentHashMap<>());
+                        long now = System.nanoTime();
                         for (EntityEffectUpdate e : effectUpdates.entityEffectUpdates) {
                             if (e == null) continue;
                             if (e.type == EffectOp.Remove) {
                                 active.remove(e.id);
                             } else {
-                                active.add(e.id);
+                                active.put(e.id, new Told(e.remainingTime, e.infinite, e.debuff, now));
                             }
                         }
                     } else if (component instanceof InteractionsUpdate entityInteractions
@@ -309,18 +329,56 @@ final class EntityTrackerImpl implements EntityTracker {
                 new Position(me.x(), me.y(), me.z()),
                 new Direction(lookYaw, lookPitch, lookRoll),
                 interactions.getOrDefault(entityId, Map.of()),
-                Set.copyOf(effectsOf(entityId)), true);
+                effectIdsOf(entityId), true);
     }
 
     /** An entity's active effects by index, as last seen; empty when none were. */
-    Set<Integer> effectsOf(int entityId) {
-        Set<Integer> active = effects.get(entityId);
-        return active == null ? Set.of() : Set.copyOf(active);
+    Set<Integer> effectIdsOf(int entityId) {
+        Map<Integer, Told> active = effects.get(entityId);
+        return active == null ? Set.of() : Set.copyOf(active.keySet());
     }
 
     /** The local player's own active effects. */
     Set<Integer> selfEffects() {
-        return localId == Integer.MIN_VALUE ? Set.of() : effectsOf(localId);
+        return localId == Integer.MIN_VALUE ? Set.of() : effectIdsOf(localId);
+    }
+
+    /**
+     * The local player's own active effects by index, each with the seconds it has left now
+     * (counted down from what the server last said; infinite for an effect without an end).
+     */
+    Map<Integer, Double> selfEffectsLeft() {
+        Map<Integer, Told> active = localId == Integer.MIN_VALUE ? null : effects.get(localId);
+        if (active == null) {
+            return Map.of();
+        }
+        long now = System.nanoTime();
+        Map<Integer, Double> out = new HashMap<>();
+        active.forEach((id, told) -> out.put(id, told.left(now)));
+        return out;
+    }
+
+    /** Where the effects' asset ids come from: core's catalog of them, by index. */
+    void effectNames(java.util.function.IntFunction<String> names) {
+        if (names != null) {
+            effectName = names;
+        }
+    }
+
+    @Override
+    public List<Effect> effectsOf(int entityId) {
+        Map<Integer, Told> active = effects.get(entityId);
+        if (active == null || active.isEmpty()) {
+            return List.of();
+        }
+        long now = System.nanoTime();
+        List<Effect> out = new ArrayList<>();
+        active.forEach((index, told) -> {
+            String id = effectName.apply(index);
+            out.add(new Effect(id != null ? id : "#" + index, told.left(now), told.infinite(), told.debuff()));
+        });
+        out.sort(Comparator.comparing(Effect::id));
+        return List.copyOf(out);
     }
 
     /** An entity's own interaction roots by type, as last seen; empty when none were. */

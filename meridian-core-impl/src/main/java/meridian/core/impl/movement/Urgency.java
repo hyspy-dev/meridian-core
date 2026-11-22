@@ -2,8 +2,6 @@ package meridian.core.impl.movement;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -60,8 +58,8 @@ public final class Urgency {
             return false;
         }
         try {
-            t.get(30, TimeUnit.MINUTES);
-        } catch (ExecutionException | TimeoutException e) {
+            t.get();        // until the urgent hold is given back - however long the fight is
+        } catch (ExecutionException e) {
             // over all the same
         }
         return true;

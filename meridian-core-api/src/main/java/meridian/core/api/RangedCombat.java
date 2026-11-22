@@ -30,6 +30,15 @@ public interface RangedCombat {
     /** Selects the shortest usable draw and leads the target using its observed motion. */
     CompletableFuture<Shot> shoot(int entityId);
 
+    /**
+     * The same, with the draw chosen: {@code hardest} takes the longest draw that reaches - the bow's
+     * full weight, a second or so longer to loose - where the shortest only just gets the arrow there
+     * (a few points of a goblin's hundred and sixty). A core too old to choose shoots the shortest.
+     */
+    default CompletableFuture<Shot> shoot(int entityId, boolean hardest) {
+        return shoot(entityId);
+    }
+
     /** Aims at a world point. A blocked or unknown path is refused before drawing. */
     CompletableFuture<Shot> shoot(Vec3 point);
 }
