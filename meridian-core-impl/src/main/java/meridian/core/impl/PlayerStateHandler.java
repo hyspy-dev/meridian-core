@@ -165,6 +165,7 @@ final class PlayerStateHandler implements PacketHandler {
         section(UTILITY, inventory.utility);
         section(TOOLS, inventory.tools);
         section(BACKPACK, inventory.backpack);
+        state.onInventoryTold();
     }
 
     private void section(String panel, InventorySection section) {

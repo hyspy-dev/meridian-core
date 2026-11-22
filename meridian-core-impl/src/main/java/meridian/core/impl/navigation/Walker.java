@@ -82,6 +82,31 @@ public final class Walker implements Navigator {
         return movement.available();
     }
 
+    /**
+     * What a walk from {@code from} gets to in the world core knows ({@link PathFinder#reach}): the
+     * body's own walk ({@code fromBody}), or one from a place it is not at - standing on the ground
+     * there.
+     */
+    PathFinder.Reach reach(BlockPos from, double feet, Goal goal, boolean fromBody) {
+        return finder.reach(from.x(), from.y(), from.z(), feet, goal, fromBody);
+    }
+
+    /** The same, with the moves in {@code banned} left out ({@link #bannedLast}). */
+    PathFinder.Reach reach(BlockPos from, double feet, Goal goal, boolean fromBody, Set<String> banned) {
+        return finder.reach(from.x(), from.y(), from.z(), feet, goal, fromBody, banned);
+    }
+
+    /**
+     * The moves the last trip found the body would not make - played on a copy of it, they did not
+     * arrive. The grid has them all the same; whoever asks what a walk gets to after that trip leaves
+     * them out, or is told of a walk that is not walked.
+     */
+    Set<String> bannedLast() {
+        return lastBanned;
+    }
+
+    private volatile Set<String> lastBanned = Set.of();
+
     @Override
     public List<Step> plan(Goal goal) {
         Vec3 p = movement.position();
@@ -137,7 +162,7 @@ public final class Walker implements Navigator {
             int upTo = untilDoor(ws);
             Movement.Prediction pred = movement.predict(moves(ws.subList(0, upTo)));
             if ((pred.arrived() >= upTo && !pred.hurt()) || unknown(pred)) {
-                return new PathFinder.Way(ws, way.complete());
+                return new PathFinder.Way(ws, way.complete(), way.why());
             }
         }
         log.info("navigation: the straightened way would not make it - the way as found");
@@ -178,7 +203,8 @@ public final class Walker implements Navigator {
     /** A way over the grid, found and played on a copy of the body, moves that would not arrive banned. */
     private PathFinder.Way grid(int[] c, Vec3 p, Goal goal, Set<String> banned) {
         PathFinder.Way way = finder.find(c[0], c[1], c[2], p.y(), goal, banned);
-        for (int i = 0; i < MAX_BANS && !way.steps().isEmpty(); i++) {
+        java.util.function.BooleanSupplier wanted = PathFinder.WANTED.get();
+        for (int i = 0; i < MAX_BANS && !way.steps().isEmpty() && (wanted == null || wanted.getAsBoolean()); i++) {
             // Up to the first shut door: past it is played once it is open.
             int upTo = untilDoor(way.steps());
             if (upTo == 0) {
@@ -197,11 +223,12 @@ public final class Walker implements Navigator {
                     s.x(), s.y(), s.z(), pred.hurt() ? "hurt" : pred.result().status());
             way = finder.find(c[0], c[1], c[2], p.y(), goal, banned);
         }
-        // Still not clean: keep the part the body can go.
+        // Still not clean: keep the part the body can go. Whether that part is worth going is the
+        // leg's to say: it is played only if it ends nearer the goal than the body stands.
         int upTo = untilDoor(way.steps());
         Movement.Prediction pred = movement.predict(moves(way.steps().subList(0, upTo)));
         if (pred.arrived() < upTo && !unknown(pred)) {
-            return new PathFinder.Way(new ArrayList<>(way.steps().subList(0, pred.arrived())), false);
+            return new PathFinder.Way(new ArrayList<>(way.steps().subList(0, pred.arrived())), false, way.why());
         }
         return way;
     }
@@ -298,7 +325,9 @@ public final class Walker implements Navigator {
                 movement.stop();
             }
         });
-        executor.execute(() -> leg(id, target, done, 0, 0, Double.MAX_VALUE, new HashSet<>()));
+        Set<String> banned = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        done.whenComplete((r, e) -> lastBanned = Set.copyOf(banned));
+        executor.execute(() -> leg(id, target, done, 0, 0, Double.MAX_VALUE, banned));
         return done;
     }
 
@@ -453,9 +482,20 @@ public final class Walker implements Navigator {
     /** How often a chase looks where its target is while the way is gone. */
     static final long CHASE_EVERY_MS = 100;
 
-    /** One leg: find a way from here, check it, then play it. */
+    /** One leg: find a way from here, check it, then play it. A trip always ends: a leg that throws ends it. */
     private void leg(int id, Target target, CompletableFuture<NavResult> done, int moves, int replans, double lastGap,
                      Set<String> banned) {
+        try {
+            legNow(id, target, done, moves, replans, lastGap, banned);
+        } catch (RuntimeException | Error e) {
+            log.warn("navigation: the trip broke off", e);
+            movement.stop();
+            done.completeExceptionally(e);
+        }
+    }
+
+    private void legNow(int id, Target target, CompletableFuture<NavResult> done, int moves, int replans, double lastGap,
+                        Set<String> banned) {
         if (!live(id) || done.isDone()) {
             done.complete(new NavResult(NavResult.Status.INTERRUPTED, movement.position(), moves, replans));
             return;
@@ -479,20 +519,36 @@ public final class Walker implements Navigator {
             return;
         }
         int[] c = cellOf(p);
-        PathFinder.Way way = checked(c, p, goal, banned);
+        PathFinder.Way way;
+        PathFinder.WANTED.set(() -> live(id));
+        try {
+            way = checked(c, p, goal, banned);
+        } finally {
+            PathFinder.WANTED.remove();
+        }
         if (!live(id)) {
             // The body went back to the player while the way was looked for.
             done.complete(new NavResult(NavResult.Status.INTERRUPTED, movement.position(), moves, replans));
             return;
         }
         double gap = gap(way, c, goal);
-        if (way.steps().isEmpty() || (!way.complete() && gap >= lastGap)) {
+        // A way that does not reach the goal is gone along only while it gets nearer: nearer than the
+        // leg before it ended, and nearer than the body stands now - the start of a way whose rest
+        // would not do leads anywhere (21.11: 42 blocks down into the caves, away from the goal).
+        double here = gap(new PathFinder.Way(List.of(), false), c, goal);
+        if (way.steps().isEmpty() || (!way.complete() && (gap >= lastGap || gap >= here))) {
             if (target.nearEnough(p)) {
                 log.info("navigation: no way nearer to {}, and near enough", goal);
                 done.complete(new NavResult(NavResult.Status.ARRIVED, p, moves, replans));
                 return;
             }
-            log.info("navigation: no way from {} to {} ({} move(s), {} replan(s))", p, goal, moves, replans);
+            log.info("navigation: no way from {} to {} ({} move(s), {} replan(s); {})", p, goal, moves, replans,
+                    switch (way.why()) {
+                        case NO_WALK -> "no walk goes there";
+                        case WORLD_ENDS -> "the world known ends on the way";
+                        case NOT_LOOKED_THROUGH -> "not looked through: the search's budget ran out";
+                        case THERE -> "the way there would not do";
+                    });
             done.complete(new NavResult(NavResult.Status.NO_PATH, p, moves, replans));
             return;
         }

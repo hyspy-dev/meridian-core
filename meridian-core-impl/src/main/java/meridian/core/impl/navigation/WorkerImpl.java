@@ -130,7 +130,7 @@ public final class WorkerImpl implements Worker {
         this.inventory = inventory;
         this.session = session;
         this.executor = executor;
-        this.log = log;
+        this.log = log != null ? log : org.slf4j.helpers.NOPLogger.NOP_LOGGER;     // a rig with nothing to say it to
         this.urgency = movement instanceof meridian.core.impl.movement.MovementImpl m ? m.urgency()
                 : new meridian.core.impl.movement.Urgency();
     }
@@ -258,6 +258,15 @@ public final class WorkerImpl implements Worker {
     }
 
     @Override
+    public CompletableFuture<NavResult> travel(Goal goal) {
+        if (goal == null) {
+            return CompletableFuture.completedFuture(new NavResult(NavResult.Status.NO_PATH, movement.position(), 0, 0));
+        }
+        return held(id -> travel(id, goal, new Rules(Access.ANY, Tools.BEST), new ArrayList<>()),
+                new NavResult(NavResult.Status.NOT_AVAILABLE, null, 0, 0));
+    }
+
+    @Override
     public CompletableFuture<Outcome> pillarDown(int blocks) {
         if (blocks < 1) {
             return CompletableFuture.completedFuture(Outcome.NOTHING);
@@ -376,7 +385,7 @@ public final class WorkerImpl implements Worker {
                 // Walked - or, with no walk there at all (into a pit with sheer walls, back from a chest
                 // above it), a way dug there: a staircase down, as a player cuts one. A long way round is
                 // walked: what is dug here is the job's, nothing else.
-                NavResult r = travel(id, Goal.at(s.cell()), a -> s.cell().equals(a), null, false, rules, broken);
+                NavResult r = travel(id, Goal.at(s.cell()), a -> s.cell().equals(a), Set.of(), rules, broken);
                 if (!live(id)) {
                     return Outcome.INTERRUPTED;
                 }
@@ -408,159 +417,304 @@ public final class WorkerImpl implements Worker {
     }
 
     // ------------------------------------------------------------------
-    // A tunnel to a block deep in the rock
+    // A way anywhere: walked where a walk goes, made where none does ({@link Ways})
     // ------------------------------------------------------------------
 
-    /** The longest tunnel dug to one block, in moves. */
-    static final int TUNNEL_MOST = 48;
-    /** The most places a tunnel is looked for through. */
-    static final int TUNNEL_NODES = 30_000;
-    /** What a block to break costs a tunnel, against 1 for a move. */
-    static final double TUNNEL_PER_BLOCK = 1.5;
-    /** ... and sand or gravel over what is broken, which would come down into it. */
-    static final double TUNNEL_FALLING = 6.0;
-
-    /** One move of a tunnel: the blocks to break, then the place to go to. */
-    private record TunnelStep(BlockPos to, List<BlockPos> breaks) {}
-
-    private record TunnelNode(BlockPos at, double g, double f, int depth, TunnelNode parent, List<BlockPos> breaks) {}
+    /**
+     * The most places one search for a way to make looks at. It looks towards the goal, so a way that
+     * is there is found within a few thousand; the count is what "no way" costs when there is none -
+     * a place in the sky with nothing to build up to it.
+     */
+    static final int WAY_NODES = 60_000;
+    /**
+     * What a block outside the job's selection costs a way made, over any block's: three blocks' worth
+     * - a step cut outside the selection (three blocks) then costs about what two blocks put down do.
+     */
+    static final double OUTSIDE = 3.0;
 
     /**
-     * Digs a tunnel to a block no place on open ground reaches, then breaks it: the blocks of each
-     * move broken, then the move made. {@code null} when there is no tunnel to it.
+     * Digs a tunnel to a block no place on open ground reaches, then breaks it: a way made to beside
+     * it ({@link #travel}). {@code null} when there is no way there.
      */
     private Outcome tunnel(int id, BlockPos target, Rules rules, List<BlockPos> broken) throws Exception {
-        List<TunnelStep> plan = tunnelPlan(target);
-        if (plan == null) {
-            return null;
+        NavResult r = travel(id, Goal.at(target), beside(target), Set.of(target), rules, broken);
+        if (!live(id) || r.status() == NavResult.Status.INTERRUPTED) {
+            return Outcome.INTERRUPTED;
         }
-        log.info("meridian-core: a tunnel of {} move(s), {} block(s) to break, to {}", plan.size(),
-                plan.stream().mapToInt(st -> st.breaks().size()).sum(), text(target));
-        for (TunnelStep st : plan) {
-            for (BlockPos c : st.breaks()) {
-                if (!live(id)) {
-                    return Outcome.INTERRUPTED;
-                }
-                if (world.blockAt(c.x(), c.y(), c.z()).isAir()) {
-                    continue;
-                }
-                if (nearLava(c)) {
-                    return Outcome.LAVA;
-                }
-                if (!breakInReach(c, rules, broken)) {
-                    return Outcome.WOULD_NOT_BREAK;
-                }
-            }
-            NavResult r = go(Goal.at(st.to())).get(1, TimeUnit.MINUTES);
-            if (!live(id)) {
-                return Outcome.INTERRUPTED;
-            }
-            if (r.status() != NavResult.Status.ARRIVED) {
-                log.info("meridian-core: the tunnel to {} did not go on at {} ({})", text(target), text(st.to()),
-                        r.status());
-                return Outcome.UNREACHABLE;
-            }
+        if (!r.arrived()) {
+            return r.moves() == 0 ? null : Outcome.UNREACHABLE;
         }
         return breakFromHere(id, target, rules, List.of(), broken) ? Outcome.BROKEN : Outcome.WOULD_NOT_BREAK;
     }
 
-    /**
-     * A walk to {@code goal} is this many times longer than the straight line at most before the way is
-     * dug instead - out of a pit, up a cliff: a staircase, as a player cuts one.
-     */
-    static final double DETOUR = 2.0;
-    /** ... and a little more than that, for a short trip where any way round is long by the ratio. */
-    static final double DETOUR_SLACK = 4.0;
-
-    /**
-     * Goes to {@code goal}: walks there - unless the walk goes a long way round ({@link #DETOUR}) and
-     * a way dug there is shorter; then that is dug, a move at a time (its blocks broken, then the move
-     * made, as a tunnel to a block is), and the rest walked.
-     */
+    /** Goes to {@code goal} ({@link #travel(int, Goal, java.util.function.Predicate, Set, Rules, List)}). */
     private NavResult travel(int id, Goal goal, Rules rules, List<BlockPos> broken) throws Exception {
-        return travel(id, goal, a -> goal.reachedBy(a.x(), a.y(), a.z()), null, rules, broken);
-    }
-
-    private NavResult travel(int id, Goal goal, java.util.function.Predicate<BlockPos> arrived, BlockPos keep,
-                             Rules rules, List<BlockPos> broken) throws Exception {
-        return travel(id, goal, arrived, keep, true, rules, broken);
+        return travel(id, goal, a -> goal.reachedBy(a.x(), a.y(), a.z()), Set.of(), rules, broken);
     }
 
     /**
-     * {@link #travel(int, Goal, Rules, List)} where a way dug ends at a place {@code arrived} takes -
-     * beside a chest, not merely near it through the rock - {@code keep} never broken; with no
-     * {@code shortcut}, a way is dug only when there is no walk there at all, never for a long way round.
+     * Goes to {@code goal}, anywhere: walks as far as a walk goes; where none goes on, the way is made
+     * - dug, built - from a place the body walks to, to the NEAREST place a walk goes on from to the
+     * goal (or to a place {@code arrived} takes), and the walk taken up again from there
+     * ({@link Ways#connect}). {@code keep} is never broken; nor is a block that holds something - a
+     * chest, a bench - or the block one stands on; under {@link Access#within} nothing outside the box.
+     *
+     * <p>It ends by what happened, never by a clock: there; interrupted; or no way - nothing to make
+     * one through or with, or every way tried would not go (a block that would not break is left out
+     * of the next try, so each try differs from the last).
      */
-    private NavResult travel(int id, Goal goal, java.util.function.Predicate<BlockPos> arrived, BlockPos keep,
-                             boolean shortcut, Rules rules, List<BlockPos> broken) throws Exception {
-        Vec3 me = movement.position();
-        if (me == null) {
-            return go(goal).get(3, TimeUnit.MINUTES);
-        }
-        double straight = Math.sqrt(distSq(me, new Vec3(goal.x() + 0.5, goal.y(), goal.z() + 0.5)));
-        List<Navigator.Step> walk = navigator.plan(goal);
-        double walked = 0;
-        Vec3 at = me;
-        for (Navigator.Step st : walk) {
-            Vec3 to = new Vec3(st.x() + 0.5, st.feet(), st.z() + 0.5);
-            walked += Math.sqrt(distSq(at, to));
-            at = to;
-        }
-        Navigator.Step last = walk.isEmpty() ? null : walk.get(walk.size() - 1);
-        boolean walks = last != null && goal.reachedBy(last.x(), last.y(), last.z());
-        if (walks && (!shortcut || walked <= DETOUR * straight + DETOUR_SLACK)) {
-            return go(goal).get(3, TimeUnit.MINUTES);
-        }
-        BlockPos aim = new BlockPos(goal.x(), goal.y(), goal.z());
-        List<TunnelStep> dug = tunnelPlan(aim, arrived, keep);
-        double cost = 0;
-        if (dug != null) {
-            for (TunnelStep st : dug) {
-                cost += 1 + TUNNEL_PER_BLOCK * st.breaks().size();
+    private NavResult travel(int id, Goal goal, java.util.function.Predicate<BlockPos> arrived, Set<BlockPos> keep,
+                             Rules rules, List<BlockPos> broken) throws Exception {
+        Walker walker = navigator instanceof Walker w ? w : null;
+        Set<BlockPos> refused = new HashSet<>();      // what would not break, be built on or be stepped to
+        Set<BlockPos> unreached = new HashSet<>();    // places the search took for walked to, and the walk did not get to
+        Set<BlockPos> notWalked = new HashSet<>();    // places a whole walk was found from, and was not walked
+        Set<BlockPos> lookedAgain = new HashSet<>();  // places the walk was taken up again from, the world having grown
+        int moves = 0;
+        int ways = 0;
+        while (true) {
+            if (!live(id)) {
+                return new NavResult(NavResult.Status.INTERRUPTED, movement.position(), moves, ways);
+            }
+            // 1. As far as a walk goes.
+            NavResult r = go(goal).get();
+            moves += r.moves();
+            // The moves that walk found the body would not make: no walk goes by them.
+            Set<String> banned = walker == null ? Set.of() : walker.bannedLast();
+            Vec3 me = movement.position();
+            if (!live(id) || me == null || r.status() == NavResult.Status.INTERRUPTED
+                    || r.status() == NavResult.Status.NOT_AVAILABLE) {
+                return new NavResult(me == null ? NavResult.Status.NOT_AVAILABLE
+                        : r.status() == NavResult.Status.NOT_AVAILABLE ? r.status() : NavResult.Status.INTERRUPTED,
+                        me, moves, ways);
+            }
+            int[] c = Walker.cellOf(me);
+            BlockPos at = new BlockPos(c[0], c[1], c[2]);
+            if (r.arrived() || arrived.test(at)) {
+                return new NavResult(NavResult.Status.ARRIVED, me, moves, ways);
+            }
+            if (walker == null) {
+                return new NavResult(r.status(), me, moves, ways);
+            }
+            // The world ends by the body: the server has not shown it yet - the body was just set down
+            // here (alive again after a death, teleported), or walked faster than the chunks came.
+            // Nothing is a way before it is seen: waited for, then the walk again.
+            if (awaitWorld(id, at)) {
+                continue;
+            }
+            // 2. No walk from here: a way made to where one goes on.
+            landed(id);
+            PathFinder.WANTED.set(() -> live(id));      // the searches below end with the job
+            PathFinder.Reach reach = walker.reach(at, me.y(), goal, true, banned);
+            if (reach.way().complete()) {
+                // A whole walk goes from here, and the walk just made did not get there: what stopped it
+                // is on the way (a mob in a doorway, something fallen in), not the lack of one - no way
+                // is made for that. Once more from here; a second time from the same place is the answer.
+                PathFinder.WANTED.remove();
+                if (!notWalked.add(at)) {
+                    log.info("meridian-core: a walk to {} goes from {} and was not walked ({}) - no way is made for that",
+                            goal, text(at), r.status());
+                    return new NavResult(r.status(), me, moves, ways);
+                }
+                continue;
+            }
+            if (nearer(reach.way(), me, goal) && lookedAgain.add(at)) {
+                // No whole walk - but one that gets nearer the goal than the body is, and the walk just
+                // made did not take it: it looked before the server had shown that much (alive again a
+                // moment ago, chunks still coming in). Walked - once more from here.
+                PathFinder.WANTED.remove();
+                continue;
+            }
+            Map<BlockPos, Double> sources = new HashMap<>(reach.places());
+            sources.keySet().removeAll(unreached);
+            sources.putIfAbsent(at, 0.0);
+            String filler = filler(rules);
+            Ways.Made way = Ways.connect(grid(keep, rules, refused), sources, arrived, place -> {
+                PathFinder.Reach on = walker.reach(place, world.standAt(place).orElse(place.y()), goal, false, banned);
+                if (!on.way().complete()) {
+                    return new Ways.On(false, on.places(), Set.of());
+                }
+                // What the walk on stands on: the way made must leave it whole.
+                Set<BlockPos> floors = new HashSet<>();
+                floors.add(new BlockPos(place.x(), place.y() - 1, place.z()));
+                for (Navigator.Step st : on.way().steps()) {
+                    floors.add(new BlockPos(st.x(), st.y() - 1, st.z()));
+                }
+                return new Ways.On(true, Map.of(), floors);
+            }, fillers(filler), (int) Math.floor(movement.capabilities().safeDrop()), WAY_NODES,
+                    new BlockPos(goal.x(), goal.y(), goal.z()));
+            PathFinder.WANTED.remove();
+            if (!live(id)) {
+                return new NavResult(NavResult.Status.INTERRUPTED, movement.position(), moves, ways);
+            }
+            if (way == null) {
+                log.info("meridian-core: no way to {} from {}: no walk ({}), and none to make - {} place(s) walked to, "
+                                + "{} block(s) that would not go", goal, text(at), reach.way().why(), sources.size(),
+                        refused.size());
+                return new NavResult(NavResult.Status.NO_PATH, me, moves, ways);
+            }
+            ways++;
+            log.info("meridian-core: a way made to {}: from {} to {}, {} step(s), {} block(s) to break, {} to put down - {}",
+                    goal, text(way.from()), text(way.to()), way.steps().size(),
+                    way.steps().stream().mapToInt(st -> st.breaks().size()).sum(),
+                    way.steps().stream().filter(st -> st.place() != null).count(),
+                    way.arrives() ? "to the goal" : "a walk goes on from there");
+            // 3. To where it starts, then along it.
+            if (!at.equals(way.from())) {
+                NavResult w = go(Goal.at(way.from())).get();
+                moves += w.moves();
+                if (!live(id) || w.status() == NavResult.Status.INTERRUPTED) {
+                    return new NavResult(NavResult.Status.INTERRUPTED, movement.position(), moves, ways);
+                }
+                if (!w.arrived()) {
+                    log.info("meridian-core: the way's start {} was not got to ({}) - another", text(way.from()), w.status());
+                    unreached.add(way.from());
+                    continue;
+                }
+            }
+            int before = refused.size();
+            int made = follow(id, way, rules, broken, filler, refused);
+            moves += made;
+            if (made < way.steps().size() && refused.size() == before && live(id)) {
+                // A step did not go and nothing says which block: not that way again.
+                refused.add(way.steps().get(made).to());
             }
         }
-        if (dug == null || (walks && cost >= walked)) {
-            return go(goal).get(3, TimeUnit.MINUTES);
+    }
+
+    /** Whether the walk ends at least two blocks nearer the goal than the body stands. */
+    private static boolean nearer(PathFinder.Way way, Vec3 me, Goal goal) {
+        if (way.steps().isEmpty()) {
+            return false;
         }
-        log.info("meridian-core: {} - a way dug instead ({} move(s), {} block(s); the walk {} long, straight {})",
-                text(aim), dug.size(), dug.stream().mapToInt(st -> st.breaks().size()).sum(),
-                walks ? String.format(Locale.ROOT, "%.0f", walked) : "none",
-                String.format(Locale.ROOT, "%.0f", straight));
-        for (TunnelStep st : dug) {
+        Navigator.Step last = way.steps().get(way.steps().size() - 1);
+        double from = Math.sqrt(sq(me.x() - goal.x() - 0.5) + sq(me.y() - goal.y()) + sq(me.z() - goal.z() - 0.5));
+        double to = Math.sqrt(sq(last.x() - goal.x()) + sq(last.y() - goal.y()) + sq(last.z() - goal.z()));
+        return to < from - 2;
+    }
+
+    private static double sq(double v) {
+        return v * v;
+    }
+
+    /** A chunk's side, in blocks. */
+    static final int CHUNK = 32;
+
+    /**
+     * Waits for the server to show the world round the body, where it has not: the body's own chunk
+     * and the eight about it, at the body's height. The server sends what lies round the player, so
+     * they come - or the hold on the body ends, and the wait with it.
+     *
+     * <p>Round it, not one way only: alive again by a chunk's edge, the chunk towards the goal was
+     * known still and the body's own was not (22.11) - eight blocks ahead looked shown, and the way was
+     * looked for from a body standing in nothing: "no way", at once.
+     *
+     * @return whether there was anything to wait for (and the walk is to be tried again)
+     */
+    private boolean awaitWorld(int id, BlockPos at) throws InterruptedException {
+        BlockPos missing = unshown(at);
+        if (missing == null) {
+            return false;
+        }
+        log.info("meridian-core: the world round the body is not shown yet (at {}, standing at {}) - waiting for it",
+                text(missing), text(at));
+        while (live(id) && unshown(at) != null) {
+            Thread.sleep(50);       // the next chunks the server sends say
+        }
+        return live(id);
+    }
+
+    /** A cell of the nine chunks round {@code at} the server has not shown, at the feet's height or under them; {@code null}: all shown. */
+    private BlockPos unshown(BlockPos at) {
+        for (int ox = -1; ox <= 1; ox++) {
+            for (int oz = -1; oz <= 1; oz++) {
+                for (int y = Math.max(0, at.y() - 1); y <= at.y(); y++) {
+                    int x = at.x() + ox * CHUNK;
+                    int z = at.z() + oz * CHUNK;
+                    if (!world.known(x, y, z)) {
+                        return new BlockPos(x, y, z);
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Waits for the body to be on the ground: a way is looked for from where it stands. */
+    private void landed(int id) throws InterruptedException {
+        while (live(id) && !movement.onGround() && movement.position() != null) {
+            Movement.State st = movement.state();
+            if (st != null && (st.swimming() || st.climbing() || st.flying())) {
+                return;
+            }
+            Thread.sleep(20);       // a body in the air comes down by the server's own gravity: the next tick says
+        }
+    }
+
+    /**
+     * The steps of a way made in turn: the blocks of each broken, then the block it puts down, then the
+     * move. Stops at a step that does not go, the block at fault put into {@code refused}.
+     *
+     * @return the steps made
+     */
+    private int follow(int id, Ways.Made way, Rules rules, List<BlockPos> broken, String filler, Set<BlockPos> refused)
+            throws Exception {
+        int done = 0;
+        for (Ways.Step st : way.steps()) {
             for (BlockPos c : st.breaks()) {
                 if (!live(id)) {
-                    return new NavResult(NavResult.Status.INTERRUPTED, movement.position(), 0, 0);
+                    return done;
                 }
                 if (world.blockAt(c.x(), c.y(), c.z()).isAir()) {
                     continue;
                 }
                 if (nearLava(c) || !breakInReach(c, rules, broken)) {
-                    return go(goal).get(3, TimeUnit.MINUTES);     // could not dig on: walk the rest
+                    log.info("meridian-core: the way did not go on at {}: {} would not break", text(st.to()), text(c));
+                    refused.add(c);
+                    return done;
                 }
             }
-            NavResult r = go(Goal.at(st.to())).get(1, TimeUnit.MINUTES);
             if (!live(id)) {
-                return r;
+                return done;
             }
-            if (r.status() != NavResult.Status.ARRIVED) {
-                return go(goal).get(3, TimeUnit.MINUTES);
+            switch (st.kind()) {
+                case PILLAR -> {
+                    Outcome o = filler == null ? Outcome.NO_ITEM : pillarNow(id, filler, 1);
+                    if (o != Outcome.PLACED) {
+                        log.info("meridian-core: the way's pillar did not go up at {} ({})", text(st.place()), o);
+                        refused.add(st.place());
+                        return done;
+                    }
+                }
+                case BRIDGE -> {
+                    Outcome o = filler == null ? Outcome.NO_ITEM : placeNow(id, st.place(), filler, 0, false);
+                    if (o != Outcome.PLACED && o != Outcome.OCCUPIED) {
+                        log.info("meridian-core: the way's block did not go down at {} ({})", text(st.place()), o);
+                        refused.add(st.place());
+                        return done;
+                    }
+                    if (!stepTo(id, st)) {
+                        return done;
+                    }
+                }
+                case MOVE, WALK -> {
+                    if (!stepTo(id, st)) {
+                        return done;
+                    }
+                }
             }
+            done++;
         }
-        // At the way's end: there, where it was dug to.
-        return new NavResult(NavResult.Status.ARRIVED, movement.position(), dug.size(), 0);
+        return done;
     }
 
-    /**
-     * A tunnel to the block: from where the body stands, moves along the axes - level, a step up, a
-     * step down - each through a way the body's height, breaking what is there, to a place with the
-     * block beside it at the feet or the head, or over the head. A move costs 1 and each block to break
-     * {@link #TUNNEL_PER_BLOCK} more; sand or gravel over what is broken costs {@link #TUNNEL_FALLING}.
-     * Not dug: a cell with a fluid, one next to lava, one nothing in the hotbar breaks, one core does
-     * not know, the block itself; nothing is dug under the feet. {@code null} when there is no tunnel
-     * within {@link #TUNNEL_MOST} moves.
-     */
-    private List<TunnelStep> tunnelPlan(BlockPos target) {
-        return tunnelPlan(target, beside(target), target);
+    private boolean stepTo(int id, Ways.Step st) throws Exception {
+        NavResult r = go(Goal.at(st.to())).get();
+        if (live(id) && r.status() != NavResult.Status.ARRIVED) {
+            log.info("meridian-core: the way did not go on at {} ({})", text(st.to()), r.status());
+            return false;
+        }
+        return live(id);
     }
 
     /** A place with the block beside it at the feet or the head, or over the head: where it is got at. */
@@ -573,103 +727,135 @@ public final class WorkerImpl implements Worker {
     }
 
     /**
-     * A way dug from where the body stands to a place {@code arrived} takes - the same moves as a tunnel
-     * to a block ({@link #tunnelPlan(BlockPos)}), led toward {@code aim}, {@code keep} never broken
-     * ({@code null}: nothing kept).
+     * The world as a way made sees it: what the body may be in, stand on, break, build on.
+     * Never broken: {@code keep}; {@code refused}; a block that holds something or is used (a chest, a
+     * bench, a door - {@link #precious}) and the block one stands on.
+     *
+     * <p>{@link Access#within} is what may be broken to get AT a block from where the body stands; the
+     * way to that place is another matter - into a pit with sheer walls there is none but a staircase
+     * cut in the rock beside it. So a block outside the box may be broken for the way, at a price
+     * ({@link #OUTSIDE}): the way keeps to the selection, or is built, where that is near as short.
+     *
+     * <p>The owner's rule (21.11): out there a block is not broken while something that is no block
+     * stands on it ({@link #carries} - a torch, a plant, a table: it would come down) - the way is cut
+     * round it. Nor is the thing itself broken ({@link #model}): the body walks through what it walks
+     * through (grass, a torch), and goes round what it does not (a table). Inside the selection the
+     * job digs both anyway.
      */
-    private List<TunnelStep> tunnelPlan(BlockPos aim, java.util.function.Predicate<BlockPos> arrived, BlockPos keep) {
-        BlockPos target = aim;
-        Vec3 me = movement.position();
+    private Ways.Grid grid(Set<BlockPos> keep, Rules rules, Set<BlockPos> refused) {
         Player player = world.player().orElse(null);
-        if (me == null || player == null || !movement.onGround()) {
-            return null;
-        }
-        int[] c = Walker.cellOf(me);
-        BlockPos start = new BlockPos(c[0], c[1], c[2]);
-        java.util.PriorityQueue<TunnelNode> open = new java.util.PriorityQueue<>(
-                (a, b) -> Double.compare(a.f(), b.f()));
-        Map<BlockPos, Double> best = new HashMap<>();
+        BlockBox within = rules.access().within();
         Map<BlockPos, Boolean> clear = new HashMap<>();
-        open.add(new TunnelNode(start, 0, tunnelGuess(start, target), 0, null, List.of()));
-        best.put(start, 0.0);
-        int[][] dirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-        int seen = 0;
-        while (!open.isEmpty() && seen++ < TUNNEL_NODES) {
-            TunnelNode n = open.poll();
-            if (n.g() > best.getOrDefault(n.at(), Double.MAX_VALUE)) {
-                continue;
+        return new Ways.Grid() {
+            @Override
+            public boolean known(BlockPos p) {
+                return world.known(p.x(), p.y(), p.z());
             }
-            BlockPos a = n.at();
-            if (arrived.test(a)) {
-                List<TunnelStep> out = new ArrayList<>();
-                for (TunnelNode k = n; k.parent() != null; k = k.parent()) {
-                    out.add(0, new TunnelStep(k.at(), k.breaks()));
+
+            @Override
+            public boolean air(BlockPos p) {
+                // Nothing to break to be in the cell: air - or, outside the selection, a thing that is
+                // no block and that the body goes through as it stands.
+                return world.blockAt(p.x(), p.y(), p.z()).isAir()
+                        || (!(within != null && within.contains(p)) && model(p) && !movement.cell(p).solid());
+            }
+
+            @Override
+            public boolean passable(BlockPos p) {
+                if (player == null || refused.contains(p)) {
+                    return false;
                 }
-                return out;
+                return clear.computeIfAbsent(p, k -> {
+                    boolean inside = within != null && within.contains(k);
+                    if (!inside && model(k)) {
+                        // No block, and not the way's to break: gone through where the body goes
+                        // through it, gone round where it does not.
+                        Movement.Cell m = movement.cell(k);
+                        return !keep.contains(k) && !m.solid() && m.fluid() == null && !m.hurts();
+                    }
+                    if (!Boolean.TRUE.equals(tunnelCell(k, keep, player))) {
+                        return false;
+                    }
+                    if (world.blockAt(k.x(), k.y(), k.z()).isAir()) {
+                        return true;
+                    }
+                    if (precious(k) || precious(new BlockPos(k.x(), k.y() + 1, k.z()))) {
+                        return false;
+                    }
+                    return inside || !carries(k);
+                });
             }
-            if (n.depth() >= TUNNEL_MOST) {
-                continue;
+
+            @Override
+            public boolean floor(BlockPos p) {
+                return movement.cell(p).solid() && !precious(p);
             }
-            for (int[] d : dirs) {
-                for (int dy = -1; dy <= 1; dy++) {
-                    int x = a.x() + d[0];
-                    int z = a.z() + d[1];
-                    int y = a.y() + dy;
-                    List<BlockPos> cells = new ArrayList<>();
-                    if (dy > 0) {
-                        cells.add(new BlockPos(a.x(), a.y() + 2, a.z()));     // room to jump
-                    } else if (dy < 0) {
-                        cells.add(new BlockPos(x, a.y() + 1, z));              // the head, stepping down
-                    }
-                    cells.add(new BlockPos(x, y + 1, z));
-                    cells.add(new BlockPos(x, y, z));
-                    BlockPos floor = new BlockPos(x, y - 1, z);
-                    if (!world.known(floor.x(), floor.y(), floor.z()) || !movement.cell(floor).solid()
-                            || floor.equals(keep)) {
-                        continue;
-                    }
-                    List<BlockPos> breaks = new ArrayList<>();
-                    double extra = 0;
-                    boolean ok = true;
-                    for (BlockPos cell : cells) {
-                        Boolean pass = clear.computeIfAbsent(cell, k -> tunnelCell(k, keep, player));
-                        if (pass == null || !pass) {
-                            ok = false;
-                            break;
-                        }
-                        if (!world.blockAt(cell.x(), cell.y(), cell.z()).isAir()) {
-                            breaks.add(cell);
-                        }
-                    }
-                    if (!ok) {
-                        continue;
-                    }
-                    if (!breaks.isEmpty()) {
-                        BlockPos top = cells.get(0).y() >= cells.get(1).y() ? cells.get(0) : cells.get(1);
-                        Block over = world.blockAt(top.x(), top.y() + 1, top.z());
-                        String name = over.isAir() || over.type() == null ? null : over.type().name();
-                        if (name != null && (name.contains("Sand") || name.contains("Gravel"))) {
-                            extra += TUNNEL_FALLING;
-                        }
-                    }
-                    BlockPos to = new BlockPos(x, y, z);
-                    double g = n.g() + 1 + TUNNEL_PER_BLOCK * breaks.size() + extra;
-                    if (g < best.getOrDefault(to, Double.MAX_VALUE)) {
-                        best.put(to, g);
-                        open.add(new TunnelNode(to, g, g + tunnelGuess(to, target), n.depth() + 1, n, breaks));
-                    }
+
+            @Override
+            public boolean buildable(BlockPos p) {
+                if (refused.contains(p) || !world.known(p.x(), p.y(), p.z())
+                        || !world.blockAt(p.x(), p.y(), p.z()).isAir()) {
+                    return false;       // into air only: nothing is built into a plant, or over one
                 }
+                Movement.Cell m = movement.cell(p);
+                return m.fluid() == null && !m.hurts();
             }
-        }
-        return null;
+
+            @Override
+            public double toll(BlockPos p) {
+                return within != null && !within.contains(p) ? OUTSIDE : 0;
+            }
+
+            @Override
+            public boolean falls(BlockPos p) {
+                Block b = world.blockAt(p.x(), p.y(), p.z());
+                String name = b.isAir() || b.type() == null ? null : b.type().name();
+                return name != null && (name.contains("Sand") || name.contains("Gravel"));
+            }
+        };
     }
 
     /**
-     * Whether a tunnel may go through the cell: air with no fluid, or a block the hotbar breaks that is
-     * not the target, with no fluid and no lava beside it.
+     * Whether something that is no block stands on the block: the cell over it holds what is drawn as
+     * a model, not as a cube - furniture, a plant, a torch, a ladder's foot. Broken from under it, it
+     * drops.
      */
-    private Boolean tunnelCell(BlockPos cell, BlockPos keep, Player player) {
-        if (cell.equals(keep) || !world.known(cell.x(), cell.y(), cell.z())) {
+    private boolean carries(BlockPos p) {
+        return model(new BlockPos(p.x(), p.y() + 1, p.z()));
+    }
+
+    /** Whether the cell holds something that is no block: drawn as a model, not as a cube. */
+    private boolean model(BlockPos p) {
+        java.util.function.IntFunction<meridian.protocol.BlockType> types = blockTypes;
+        Block b = world.blockAt(p.x(), p.y(), p.z());
+        if (types == null || b.isAir() || b.type() == null) {
+            return false;
+        }
+        meridian.protocol.BlockType t = types.apply(b.type().id());
+        return t != null && t.drawType == meridian.protocol.DrawType.Model;
+    }
+
+    /**
+     * A block a way never breaks, and never the block under it either: one that is used - it has an
+     * interaction of its own (a chest opens, a bench is worked at, a door swings). Its things would
+     * spill, or the owner's work be undone.
+     */
+    private boolean precious(BlockPos p) {
+        java.util.function.IntFunction<meridian.protocol.BlockType> types = blockTypes;
+        Block b = world.blockAt(p.x(), p.y(), p.z());
+        if (types == null || b.isAir() || b.type() == null) {
+            return false;
+        }
+        meridian.protocol.BlockType t = types.apply(b.type().id());
+        return t != null && t.interactions != null && !t.interactions.isEmpty();
+    }
+
+    /**
+     * Whether a way may go through the cell: air with no fluid, or a block the hotbar breaks that is
+     * not one kept, with no fluid and no lava beside it.
+     */
+    private Boolean tunnelCell(BlockPos cell, Set<BlockPos> keep, Player player) {
+        if (keep.contains(cell) || !world.known(cell.x(), cell.y(), cell.z())) {
             return false;
         }
         Movement.Cell m = movement.cell(cell);
@@ -683,9 +869,51 @@ public final class WorkerImpl implements Worker {
         return player.bestToolSlot(b.type()) >= 0 && !nearLava(cell);
     }
 
-    private static double tunnelGuess(BlockPos at, BlockPos target) {
-        return Math.max(0, Math.abs(at.x() - target.x()) + Math.abs(at.z() - target.z()) - 1)
-                + Math.max(0, Math.abs(at.y() - target.y()) - 1);
+    /** The server's block types by id, for which carried blocks a way may be built of ({@link #filler}). */
+    private volatile java.util.function.IntFunction<meridian.protocol.BlockType> blockTypes;
+
+    public void blockTypes(java.util.function.IntFunction<meridian.protocol.BlockType> types) {
+        this.blockTypes = types;
+    }
+
+    /**
+     * The block a way is built of - a pillar's, a bridge's: of those carried, a plain cube of rock or
+     * soil that stays where it is put (stone, cobble, dirt; not sand or gravel, not an ore, nothing
+     * that is used), the one carried most of. {@code null} for none.
+     */
+    private String filler(Rules rules) {
+        java.util.function.Function<String, java.util.Optional<meridian.protocol.ItemBase>> it = items;
+        java.util.function.IntFunction<meridian.protocol.BlockType> types = blockTypes;
+        if (it == null || types == null) {
+            return null;
+        }
+        String best = null;
+        int most = 0;
+        for (Map.Entry<String, Integer> e : held().entrySet()) {
+            String id = e.getKey();
+            if (!(id.startsWith("Rock_") || id.startsWith("Soil_")) || id.contains("Sand") || id.contains("Gravel")) {
+                continue;       // what a digger has by the hundred and nobody misses
+            }
+            meridian.protocol.ItemBase item = it.apply(id).orElse(null);
+            if (item == null || item.blockId <= 0) {
+                continue;
+            }
+            meridian.protocol.BlockType t = types.apply(item.blockId);
+            if (t == null || t.material != meridian.protocol.BlockMaterial.Solid
+                    || t.drawType != meridian.protocol.DrawType.Cube
+                    || (t.interactions != null && !t.interactions.isEmpty())) {
+                continue;
+            }
+            if (e.getValue() > most) {
+                best = id;
+                most = e.getValue();
+            }
+        }
+        return best;
+    }
+
+    private int fillers(String filler) {
+        return filler == null ? 0 : held().getOrDefault(filler, 0);
     }
 
     /**
@@ -912,7 +1140,7 @@ public final class WorkerImpl implements Worker {
         CompletableFuture<Boolean> run = interactions.breakBlock(pos, MAX_SWINGS);
         breaking = run;
         try {
-            return Boolean.TRUE.equals(run.get(2, TimeUnit.MINUTES));
+            return Boolean.TRUE.equals(run.get());
         } catch (java.util.concurrent.CancellationException cancelled) {
             return false;
         } finally {
@@ -1244,7 +1472,7 @@ public final class WorkerImpl implements Worker {
         int[] from = Walker.cellOf(at), to = Walker.cellOf(end);
         if (from[0] != to[0] || from[2] != to[2]) return;
         // The real physics keeps the body out of the wall, as in the prediction; no block is broken.
-        movement.move(step).get(3, TimeUnit.MINUTES);
+        movement.move(step).get();
     }
 
     /** A nearby standing cell can be on the other side of the wall containing the drop. */
@@ -1331,15 +1559,17 @@ public final class WorkerImpl implements Worker {
             BlockPos cell = new BlockPos(c[0], c[1], c[2]);
             Goal goal = movement.standAt(cell).isPresent() ? Goal.at(cell) : pickupFrom(bestAt, me);
             if (goal == null) {
+                log.info("meridian-core: the drop at {} is left - no place to pick it up from (under water, in a wall)",
+                        text(cell));
                 passed.add(best);
                 continue;
             }
-            NavResult r = go(goal).get(3, TimeUnit.MINUTES);
+            NavResult r = go(goal).get();
             if (live(id) && r.status() != NavResult.Status.ARRIVED) {
                 Vec3 now = movement.position();
                 Goal alternative = now == null ? null : pickupFrom(bestAt, now);
                 if (alternative != null && !alternative.equals(goal)) {
-                    r = go(alternative).get(3, TimeUnit.MINUTES);
+                    r = go(alternative).get();
                 }
             }
             if (!live(id)) {
@@ -1360,6 +1590,8 @@ public final class WorkerImpl implements Worker {
                 Vec3 now = entities.positionOf(best).orElse(null);
                 boolean moved = now != null && distSq(now, bestAt) > 0.25;
                 if (!moved || r.status() != NavResult.Status.ARRIVED || !retried.add(best)) {
+                    log.info("meridian-core: the drop at {} is left - {}", text(cell),
+                            r.status() == NavResult.Status.ARRIVED ? "not taken from where it lies" : "not got to (" + r.status() + ")");
                     passed.add(best);
                 }
             }
@@ -1483,7 +1715,7 @@ public final class WorkerImpl implements Worker {
             }
             tried.add(st.cell());
             if (!st.here()) {
-                NavResult r = go(Goal.at(st.cell())).get(3, TimeUnit.MINUTES);
+                NavResult r = go(Goal.at(st.cell())).get();
                 if (!live(id)) {
                     return Outcome.INTERRUPTED;
                 }
@@ -1658,7 +1890,7 @@ public final class WorkerImpl implements Worker {
             return Outcome.NO_PLACE;
         }
         if (!bestHere) {
-            NavResult nav = go(Goal.at(best)).get(3, TimeUnit.MINUTES);
+            NavResult nav = go(Goal.at(best)).get();
             if (!live(id)) {
                 return Outcome.INTERRUPTED;
             }
@@ -1923,7 +2155,9 @@ public final class WorkerImpl implements Worker {
         double reach = Math.max(1.0, interactions.useReach(player == null ? null : player.heldItem())
                 .orElse(DEFAULT_REACH) - REACH_MARGIN);
         if (distSq(eye, centre(chest)) > reach * reach) {
-            travel(id, Goal.near(chest, 2), beside(chest), chest, new Rules(Access.ANY, Tools.BEST), new ArrayList<>());
+            // The chest kept, and the block it stands on: a chest with nothing under it comes off.
+            travel(id, Goal.near(chest, 2), beside(chest), Set.of(chest), new Rules(Access.ANY, Tools.BEST),
+                    new ArrayList<>());
             // Within reach is what counts - a way dug up to it may end short of the goal's ground.
             Vec3 now = eye();
             if (!live(id) || now == null || distSq(now, centre(chest)) > (reach + REACH_SLACK) * (reach + REACH_SLACK)) {

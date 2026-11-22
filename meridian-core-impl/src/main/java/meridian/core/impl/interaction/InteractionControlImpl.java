@@ -364,8 +364,8 @@ public final class InteractionControlImpl implements InteractionControl {
                 chain.activeToolsSlot);
         chaining.noteSent(chain, this::compileRoot); // the player's own swings move the combo too
 
-        // Diagnostic: log every chain's walk, including initial=false continuations.
-        if (chain.interactionData != null) {
+        // Diagnostic, at debug: every chain's walk, including initial=false continuations.
+        if (chain.interactionData != null && log.isDebugEnabled()) {
             StringBuilder ops = new StringBuilder();
             for (InteractionSyncData d : chain.interactionData) {
                 if (d != null) {
@@ -373,7 +373,7 @@ public final class InteractionControlImpl implements InteractionControl {
                             .append('=').append(d.state).append(' ');
                 }
             }
-            log.info("meridian-core: observed {} chain {} initial={} desync={} state={} ops=[{}]",
+            log.debug("meridian-core: observed {} chain {} initial={} desync={} state={} ops=[{}]",
                     chain.interactionType, chain.chainId, chain.initial, chain.desync,
                     chain.state, ops.toString().trim());
         }
@@ -717,7 +717,8 @@ public final class InteractionControlImpl implements InteractionControl {
                 : InteractionContext.ofBlock(type, target, blockType, blockId, face,
                         movement, mode, vars);
         // The player's own effects as last seen - what effect conditions on the user test.
-        return ctx.withEffects(new WalkEffects(entities.selfEffects(), null, entities.selfStats()));
+        return ctx.withEffects(new WalkEffects(entities.selfEffects(), null, entities.selfStats())
+                .withCooldowns(cooldowns));
     }
 
     /** Flattens a registry root into its operation list, or {@code null} if absent. */
@@ -1208,6 +1209,51 @@ public final class InteractionControlImpl implements InteractionControl {
             }
         }
         return now + slow > 0 ? Optional.of(new Heal(now, slow, seconds)) : Optional.empty();
+    }
+
+    @Override
+    public Heal healing() {
+        int health = statIndex.applyAsInt("Health");
+        if (health < 0) {
+            return Heal.NONE;
+        }
+        return Healing.underWay(entities.selfEffectsLeft(), effectAt, health, maxHealth(health));
+    }
+
+    /** The player's cooldowns, as the chains core walks for it start them (a potion's, 15 s). */
+    private final Cooldowns cooldowns = new Cooldowns(System::nanoTime);
+
+    /** The longest a use's chain is played out for {@link #healGain}: a bite, a drink, at 60 a second. */
+    private static final int MOST_USE_TICKS = 60 * 30;
+
+    @Override
+    public Optional<Heal> healGain(String itemId) {
+        if (heal(itemId).isEmpty()) {
+            return Optional.empty();
+        }
+        int health = statIndex.applyAsInt("Health");
+        OptionalInt root = resolveRoot(InteractionType.Secondary, itemId);
+        CompiledInteraction compiled = root.isEmpty() ? null : compileRoot(root.getAsInt());
+        if (health < 0 || compiled == null) {
+            return heal(itemId);
+        }
+        // The use played out as a prediction on the player's effects and stats as they are now:
+        // its effect conditions see what is on, its own clears and applies are kept in order.
+        InteractionContext ctx = contextFor(InteractionType.Secondary, null, DataKind.NONE, itemId, BlockFace.None);
+        WalkEffects after = Healing.play(compiled, ctx, resolver, MOST_USE_TICKS);
+        float[] was = ctx.effects().stats().read(health);
+        float[] is = after.stats().read(health);
+        double changed = was == null || is == null ? 0 : Math.max(0, is[0] - was[0]);   // ChangeStat on the way
+        double missing = was == null ? maxHealth(health) : Math.max(0, was[2] - was[0]);
+        return Optional.of(Healing.gain(after.changes(), entities.selfEffectsLeft(), effectAt, health,
+                maxHealth(health), changed, missing));
+    }
+
+    /** The player's max health in points, counted as the stat's span; 100 before the server has said. */
+    private double maxHealth(int health) {
+        StatSheet own = entities.selfStats();
+        float[] mine = own == null ? null : own.read(health);
+        return mine == null ? 100 : Math.max(1, mine[2] - mine[1]);
     }
 
     /**
@@ -2084,8 +2130,15 @@ public final class InteractionControlImpl implements InteractionControl {
         return c;
     }
 
-    /** Dumps every decision-relevant field of a chain — for VM/replay diffing. */
+    /**
+     * Dumps every decision-relevant field of a chain — for VM/replay diffing. At debug only: every
+     * chain core sends goes through here, a few a second in a dig or a fight (a night of them was
+     * nine tenths of a 280 MB log).
+     */
     private static void dumpChain(String label, SyncInteractionChain c) {
+        if (!log.isDebugEnabled()) {
+            return;
+        }
         StringBuilder sb = new StringBuilder();
         sb.append("meridian-core: ").append(label)
                 .append(" chainId=").append(c.chainId)
@@ -2133,7 +2186,7 @@ public final class InteractionControlImpl implements InteractionControl {
                         .append(" totalForks=").append(o.totalForks);
             }
         }
-        log.info(sb.toString());
+        log.debug(sb.toString());
     }
 
     private static String fmt(BlockPosition b) {

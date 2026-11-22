@@ -33,6 +33,9 @@ final class PlayerStateImpl implements PlayerState {
     private final meridian.core.impl.interaction.StatSheet sheet =
             new meridian.core.impl.interaction.StatSheet(statTypes);
     private final Map<String, Section> inventories = new ConcurrentHashMap<>();
+    /** Every item the player came to carry more of, summed: the gains only, whatever went meanwhile. */
+    private final java.util.concurrent.atomic.AtomicLong gained = new java.util.concurrent.atomic.AtomicLong();
+    private volatile int carriedLast = -1;
     /** Stat id → name, from the server's catalog; a stat's number means nothing without it. */
     private final Map<Integer, String> statNames = new ConcurrentHashMap<>();
 
@@ -191,6 +194,30 @@ final class PlayerStateImpl implements PlayerState {
         }
         if (facing != null) {
             rotation = facing;
+        }
+    }
+
+    /**
+     * How many items the player has gained in all: each time the server tells the inventory, what it
+     * holds more of than the time before. What went - eaten, dropped at a death - takes nothing off.
+     * Two readings of it say what was picked up between them, whenever the losses were told.
+     */
+    long gained() {
+        return gained.get();
+    }
+
+    /** The server has told the inventory - its panels are in ({@link #onSection}). */
+    void onInventoryTold() {
+        int now = 0;
+        for (Section section : inventories.values()) {
+            for (meridian.core.api.Containers.Item item : section.items().values()) {
+                now += item == null ? 0 : item.quantity();
+            }
+        }
+        int before = carriedLast;
+        carriedLast = now;
+        if (before >= 0 && now > before) {
+            gained.addAndGet(now - before);
         }
     }
 

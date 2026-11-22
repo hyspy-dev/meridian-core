@@ -28,7 +28,7 @@ public final class NavigationPanel {
     private static final String USAGE = "goto <x y z> [radius] | plan <x y z> [radius] | trace <x y z> [radius] | cancel"
             + " | chase <entity> [within]"
             + " | place <x y z> <item> [rotation] | take <x y z> <item> <count> | deposit <x y z> <item> <count>"
-            + " | pillar <item> <blocks> | down <blocks> | pour|scoop <x y z> <item>";
+            + " | travel <x y z> | pillar <item> <blocks> | down <blocks> | pour|scoop <x y z> <item>";
 
     private final Navigator navigator;
     private final Worker worker;
@@ -162,6 +162,12 @@ public final class NavigationPanel {
             int entity = Integer.parseInt(args.get(1));
             double within = args.size() > 2 ? Double.parseDouble(args.get(2)) : 2;
             return navigator.chase(() -> entityAt.apply(entity), within).thenApply(NavigationPanel::result);
+        }
+        if (what.equals("travel") && args.size() >= 4) {
+            // Anywhere: walked, dug, built - the worker's way.
+            Goal goal = Goal.at(new BlockPos(Integer.parseInt(args.get(1)), Integer.parseInt(args.get(2)),
+                    Integer.parseInt(args.get(3))));
+            return worker.travel(goal).thenApply(NavigationPanel::result);
         }
         if (what.equals("down") && args.size() >= 2) {
             return worker.pillarDown(Integer.parseInt(args.get(1))).thenApply(o -> Map.of("outcome", o.name()));
