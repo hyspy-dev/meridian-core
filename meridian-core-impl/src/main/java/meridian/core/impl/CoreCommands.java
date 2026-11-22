@@ -30,7 +30,7 @@ final class CoreCommands {
 
     static final String USAGE = "pos | block <x y z> | reach [item] | besttool <x y z> | placeat <x y z> [face] | chest <x y z> | known <x y z> | find <name-contains> [radius] [limit] | look | inv | stats | chain <rootId> | slot <n> | tp <x y z> | face <x y z>|<entity> | "
             + "use|plant|water <x y z> | hit|dig <x y z> [times] | break <x y z> [maxSwings] | place <x y z> [face] [orient] | "
-            + "hits [seconds] | swings [seconds] | fightitem [item] | repair <item> | urgent <seconds> | wheel <seconds> | "
+            + "hits [seconds] | swings [seconds] | fightitem [item] | life [respawn | recover | goback on|off | logout on|off] | repair <item> | urgent <seconds> | wheel <seconds> | "
             + "swingguard <entity> [after <ms>] [hold <s>] [overpower] | "
             + "bow <entity>|<x y z>|status | entities [range] [players] | attack <entity> [times] | useentity <entity> | useitem [times] [hold <s>] | swing [hold <s>] | dodge | assets | asset <path> | "
             + "movement | body | stand <x y z> | surface <x z> [wait <s>] | safe <x y z> [radius] | hurts <x y z> | move <walk|jump|mantle|drop|leap|swim|climb|fly> <x y z> [walk|run|sprint] | "
@@ -90,6 +90,7 @@ final class CoreCommands {
             case "hits" -> CompletableFuture.completedFuture(hits(args));
             case "swings" -> CompletableFuture.completedFuture(swings(args));
             case "fightitem" -> CompletableFuture.completedFuture(fightItem(args));
+            case "life" -> life(args);
             case "repair" -> {
                 if (args.size() < 2) {
                     throw new IllegalArgumentException("repair <item>");
@@ -668,6 +669,9 @@ final class CoreCommands {
         e.put("label", tracker.labelOf(id));
         e.put("distance", Math.round(distance * 100) / 100.0);
         tracker.entityModelAssetId(id).ifPresent(m -> e.put("model", m));
+        ctx.services().get(meridian.core.api.Combat.class).flatMap(c -> c.sensesOf(id)).ifPresent(s -> e.put("senses",
+                Map.of("view", s.viewRange(), "sector", s.viewSector(), "hearing", s.hearingRange(),
+                        "alerted", s.alertedRange(), "speed", s.maxSpeed(), "attack", s.attackDistance())));
         tracker.nameplateOf(id).ifPresent(n -> e.put("name", n));
         tracker.itemOf(id).ifPresent(i -> e.put("item", i));
         if (tracker.isPlayer(id)) {
@@ -764,6 +768,54 @@ final class CoreCommands {
     }
 
     /** {@code fightitem [item]}: what an item (the held one) does in a fight. */
+    /** {@code life}: dead or alive, the last death; {@code life respawn | recover | goback on|off}. */
+    private CompletableFuture<?> life(List<String> args) {
+        meridian.core.api.Life life = ctx.services().get(meridian.core.api.Life.class).orElse(null);
+        if (life == null) {
+            throw new IllegalStateException("no Life service");
+        }
+        String what = args.size() > 1 ? args.get(1).toLowerCase(java.util.Locale.ROOT) : "";
+        switch (what) {
+            case "respawn" -> {
+                return life.respawn().thenApply(ok -> Map.of("respawned", ok));
+            }
+            case "recover" -> {
+                return life.recover().thenApply(r -> Map.of("arrived", r.arrived(), "picked", r.picked(), "why", r.why()));
+            }
+            case "goback" -> {
+                if (life instanceof LifeImpl impl && args.size() > 2) {
+                    impl.goBack(args.get(2).equalsIgnoreCase("on"));
+                }
+            }
+            case "logout" -> {
+                if (life instanceof LifeImpl impl && args.size() > 2) {
+                    impl.logOut(args.get(2).equalsIgnoreCase("on"));
+                }
+            }
+            default -> { }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("dead", life.dead());
+        out.put("recovering", life.recovering());
+        if (life instanceof LifeImpl impl) {
+            out.put("logsOut", impl.logsOut());
+        }
+        if (life instanceof LifeImpl impl) {
+            out.put("goesBack", impl.goesBack());
+            meridian.core.api.Life.Recovered r = impl.lastRecovered();
+            if (r != null) {
+                out.put("recovered", Map.of("arrived", r.arrived(), "picked", r.picked(), "why", r.why()));
+            }
+        }
+        life.lastDeath().ifPresent(d -> {
+            if (d.at() != null) {
+                out.put("diedAt", Map.of("x", d.at().x(), "y", d.at().y(), "z", d.at().z()));
+            }
+            out.put("secondsAgo", (System.currentTimeMillis() - d.atMillis()) / 1000.0);
+        });
+        return CompletableFuture.completedFuture(out);
+    }
+
     private Object fightItem(List<String> args) {
         String item = args.size() > 1 ? args.get(1) : world().player().map(Player::heldItem).orElse(null);
         InteractionControl hands = interactions();
@@ -776,6 +828,22 @@ final class CoreCommands {
         out.put("guards", hands.guards(item));
         hands.heal(item).ifPresent(h -> out.put("heal", Map.of("now", h.now(), "overTime", h.overTime(),
                 "seconds", h.seconds())));
+        // What a use would add now, over the healing the effects on the player already give.
+        hands.healGain(item).ifPresent(h -> out.put("gain", Map.of("now", h.now(), "overTime", h.overTime(),
+                "seconds", h.seconds())));
+        InteractionControl.Heal under = hands.healing();
+        out.put("healing", Map.of("overTime", under.overTime(), "seconds", under.seconds()));
+        meridian.core.api.EntityTracker tracker = ctx.services().get(meridian.core.api.EntityTracker.class).orElse(null);
+        if (tracker != null) {
+            java.util.OptionalInt me = tracker.localEntityId();
+            List<Map<String, Object>> effects = new java.util.ArrayList<>();
+            if (me.isPresent()) {
+                for (meridian.core.api.EntityTracker.Effect e : tracker.effectsOf(me.getAsInt())) {
+                    effects.add(Map.of("id", e.id(), "left", e.infinite() ? -1 : Math.round(e.secondsLeft() * 10) / 10.0));
+                }
+            }
+            out.put("effects", effects);
+        }
         world().player().ifPresent(p -> out.put("bestWeaponSlot", p.bestWeaponSlot()));
         return out;
     }

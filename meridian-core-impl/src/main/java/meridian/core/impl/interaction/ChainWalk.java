@@ -98,6 +98,14 @@ final class ChainWalk {
     /** A live charge reports elapsed stopwatch time, including a delayed scheduler tick. */
     ChainWalk realtime() { realtime = true; return this; }
 
+    /**
+     * What the server alone decides ({@code WaitForDataFrom.Server}: a bite taken from the stack) is
+     * taken as done, not waited for: a walk that only foretells what a use would do, with no server.
+     */
+    private boolean presumeServer;
+
+    ChainWalk presumeServer() { presumeServer = true; return this; }
+
     private java.util.function.Consumer<java.util.UUID> launched = id -> { };
     // Kept across a replay: an operation never creates a second prediction.
     private final Map<Integer, InteractionSyncData> projectiles = new HashMap<>();
@@ -225,6 +233,11 @@ final class ChainWalk {
     /** Whether the button is still down at {@code now}, seconds into the chain. */
     private boolean held(float now) {
         return Float.isNaN(hold) || now + InteractionSimulator.TICK_SECONDS / 2 < hold;
+    }
+
+    /** The effects and stats as the walk has changed them so far. */
+    WalkEffects effects() {
+        return ctx.effects();
     }
 
     /** {@code true} once the walk has run off the end of its root. */
@@ -398,7 +411,7 @@ final class ChainWalk {
                 if (state == InteractionState.Finished) {
                     InteractionSimulator.changeEffects(node.interaction(), ctx);
                 }
-            } else if (node.interaction().waitForDataFrom == WaitForDataFrom.Server) {
+            } else if (node.interaction().waitForDataFrom == WaitForDataFrom.Server && !presumeServer) {
                 // Decided by the server alone: the client stands on it until the server says how it went.
                 state = InteractionState.NotFinished;
                 awaiting = true;

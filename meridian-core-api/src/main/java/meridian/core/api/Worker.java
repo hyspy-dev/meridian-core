@@ -20,8 +20,11 @@ public interface Worker {
     /**
      * What may be broken to get at a block.
      *
-     * @param within  only blocks inside this box may be broken on the way - a selection dug from
-     *                inside itself; {@code null} for any
+     * @param within  only blocks inside this box may be broken to get at the block from where the
+     *                body stands - a selection dug from inside itself; {@code null} for any. The way
+     *                to that place is not bound by it: where no walk goes there, one is made
+     *                ({@link #travel}), through the selection or built where that is near as short,
+     *                else through what lies outside it (never through what is used - a chest, a bench)
      * @param wayIn   for a block in the rock, a way in the body's height from where it is broken
      *                from, so the body can walk in after its drop; else only what is on the line
      *                from the eyes
@@ -31,7 +34,7 @@ public interface Worker {
         /** Anything in the way, and a way in for a block in the rock. */
         public static final Access ANY = new Access(null, true);
 
-        /** Only blocks inside {@code box} may be broken on the way. */
+        /** Only blocks inside {@code box} may be broken to get at the block. */
         public static Access inside(BlockBox box) {
             return new Access(box, false);
         }
@@ -202,6 +205,21 @@ public interface Worker {
      */
     default CompletableFuture<Outcome> scoop(BlockPos cell, String itemId) {
         return CompletableFuture.completedFuture(Outcome.NOT_AVAILABLE);
+    }
+
+    /**
+     * Goes to {@code goal} - anywhere in the world - as a player gets there: walks where there is a
+     * way; digs one where rock is in the way - a tunnel, a staircase up out of a pit or down into the
+     * ground; builds one where there is nothing to stand on - a pillar up, a bridge across - of the
+     * plain blocks it carries (stone, soil, planks: cubes that stay put). A leg at a time, each one
+     * nearer; the world not shown yet is come near and waited for. Never through a fluid or by lava.
+     *
+     * @return {@link NavResult.Status#ARRIVED} there; {@link NavResult.Status#NO_PATH} when no leg gets
+     *         nearer (shut in by what nothing carried breaks, nothing to build with up in the air);
+     *         {@link NavResult.Status#BLOCKED} when the legs stop getting nearer
+     */
+    default CompletableFuture<NavResult> travel(Goal goal) {
+        return CompletableFuture.completedFuture(new NavResult(NavResult.Status.NOT_AVAILABLE, null, 0, 0));
     }
 
     /**

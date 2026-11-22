@@ -78,6 +78,36 @@ public interface Combat {
     }
 
     /** Whether {@code entityId} hit the player within {@code within} of now. */
+    /**
+     * What an NPC of a kind senses, as the installed game's own role files have it
+     * ({@code Server/NPC/Roles}: {@code ViewRange}, {@code ViewSector}, {@code HearingRange},
+     * {@code AlertedRange}, {@code MaxSpeed}, {@code AttackDistance}) - the keenest of the roles that
+     * wear the kind's model. A
+     * server running roles of its own does not send them: this is the game's word, not that server's.
+     *
+     * @param viewRange    how far it sees, in blocks
+     * @param viewSector   the angle it sees in, in degrees, about where it faces; {@code 0} when not said
+     * @param hearingRange how far it hears, whichever way it faces; {@code 0} when not said
+     * @param alertedRange how far it goes on minding what alerted it; {@code 0} when not said
+     * @param maxSpeed     its top speed, in blocks a second; {@code 0} when not said
+     * @param attackDistance how far off it attacks from - a blow's two or three blocks, a flame's six,
+     *                     an arrow's fifteen; {@code 0} when not said
+     */
+    record Senses(double viewRange, double viewSector, double hearingRange, double alertedRange, double maxSpeed,
+                  double attackDistance) {
+    }
+
+    /**
+     * What the entity's kind senses ({@link Senses}): whether the player standing where it is will
+     * be noticed is a matter of these, not of a radius somebody chose.
+     *
+     * @return empty for a kind the game's files do not have (a player, a server's own NPC), before the
+     *         files are read, when no game is installed, and for a core too old to tell
+     */
+    default Optional<Senses> sensesOf(int entityId) {
+        return Optional.empty();
+    }
+
     default boolean hitBy(int entityId, Duration within) {
         for (Hit h : hits(within)) {
             if (h.attacker() == entityId) {

@@ -5,6 +5,7 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -44,6 +45,21 @@ final class CombatImpl implements Combat {
 
     CombatImpl(EntityTrackerImpl entities) {
         this.entities = entities;
+    }
+
+    /** What a kind senses, by its model's name ({@code NpcRoles}); empty until told where from. */
+    private volatile java.util.function.Function<String, Optional<Senses>> senses = model -> Optional.empty();
+
+    void senses(java.util.function.Function<String, Optional<Senses>> byModel) {
+        this.senses = byModel;
+    }
+
+    @Override
+    public Optional<Senses> sensesOf(int entityId) {
+        if (entities.isPlayer(entityId)) {
+            return Optional.empty();
+        }
+        return entities.entityModelAssetId(entityId).flatMap(senses);
     }
 
     @Override

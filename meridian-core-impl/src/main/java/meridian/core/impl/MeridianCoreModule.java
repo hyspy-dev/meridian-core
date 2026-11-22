@@ -198,6 +198,7 @@ public class MeridianCoreModule implements ProxyModule {
         // Combat: the hits the player takes and the attacks others begin, as the server tells any
         // game - whom to fight is a module's call.
         CombatImpl combat = new CombatImpl(entityTracker);
+        combat.senses(meridian.core.impl.assets.NpcRoles.lookup(gameAssets, ctx.offloadExecutor()));
         ctx.services().provide(meridian.core.api.Combat.class, combat);
         ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR, (direction, session) -> new CombatHandler(combat));
 
@@ -244,7 +245,7 @@ public class MeridianCoreModule implements ProxyModule {
                 terrain, blockHitboxes, fluidCatalog, ctx.scheduler(),
                 () -> sessionHolder.get().map(HeadlessClientHandler::headlessOf).orElse(null),
                 () -> entityTracker.localPosition().orElse(null),
-                entityTracker::localEntityId, entityTracker::effectsOf, clientTeleports);
+                entityTracker::localEntityId, entityTracker::effectIdsOf, clientTeleports);
         ctx.services().provide(meridian.core.api.Movement.class, movement);
         // A trip flies only with flight switched on (client-control's Fly): in creative it walks.
         movement.flightOn(clientSpoof::flight);
@@ -261,18 +262,13 @@ public class MeridianCoreModule implements ProxyModule {
         ctx.registerHandler(Direction.C2S, HandlerPosition.EARLY, (direction, session) -> movement.gameGate());
         // Core's own teleport of a game's body core holds moves the body.
         movementControl.heldBody(movement::teleportHeld);
-        // A death gives a game's body core holds back to the game: the server opens its death window.
-        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY, (direction, session) -> new meridian.api.packet.PacketHandler() {
-            @Override
-            public Action handleS2C(io.netty.channel.ChannelHandlerContext c, meridian.api.packet.Packet packet,
-                                    meridian.api.session.ProxySession s) {
-                if (packet instanceof meridian.protocol.packets.interface_.CustomPage page
-                        && ClientSpoofImpl.RESPAWN_PAGE_KEY.equals(page.key)) {
-                    movement.died();
-                }
-                return Action.FORWARD;
-            }
-        });
+        // The player's life: a death ends every hold on the body (the server opens its death window),
+        // a headless session presses Respawn itself and goes back for what it dropped.
+        LifeImpl life = new LifeImpl(movement, sessionHolder, ctx.scheduler(),
+                () -> ctx.services().get(meridian.core.api.Worker.class).orElse(null),
+                playerState::gained);
+        ctx.services().provide(meridian.core.api.Life.class, life);
+        ctx.registerHandler(Direction.S2C, HandlerPosition.EARLY, (direction, session) -> life.handler());
 
         // ChunkView: what the client is allowed to forget. Sits at NORMAL because it drops, and
         // downstream of the feed above, which has already seen the unload.
@@ -350,6 +346,11 @@ public class MeridianCoreModule implements ProxyModule {
                     }
 
                     @Override
+                    public java.util.Map<Integer, Double> selfEffectsLeft() {
+                        return entityTracker.selfEffectsLeft();
+                    }
+
+                    @Override
                     public meridian.core.impl.interaction.StatSheet selfStats() {
                         return playerState.sheet();
                     }
@@ -363,6 +364,11 @@ public class MeridianCoreModule implements ProxyModule {
         // What an item does in a fight: the effects it applies (core's catalog of them, kept by
         // movement) and the stats they change, by name.
         interactionControl.fightLookups(movement::effect, name -> playerState.statIndex(name).orElse(-1));
+        // The effects' ids, for what the tracker tells of the effects on an entity.
+        entityTracker.effectNames(i -> {
+            meridian.protocol.EntityEffect e = movement.effect(i);
+            return e == null ? null : e.id;
+        });
         // A repair as a player makes it: a kit used, the server's list of worn items answered.
         Repairs repairs = new Repairs(sessionHolder, inventoryTracker, itemRegistry, playerState);
         repairs.hands(interactionControl);
@@ -477,6 +483,7 @@ public class MeridianCoreModule implements ProxyModule {
                 movement, world, interactionControl, entityTracker, walker, containers, playerState,
                 () -> sessionHolder.get().orElse(null), ctx.offloadExecutor(), ctx.getLogger());
         worker.items(itemRegistry::item);
+        worker.blockTypes(worldState::blockTypeById);
         ctx.services().provide(meridian.core.api.Worker.class, worker);
         meridian.core.impl.navigation.NavigationPanel navigation =
                 new meridian.core.impl.navigation.NavigationPanel(walker, worker, movement, interactionControl);

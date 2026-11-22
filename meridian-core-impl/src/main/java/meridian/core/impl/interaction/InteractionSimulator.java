@@ -122,7 +122,8 @@ final class InteractionSimulator {
     /** Simulates {@code root} under {@code ctx} into the executed operations. */
     static List<InteractionSyncData> simulate(CompiledInteraction root, InteractionContext ctx,
                                               RootResolver resolver) {
-        ctx = ctx.withEffects(ctx.effects().copy()); // this walk's own, to apply and clear on
+        // This walk's own effects to apply and clear on, and its own cooldowns: a prediction starts none.
+        ctx = ctx.withEffects(ctx.effects().copy().withCooldowns(ctx.effects().cooldowns().copy()));
         List<InteractionSyncData> executed = new ArrayList<>();
         CompiledInteraction compiled = root;
         Set<Integer> visitedRoots = new HashSet<>();
@@ -259,7 +260,8 @@ final class InteractionSimulator {
                                        RootResolver resolver,
                                        Map<Integer, Integer> selectHitBlock) {
         // The walk a tick at a time, played out with nothing from the server: a prediction.
-        ChainWalk walk = new ChainWalk(root, ctx, resolver, selectHitBlock);
+        ChainWalk walk = new ChainWalk(root, ctx.withEffects(ctx.effects().withCooldowns(ctx.effects().cooldowns().copy())),
+                resolver, selectHitBlock);
         List<Packet> packets = new ArrayList<>();
         for (Packet p = walk.tick(); p != null; p = walk.tick()) {
             packets.add(p);
@@ -293,6 +295,10 @@ final class InteractionSimulator {
         }
         if (node instanceof StatsConditionInteraction condition) {
             return ctx.effects().stats().canAfford(condition) ? timed : InteractionState.Failed;
+        }
+        if (node instanceof meridian.protocol.CooldownConditionInteraction cooldown) {
+            // CooldownConditionInteraction.firstRun: fails while the cooldown runs.
+            return ctx.effects().cooldowns().onCooldown(cooldown.cooldownId) ? InteractionState.Failed : timed;
         }
         if (timed == InteractionState.Finished) {
             changeEffects(node, ctx);
@@ -463,18 +469,23 @@ final class InteractionSimulator {
      */
     static void changeEffects(Interaction node, InteractionContext ctx) {
         if (node instanceof ApplyEffectInteraction apply) {
-            java.util.Set<Integer> on = ctx.effects().of(apply.entityTarget);
-            if (on != null) {
-                on.add(apply.effectId);
-            }
+            ctx.effects().apply(apply.entityTarget, apply.effectId);
         } else if (node instanceof ClearEntityEffectInteraction clear) {
-            java.util.Set<Integer> on = ctx.effects().of(clear.entityTarget);
-            if (on != null) {
-                on.remove(clear.effectId);
-            }
+            ctx.effects().clear(clear.entityTarget, clear.effectId);
+        } else if (node instanceof meridian.protocol.TriggerCooldownInteraction trigger) {
+            startCooldown(trigger.cooldown, ctx);
+        } else if (node instanceof meridian.protocol.ResetCooldownInteraction reset) {
+            startCooldown(reset.cooldown, ctx);
         } else if (node instanceof ChangeStatInteraction change) {
             // The server's ChangeStatInteraction spends and gives on the acting entity's own stats.
             ctx.effects().stats().change(change);
+        }
+    }
+
+    /** A trigger's (or reset's) cooldown started on the player ({@code TriggerCooldownInteraction.resetCooldown}). */
+    private static void startCooldown(meridian.protocol.InteractionCooldown cd, InteractionContext ctx) {
+        if (cd != null) {
+            ctx.effects().cooldowns().trigger(cd.cooldownId, cd.cooldown, cd.chargeTimes, cd.interruptRecharge);
         }
     }
 
@@ -526,6 +537,10 @@ final class InteractionSimulator {
         }
         if (node instanceof StatsConditionInteraction condition) {
             return ctx.effects().stats().canAfford(condition) ? InteractionState.Finished : InteractionState.Failed;
+        }
+        if (node instanceof meridian.protocol.CooldownConditionInteraction cooldown) {
+            return ctx.effects().cooldowns().onCooldown(cooldown.cooldownId)
+                    ? InteractionState.Failed : InteractionState.Finished;
         }
         changeEffects(node, ctx);
         if (node instanceof SimpleBlockInteraction && ctx.targetBlockType() == null) {
