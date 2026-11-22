@@ -536,6 +536,17 @@ public final class MovementImpl implements Movement {
     }
 
     @Override
+    public java.util.List<meridian.core.api.Box> solidBoxes(BlockPos cell) {
+        java.util.List<double[]> boxes = new java.util.ArrayList<>();
+        terrain.solids(cell.x(), cell.y(), cell.z(), boxes);
+        java.util.List<meridian.core.api.Box> out = new java.util.ArrayList<>(boxes.size());
+        for (double[] b : boxes) {
+            out.add(new meridian.core.api.Box(new Vec3(b[0], b[1], b[2]), new Vec3(b[3], b[4], b[5])));
+        }
+        return out;
+    }
+
+    @Override
     public Cell cell(BlockPos cell) {
         Terrain.Placed b = terrain.blockAt(cell.x(), cell.y(), cell.z());
         boolean solid = b != null && b.type().material == BlockMaterial.Solid;

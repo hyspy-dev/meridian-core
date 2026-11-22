@@ -108,6 +108,26 @@ public interface Combat {
         return Optional.empty();
     }
 
+    /**
+     * What goes off, and how far it reaches: a thrown bomb, as the game's own files have it.
+     *
+     * @param radius      how far from it whatever lives is hurt, in blocks
+     * @param damage      what it takes off those within it
+     * @param fuseSeconds how long after it was thrown it goes off by itself; {@code 0} for one that
+     *                    goes off only where it lands or hits
+     */
+    record Blast(double radius, double damage, double fuseSeconds) {
+    }
+
+    /**
+     * The blast of an entity that explodes - a goblin lobber's bomb in the air or on the ground: what
+     * the game's files say of the projectile wearing that model. Empty for what does not explode, where
+     * the files cannot be read, and on a core too old to tell.
+     */
+    default Optional<Blast> blastOf(int entityId) {
+        return Optional.empty();
+    }
+
     default boolean hitBy(int entityId, Duration within) {
         for (Hit h : hits(within)) {
             if (h.attacker() == entityId) {

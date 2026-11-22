@@ -87,6 +87,8 @@ public final class NpcRoles {
             }
         }
         Map<String, Combat.Senses> out = new HashMap<>();
+        Map<String, Double> ownReach = new HashMap<>();
+        Map<String, Double> leastReach = new HashMap<>();
         for (String name : roles.keySet()) {
             Map<String, JsonElement> p = parameters(roles, name, new HashSet<>(), 0);
             String model = text(p.get("Appearance"));
@@ -96,8 +98,21 @@ public final class NpcRoles {
             }
             Combat.Senses s = new Combat.Senses(view, number(p.get("ViewSector")), number(p.get("HearingRange")),
                     number(p.get("AlertedRange")), number(p.get("MaxSpeed")), number(p.get("AttackDistance")));
-            out.merge(model.toLowerCase(Locale.ROOT), s, NpcRoles::keenest);
+            String key = model.toLowerCase(Locale.ROOT);
+            out.merge(key, s, NpcRoles::keenest);
+            if (s.attackDistance() > 0) {
+                if (name.equals(key)) {
+                    ownReach.put(key, s.attackDistance());
+                }
+                leastReach.merge(key, s.attackDistance(), Math::min);
+            }
         }
+        // How far it attacks from is not "the most of them all", as what it senses is: a turret wears
+        // the scrapper's model and throws from twenty-five blocks - that made every scrapper, who
+        // hits from two and a half, "one that attacks from afar" (22.11). The role named as the model
+        // is the kind itself; with none of that name, the least any role wearing it says.
+        out.replaceAll((model, s) -> new Combat.Senses(s.viewRange(), s.viewSector(), s.hearingRange(), s.alertedRange(),
+                s.maxSpeed(), ownReach.getOrDefault(model, leastReach.getOrDefault(model, 0.0))));
         log.info("meridian-core: what {} kind(s) of NPC sense read from {} role file(s) in {} ms",
                 out.size(), roles.size(), (System.nanoTime() - t0) / 1_000_000);
         return out;

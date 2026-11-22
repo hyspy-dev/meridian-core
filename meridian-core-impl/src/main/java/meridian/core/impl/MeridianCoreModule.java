@@ -199,6 +199,7 @@ public class MeridianCoreModule implements ProxyModule {
         // game - whom to fight is a module's call.
         CombatImpl combat = new CombatImpl(entityTracker);
         combat.senses(meridian.core.impl.assets.NpcRoles.lookup(gameAssets, ctx.offloadExecutor()));
+        combat.blasts(meridian.core.impl.assets.Blasts.lookup(gameAssets, ctx.offloadExecutor()));
         ctx.services().provide(meridian.core.api.Combat.class, combat);
         ctx.registerHandler(Direction.S2C, HandlerPosition.MONITOR, (direction, session) -> new CombatHandler(combat));
 
