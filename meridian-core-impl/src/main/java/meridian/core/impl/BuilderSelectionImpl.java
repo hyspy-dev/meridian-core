@@ -550,7 +550,7 @@ final class BuilderSelectionImpl implements BuilderSelection {
         turn(axis, degrees);
         Clipboard now = shown;
         if (base != null && now != null) {
-            Clipboard turned = now.turned(axis.ordinal(), degrees / 90, this::facingTurns);
+            Clipboard turned = turnedAsTool(now, axis, degrees);
             shown = turned;
             sendClipboard(turned.blocks(), turned.fluids());
         }
@@ -561,11 +561,21 @@ final class BuilderSelectionImpl implements BuilderSelection {
     void flippedByTool(BuilderSelection.Axis axis) {
         Clipboard now = shown;
         if (base != null && now != null) {
-            Clipboard flipped = now.flipped(axis.ordinal(), this::flipOf);
+            Clipboard flipped = flippedAsTool(now, axis);
             shown = flipped;
             sendClipboard(flipped.blocks(), flipped.fluids());
         }
         firePaste(l -> l.flipped(axis));
+    }
+
+    @Override
+    public Clipboard turnedAsTool(Clipboard clipboard, BuilderSelection.Axis axis, int degrees) {
+        return clipboard.turned(axis.ordinal(), degrees / 90, this::facingTurns);
+    }
+
+    @Override
+    public Clipboard flippedAsTool(Clipboard clipboard, BuilderSelection.Axis axis) {
+        return clipboard.flipped(axis.ordinal(), this::flipOf);
     }
 
     /** The paste tool's reset: for a clipboard core keeps, the unturned one goes back. */
