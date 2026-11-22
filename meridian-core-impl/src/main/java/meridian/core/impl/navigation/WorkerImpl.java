@@ -267,6 +267,14 @@ public final class WorkerImpl implements Worker {
     }
 
     @Override
+    public CompletableFuture<Outcome> gather(BlockPos cell) {
+        if (cell == null) {
+            return CompletableFuture.completedFuture(Outcome.NOTHING);
+        }
+        return held(id -> gatherNow(id, cell), Outcome.NOT_AVAILABLE);
+    }
+
+    @Override
     public CompletableFuture<Outcome> pillarDown(int blocks) {
         if (blocks < 1) {
             return CompletableFuture.completedFuture(Outcome.NOTHING);
@@ -288,6 +296,15 @@ public final class WorkerImpl implements Worker {
             return CompletableFuture.completedFuture(Map.of());
         }
         return held(id -> takeNow(id, chest, items), Map.of());
+    }
+
+    @Override
+    public CompletableFuture<Map<String, Integer>> take(BlockPos chest, java.util.function.Predicate<String> which,
+                                                        int count) {
+        if (chest == null || which == null || count < 1) {
+            return CompletableFuture.completedFuture(Map.of());
+        }
+        return held(id -> takeNow(id, chest, Map.of(), which, count), Map.of());
     }
 
     @Override
@@ -1075,13 +1092,36 @@ public final class WorkerImpl implements Worker {
         Player player = world.player().orElse(null);
         if (player != null && !b.isAir()) {
             int slot = toolFor(player, pos, b.type(), rules);
-            if (slot >= 0 && slot != player.activeHotbarSlot()) {
-                interactions.switchHotbarSlot(slot).get(5, TimeUnit.SECONDS);
+            if (slot >= 0) {
+                intoHand(player, slot);
             }
         }
         String held = player == null ? null : player.heldItem();
         double reach = interactions.digReach(held).orElse(interactions.useReach(held).orElse(DEFAULT_REACH));
         return Math.max(1.0, reach - REACH_MARGIN);
+    }
+
+    /** A switch of the slot in hand the server did not make is asked for again this often. */
+    static final int SWITCH_TRIES = 3;
+
+    /**
+     * The hotbar slot taken into the hand. A switch the server did not make - it cancels one when the
+     * hand's item changed under it - is asked for again, from what the hand holds then.
+     *
+     * @return whether the slot is in the hand
+     */
+    private boolean intoHand(Player player, int slot) throws Exception {
+        for (int tries = 0; tries < SWITCH_TRIES && player.activeHotbarSlot() != slot; tries++) {
+            meridian.core.api.InteractionOutcome o = interactions.switchHotbarSlot(slot).get(5, TimeUnit.SECONDS);
+            if (o != null && o.status() == meridian.core.api.InteractionOutcome.Status.FINISHED) {
+                return true;
+            }
+            // Core's picture of the slot in hand goes back as the outcome is told: its listener, a moment.
+            for (int waited = 0; waited < 1000 && player.activeHotbarSlot() == slot; waited += 10) {
+                Thread.sleep(10);
+            }
+        }
+        return player.activeHotbarSlot() == slot;
     }
 
     /**
@@ -1430,7 +1470,7 @@ public final class WorkerImpl implements Worker {
             if (x == target.x() && y == target.y() && z == target.z()) {
                 return out;
             }
-            if (!inTheWay(x, y, z, target, out)) {
+            if (!inTheWay(x, y, z, target, out, eye, aim)) {
                 return null;
             }
             // Leaving this cell near an edge: the cell across the other face it nearly crosses is in
@@ -1439,13 +1479,13 @@ public final class WorkerImpl implements Worker {
             int step = tx <= ty && tx <= tz ? 0 : ty <= tz ? 1 : 2;
             if (t < 1) {
                 // A tie is the line through the very edge: the other cell is checked all the more.
-                if (step != 0 && tx - t < edge && !inTheWay(x + sx, y, z, target, out)) {
+                if (step != 0 && tx - t < edge && !inTheWay(x + sx, y, z, target, out, eye, aim)) {
                     return null;
                 }
-                if (step != 1 && ty - t < edge && !inTheWay(x, y + sy, z, target, out)) {
+                if (step != 1 && ty - t < edge && !inTheWay(x, y + sy, z, target, out, eye, aim)) {
                     return null;
                 }
-                if (step != 2 && tz - t < edge && !inTheWay(x, y, z + sz, target, out)) {
+                if (step != 2 && tz - t < edge && !inTheWay(x, y, z + sz, target, out, eye, aim)) {
                     return null;
                 }
             }
@@ -1537,18 +1577,76 @@ public final class WorkerImpl implements Worker {
     }
 
     /**
-     * Adds the block at the cell to {@code out} when it is one in the way (not air, not the target);
-     * {@code false} when core does not know the cell.
+     * Adds the block at the cell to {@code out} when it is one in the way of the line from {@code eye}
+     * to {@code aim} (not air, not the target, and the line meets it - {@link #meets}); {@code false}
+     * when core does not know the cell.
      */
-    private boolean inTheWay(int x, int y, int z, BlockPos target, List<BlockPos> out) {
+    private boolean inTheWay(int x, int y, int z, BlockPos target, List<BlockPos> out, Vec3 eye, Vec3 aim) {
         if (!world.known(x, y, z)) {
             return false;
         }
         Block b = world.blockAt(x, y, z);
         if (!b.isAir()) {
             BlockPos base = b.base();
-            if (!base.equals(target) && !out.contains(base)) {
+            if (!base.equals(target) && !out.contains(base) && meets(new BlockPos(x, y, z), eye, aim)) {
                 out.add(base);
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Whether the line of sight - {@link #SIGHT_EDGE} thick - meets the block in the cell. A block that
+     * stops the body is met where it is: a rubble a quarter of a block high on the floor is looked
+     * over, a slab past its top (22.11: the worker broke the rubble covering the floor beside the block
+     * it dug, "in the way" of a line that went a block over it). What does not stop the body - a
+     * plant, a torch - is what the look lands on wherever in its cell it goes; so is a block whose
+     * boxes core does not know.
+     */
+    private boolean meets(BlockPos cell, Vec3 eye, Vec3 aim) {
+        Movement.Cell c = movement.cell(cell);
+        if (c == null || !c.solid()) {
+            return true;
+        }
+        List<meridian.core.api.Box> boxes = movement.solidBoxes(cell);
+        if (boxes.isEmpty()) {
+            return true;
+        }
+        for (meridian.core.api.Box box : boxes) {
+            if (crosses(eye, aim, box, SIGHT_EDGE)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether the segment from {@code a} to {@code b} passes through the box grown by {@code by} each way. */
+    static boolean crosses(Vec3 a, Vec3 b, meridian.core.api.Box box, double by) {
+        double t0 = 0;
+        double t1 = 1;
+        double[] from = {a.x(), a.y(), a.z()};
+        double[] to = {b.x(), b.y(), b.z()};
+        double[] min = {box.min().x() - by, box.min().y() - by, box.min().z() - by};
+        double[] max = {box.max().x() + by, box.max().y() + by, box.max().z() + by};
+        for (int i = 0; i < 3; i++) {
+            double d = to[i] - from[i];
+            if (Math.abs(d) < 1e-12) {
+                if (from[i] < min[i] || from[i] > max[i]) {
+                    return false;
+                }
+                continue;
+            }
+            double near = (min[i] - from[i]) / d;
+            double far = (max[i] - from[i]) / d;
+            if (near > far) {
+                double swap = near;
+                near = far;
+                far = swap;
+            }
+            t0 = Math.max(t0, near);
+            t1 = Math.min(t1, far);
+            if (t0 > t1) {
+                return false;
             }
         }
         return true;
@@ -1775,14 +1873,27 @@ public final class WorkerImpl implements Worker {
                 }
             }
             got = true;
-            if (player.activeHotbarSlot() != slot) {
-                interactions.switchHotbarSlot(slot).get(5, TimeUnit.SECONDS);
-            }
+            intoHand(player, slot);
             Vec3 eye = eye();
             double d = eye == null ? 1 : Math.sqrt(distSq(eye, st.aim()));
             faceNow(st.aim(), Math.max(Movement.FACE_WITHIN, Math.atan(0.2 / Math.max(d, 0.5))))
                     .get(2, TimeUnit.SECONDS);
-            interactions.placeOnBlock(st.against(), st.face(), rotation).get(10, TimeUnit.SECONDS);
+            // An item thrown when used standing (a rubble) is put down as a block crouching.
+            boolean crouch = !fluid && interactions.placedCrouching(itemId);
+            if (crouch && !crouched(id)) {
+                log.info("meridian-core: {} is put down crouching, and the body does not crouch here", itemId);
+                return Outcome.REFUSED;
+            }
+            if (crouch) {
+                log.info("meridian-core: {} put down crouching (the body says: {})", itemId, movement.state());
+            }
+            try {
+                interactions.placeOnBlock(st.against(), st.face(), rotation).get(10, TimeUnit.SECONDS);
+            } finally {
+                if (crouch) {
+                    movement.hold(null);
+                }
+            }
             for (long waited = 0; waited < PLACE_WAIT_MS; waited += 50) {
                 if (fluid ? source(world.fluidCellAt(cell.x(), cell.y(), cell.z()))
                         : !world.blockAt(cell.x(), cell.y(), cell.z()).isAir()) {
@@ -1796,6 +1907,117 @@ public final class WorkerImpl implements Worker {
         }
         return !live(id) ? Outcome.INTERRUPTED : got ? Outcome.REFUSED
                 : tried.isEmpty() ? Outcome.NO_PLACE : Outcome.UNREACHABLE;
+    }
+
+    /**
+     * The body crouched where it stands, the head as it is turned: held until {@code movement.hold(null)}.
+     * Done once the body is crouching, its report saying so has gone out and the server has had its
+     * ticks to take it ({@link #SERVER_TAKES_MS}) - the server asks its own picture of the body what a
+     * use does. {@code false} where it does not come to crouch: in the air, in water.
+     */
+    /**
+     * What the server needs to take a report of the body into its own picture of it: the report waits
+     * in the player's input queue for the server's next tick (30 a second), and a use arriving in the
+     * same tick is judged by the picture before it - a rubble thrown, not put down (22.11). Nothing the
+     * server sends says "taken": the body reports its states, it is not told them back. Four ticks.
+     */
+    static final long SERVER_TAKES_MS = 135;
+
+    private boolean crouched(int id) throws InterruptedException {
+        Movement.State st = movement.state();
+        if (st == null || !movement.onGround()) {
+            return false;
+        }
+        movement.hold(new Movement.Controls(0, 0, st.yaw(), st.pitch(), false, true, false, false, false));
+        while (live(id)) {
+            Movement.State now = movement.state();
+            if (now == null || now.swimming() || now.flying() || now.climbing()) {
+                break;
+            }
+            // Crouching, and the report saying so gone out - then the server's ticks that take it in.
+            if (now.crouching() && (!(interactions instanceof meridian.core.impl.interaction.InteractionControlImpl told)
+                    || told.crouchingTold())) {
+                Thread.sleep(SERVER_TAKES_MS);
+                return live(id);
+            }
+            Thread.sleep(10);           // the body's next tick takes the key, its next report says so
+        }
+        movement.hold(null);
+        return false;
+    }
+
+    /**
+     * What stands in the cell taken up by a use: from a place within reach of it with a clear line,
+     * the head on it. Taken once the cell is empty.
+     */
+    private Outcome gatherNow(int id, BlockPos cell) throws Exception {
+        if (!world.known(cell.x(), cell.y(), cell.z()) || world.blockAt(cell.x(), cell.y(), cell.z()).isAir()) {
+            return Outcome.NOTHING;
+        }
+        Vec3 me = movement.position();
+        if (me == null) {
+            return Outcome.NOT_AVAILABLE;
+        }
+        double reach = Math.max(1.0, interactions.useReach(null).orElse(DEFAULT_REACH) - REACH_MARGIN);
+        // What a use takes up is small - a rubble a quarter of a block high: aimed at low in the cell.
+        Vec3 aim = new Vec3(cell.x() + 0.5, cell.y() + 0.12, cell.z() + 0.5);
+        int[] here = Walker.cellOf(me);
+        double eyeH = movement.capabilities().eyeHeight();
+        BlockPos best = null;
+        boolean bestHere = false;
+        double bestCost = Double.MAX_VALUE;
+        int r = (int) Math.ceil(reach);
+        for (int dy = -r - 1; dy <= r; dy++) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    BlockPos at = new BlockPos(cell.x() + dx, cell.y() + dy, cell.z() + dz);
+                    OptionalDouble feet = movement.standAt(at);
+                    if (feet.isEmpty()) {
+                        continue;
+                    }
+                    boolean isHere = at.x() == here[0] && at.y() == here[1] && at.z() == here[2];
+                    Vec3 eye = isHere ? new Vec3(me.x(), me.y() + eyeH, me.z())
+                            : new Vec3(at.x() + 0.5, feet.getAsDouble() + eyeH, at.z() + 0.5);
+                    if (distSq(eye, aim) > reach * reach) {
+                        continue;
+                    }
+                    List<BlockPos> in = obstaclesTo(eye, cell, aim);
+                    if (in == null || !in.isEmpty()) {
+                        continue;
+                    }
+                    double cost = Math.sqrt(distSq(me, eye)) - (isHere ? 2 : 0);
+                    if (cost < bestCost) {
+                        bestCost = cost;
+                        best = at;
+                        bestHere = isHere;
+                    }
+                }
+            }
+        }
+        if (best == null) {
+            return Outcome.NO_PLACE;
+        }
+        if (!bestHere) {
+            NavResult nav = go(Goal.at(best)).get();
+            if (!live(id)) {
+                return Outcome.INTERRUPTED;
+            }
+            if (nav.status() != NavResult.Status.ARRIVED) {
+                return Outcome.UNREACHABLE;
+            }
+        }
+        Vec3 eye = eye();
+        double d = eye == null ? 1 : Math.sqrt(distSq(eye, aim));
+        faceNow(aim, Math.max(Movement.FACE_WITHIN, Math.atan(0.1 / Math.max(d, 0.5)))).get(2, TimeUnit.SECONDS);
+        interactions.useOnBlock(cell).get(10, TimeUnit.SECONDS);
+        for (long waited = 0; waited < PLACE_WAIT_MS; waited += 50) {
+            if (world.blockAt(cell.x(), cell.y(), cell.z()).isAir()) {
+                return Outcome.TAKEN;
+            }
+            Thread.sleep(50);
+        }
+        log.info("meridian-core: the use at {} left it standing", text(cell));
+        return Outcome.REFUSED;
     }
 
     /** How long a jump of a pillar is waited for to clear the block it puts under the feet. */
@@ -1818,9 +2040,7 @@ public final class WorkerImpl implements Worker {
                 return Outcome.NO_ITEM;
             }
         }
-        if (player.activeHotbarSlot() != slot) {
-            interactions.switchHotbarSlot(slot).get(5, TimeUnit.SECONDS);
-        }
+        intoHand(player, slot);
         for (int i = 0; i < blocks; i++) {
             if (!live(id)) {
                 return Outcome.INTERRUPTED;
@@ -1949,9 +2169,7 @@ public final class WorkerImpl implements Worker {
                 return Outcome.UNREACHABLE;
             }
         }
-        if (player.activeHotbarSlot() != slot) {
-            interactions.switchHotbarSlot(slot).get(5, TimeUnit.SECONDS);
-        }
+        intoHand(player, slot);
         Vec3 eye = eye();
         double d = eye == null ? 1 : Math.sqrt(distSq(eye, aim));
         // The server takes the fluid its own ray from the eyes along the look meets: onto the middle.
@@ -2147,6 +2365,12 @@ public final class WorkerImpl implements Worker {
     // ------------------------------------------------------------------
 
     private Map<String, Integer> takeNow(int id, BlockPos chest, Map<String, Integer> want) throws Exception {
+        return takeNow(id, chest, want, null, 0);
+    }
+
+    /** The items {@code want} names, or - with {@code which} - those it takes, {@code most} of them in all. */
+    private Map<String, Integer> takeNow(int id, BlockPos chest, Map<String, Integer> named,
+                                         java.util.function.Predicate<String> which, int most) throws Exception {
         ProxySession s = session.get();
         if (containers == null || inventory == null || s == null
                 || !world.known(chest.x(), chest.y(), chest.z()) || world.blockAt(chest.x(), chest.y(), chest.z()).isAir()) {
@@ -2159,6 +2383,24 @@ public final class WorkerImpl implements Worker {
         try {
             Map<String, Integer> before = held();
             meridian.core.api.Containers.Contents in = containers.at(chest);
+            Map<String, Integer> want = named;
+            if (which != null) {
+                // What is in it is known now that it is open: of each kind the test takes, what is there.
+                want = new HashMap<>();
+                int room = most;
+                if (in != null) {
+                    for (meridian.core.api.Containers.Item item : in.items().values()) {
+                        if (item != null && room > 0 && which.test(item.id())) {
+                            int n = Math.min(room, item.quantity());
+                            want.merge(item.id(), n, Integer::sum);
+                            room -= n;
+                        }
+                    }
+                }
+                if (want.isEmpty()) {
+                    return Map.of();
+                }
+            }
             Map<String, Integer> left = new HashMap<>(want);
             if (in != null) {
                 for (Map.Entry<Integer, meridian.core.api.Containers.Item> slot : in.items().entrySet()) {

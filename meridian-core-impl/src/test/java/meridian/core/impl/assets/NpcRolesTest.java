@@ -49,6 +49,14 @@ public class NpcRolesTest {
         files.put("Server/NPC/Roles/Critter/Sheep.json", """
                 {"Type": "Generic", "Appearance": "Sheep", "MaxSpeed": 4,
                  "Parameters": {"ViewRange": {"Value": 10}}}""");
+        // A turret wearing the zombie's model, throwing from afar: the zombie is none the farther for it.
+        files.put("Server/NPC/Roles/Undead/Zombie_Turret.json", """
+                {"Type": "Variant", "Reference": "Zombie", "Modify": {"AttackDistance": 25, "ViewRange": 15}}""");
+        // ... and a model no role is named after: the least any of them says.
+        files.put("Server/NPC/Roles/Undead/Ghoul_Small.json", """
+                {"Type": "Variant", "Reference": "Zombie", "Modify": {"Appearance": "Ghoul", "AttackDistance": 3}}""");
+        files.put("Server/NPC/Roles/Undead/Ghoul_Thrower.json", """
+                {"Type": "Variant", "Reference": "Zombie", "Modify": {"Appearance": "Ghoul", "AttackDistance": 14}}""");
         files.put("Server/NPC/Roles/Critter/Broken.json", "{ not json");
         files.put("Server/NPC/Roles/Critter/Rock.json", """
                 {"Type": "Generic", "Appearance": "Rock"}""");
@@ -59,7 +67,9 @@ public class NpcRolesTest {
         // Two roles wear the zombie's model - the plain one (12) and the elder (20): the keenest.
         check(zombie.viewRange() == 20 && zombie.hearingRange() == 8 && zombie.maxSpeed() == 9, "the zombie: " + zombie);
         check(zombie.viewSector() == 120 && zombie.alertedRange() == 28, "not its template's where it changes nothing: " + zombie);
-        check(zombie.attackDistance() == 2, "how far off it attacks from: " + zombie);
+        check(zombie.attackDistance() == 2, "how far off it attacks from - its own role's, not the turret's: " + zombie);
+        Combat.Senses ghoul = senses.get("ghoul");
+        check(ghoul != null && ghoul.attackDistance() == 3, "a model no role is named after: the least - " + ghoul);
         Combat.Senses burnt = senses.get("zombie_burnt");
         check(burnt != null && burnt.viewRange() == 16 && burnt.hearingRange() == 8, "a variant of a variant: " + burnt);
         Combat.Senses fox = senses.get("fox");
