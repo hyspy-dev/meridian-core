@@ -88,7 +88,9 @@ public interface Worker {
         /** The server did not put the block there. */
         REFUSED,
         /** A container was filled from a fluid. */
-        FILLED
+        FILLED,
+        /** What stood in the cell was taken up by a use ({@link #gather}). */
+        TAKEN
     }
 
     /**
@@ -208,6 +210,19 @@ public interface Worker {
     }
 
     /**
+     * Takes up what stands in {@code cell} with a use, as a player does with the use key: a rubble, a
+     * plant - what the block's own gathering gives to a hand ({@code Gathering.Harvest}). From a place
+     * within reach with a clear line to it, the head turned onto it; what it gives goes to the player.
+     *
+     * @return {@link Outcome#TAKEN} once the cell is empty; {@link Outcome#NOTHING} when it is empty
+     *         already; {@link Outcome#NO_PLACE} / {@link Outcome#UNREACHABLE} when there is no place to
+     *         do it from or no way there; {@link Outcome#REFUSED} when the use left it standing
+     */
+    default CompletableFuture<Outcome> gather(BlockPos cell) {
+        return CompletableFuture.completedFuture(Outcome.NOT_AVAILABLE);
+    }
+
+    /**
      * Goes to {@code goal} - anywhere in the world - as a player gets there: walks where there is a
      * way; digs one where rock is in the way - a tunnel, a staircase up out of a pit or down into the
      * ground; builds one where there is nothing to stand on - a pillar up, a bridge across - of the
@@ -252,6 +267,17 @@ public interface Worker {
      * @return how many of each came out - what the player holds more of afterwards
      */
     default CompletableFuture<Map<String, Integer>> take(BlockPos chest, Map<String, Integer> items) {
+        return CompletableFuture.completedFuture(Map.of());
+    }
+
+    /**
+     * Takes out of a container the items {@code which} takes, {@code count} of them in all at the most
+     * - what is in it is known only once it is open: "every kind of rubble there, two hundred".
+     *
+     * @return how many of each came out; empty when the container did not open or holds none
+     */
+    default CompletableFuture<Map<String, Integer>> take(BlockPos chest, java.util.function.Predicate<String> which,
+                                                         int count) {
         return CompletableFuture.completedFuture(Map.of());
     }
 

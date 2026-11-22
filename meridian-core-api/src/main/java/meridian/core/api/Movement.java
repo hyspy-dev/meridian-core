@@ -340,6 +340,15 @@ public interface Movement {
      * @param door      a door in it, and whether it is open; {@code door} is the cell holding the
      *                  door's block (its lower half), to use it
      */
+    /**
+     * The boxes of what stops the body in a cell, in world coordinates: a full block's is the cell, a
+     * slab's its lower half, a rubble's a quarter of a block high in the cell's middle. Empty where
+     * nothing in the cell stops the body - or core does not tell.
+     */
+    default java.util.List<Box> solidBoxes(BlockPos cell) {
+        return java.util.List.of();
+    }
+
     record Cell(boolean solid, boolean climbable, String fluid, boolean swimmable, boolean hurts, Door doorState,
                 BlockPos door) {
 

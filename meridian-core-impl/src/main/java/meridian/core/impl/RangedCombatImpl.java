@@ -270,20 +270,34 @@ final class RangedCombatImpl implements RangedCombat, ProjectilePlayback {
         List<InteractionControlImpl.BowTier> order = new java.util.ArrayList<>(hands.bowTiers(bow));
         order.sort(java.util.Comparator.comparingDouble(InteractionControlImpl.BowTier::seconds));
         if (hardest) java.util.Collections.reverse(order);
+        // With no draw that reaches, why the STRONGEST found no flight is the answer: the weakest's
+        // "no arc" says only that it is weak (22.11: every refusal read "NO_LOW_ARC ... at 0.1", the
+        // tenth-of-a-second draw's, whatever had stopped the full one - a pit's rim in the way).
+        String strongest = null;
+        double strongestSeconds = -1;
         for (var tier : order) {
             if (only != null && !only.equals(tier)) continue;
+            String failure;
             ProjectileConfig config = configs.get(tier.config());
-            if (config == null) { lastFailure = "Config missing: " + tier.config() + " (catalog " + configs.size() + ")"; continue; }
-            try {
-                ProjectileParams params = ProjectileParams.fromConfig(config);
-                var solved = new AimSolver(params).solve(eyes, target, only == null ? tier.seconds() + extraDelay : extraDelay, blocks());
-                if (solved.solution().isPresent()) return new Plan(tier, params, solved.solution().get());
-                lastFailure = solved.failure().name() + " at " + tier.seconds();
-            } catch (IllegalArgumentException | IllegalStateException unsupported) {
-                lastFailure = unsupported.toString();
-                // Unknown space, fluid, variable scale or nonstandard physics: do not guess.
+            if (config == null) {
+                failure = "Config missing: " + tier.config() + " (catalog " + configs.size() + ")";
+            } else {
+                try {
+                    ProjectileParams params = ProjectileParams.fromConfig(config);
+                    var solved = new AimSolver(params).solve(eyes, target, only == null ? tier.seconds() + extraDelay : extraDelay, blocks());
+                    if (solved.solution().isPresent()) return new Plan(tier, params, solved.solution().get());
+                    failure = solved.failure().name() + " at " + tier.seconds();
+                } catch (IllegalArgumentException | IllegalStateException unsupported) {
+                    failure = unsupported.toString();
+                    // Unknown space, fluid, variable scale or nonstandard physics: do not guess.
+                }
+            }
+            if (tier.seconds() > strongestSeconds) {
+                strongestSeconds = tier.seconds();
+                strongest = failure;
             }
         }
+        if (strongest != null) lastFailure = strongest;
         return null;
     }
 

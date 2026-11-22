@@ -672,6 +672,8 @@ final class CoreCommands {
         ctx.services().get(meridian.core.api.Combat.class).flatMap(c -> c.sensesOf(id)).ifPresent(s -> e.put("senses",
                 Map.of("view", s.viewRange(), "sector", s.viewSector(), "hearing", s.hearingRange(),
                         "alerted", s.alertedRange(), "speed", s.maxSpeed(), "attack", s.attackDistance())));
+        ctx.services().get(meridian.core.api.Combat.class).flatMap(c -> c.blastOf(id)).ifPresent(b -> e.put("blast",
+                Map.of("radius", b.radius(), "damage", b.damage(), "fuse", b.fuseSeconds())));
         tracker.nameplateOf(id).ifPresent(n -> e.put("name", n));
         tracker.itemOf(id).ifPresent(i -> e.put("item", i));
         if (tracker.isPlayer(id)) {

@@ -28,7 +28,8 @@ public final class NavigationPanel {
     private static final String USAGE = "goto <x y z> [radius] | plan <x y z> [radius] | trace <x y z> [radius] | cancel"
             + " | chase <entity> [within]"
             + " | place <x y z> <item> [rotation] | take <x y z> <item> <count> | deposit <x y z> <item> <count>"
-            + " | travel <x y z> | pillar <item> <blocks> | down <blocks> | pour|scoop <x y z> <item>";
+            + " | travel <x y z> | pillar <item> <blocks> | down <blocks> | pour|scoop <x y z> <item>"
+            + " | gather <x y z> | takeany <x y z> <part of the items' name> <count>";
 
     private final Navigator navigator;
     private final Worker worker;
@@ -180,6 +181,17 @@ public final class NavigationPanel {
         }
         BlockPos cell = new BlockPos(Integer.parseInt(args.get(1)), Integer.parseInt(args.get(2)),
                 Integer.parseInt(args.get(3)));
+        if (what.equals("gather")) {
+            return worker.gather(cell).thenApply(o -> Map.of("outcome", o.name()));
+        }
+        if (what.equals("takeany")) {
+            if (args.size() < 6) {
+                throw new IllegalArgumentException(USAGE);
+            }
+            String part = args.get(4);
+            return worker.take(cell, id -> id.contains(part), Integer.parseInt(args.get(5)))
+                    .thenApply(got -> Map.of("taken", got));
+        }
         if (what.equals("place")) {
             if (args.size() < 5) {
                 throw new IllegalArgumentException(USAGE);

@@ -387,19 +387,34 @@ public interface InteractionControl {
     }
 
     /**
-     * Repairs an item as a player does with a repair kit: takes a kit from the hotbar (an item of
-     * the {@code Repair_Kit} set), uses it - the server then shows its list of worn items - and
-     * picks the most worn one with this id from that list; the server uses up one kit and gives the
-     * item back its durability, under a lower maximum. The slot in hand before is taken again after.
+     * Repairs an item as a player does with a repair kit: takes a kit into the hand (an item of the
+     * {@code Repair_Kit} set), uses it - the server then shows its list of worn items - and picks the
+     * most worn one with this id from that list; the server uses up one kit and gives the item back its
+     * durability, under a lower maximum. The slot in hand before is taken again after.
+     *
+     * <p>The kit is one in the hotbar - or, with none there, one from the storage or the backpack: it
+     * is put into a hotbar slot for the repair (a free one, else in place of an item that is not being
+     * repaired) and back where it lay after, the hotbar as it was. The worn item itself is in the
+     * hotbar or the utility slot: the server's list holds no others.
      *
      * <p>A game's player sees the list come up and go again; for a headless one core answers the
      * list as a client does.
      *
-     * @return whether the server repaired it; {@code false} with no kit in the hotbar, nothing of the
-     *         item worn, or the server refusing it
+     * @return whether the server repaired it; {@code false} with no kit carried, nothing of the item
+     *         worn, or the server refusing it
      */
     default CompletableFuture<Boolean> repair(String itemId) {
         return CompletableFuture.completedFuture(false);
+    }
+
+    /**
+     * Whether a block of this item is put down only with the body crouching: an item that does
+     * something of its own when used standing - a rubble is thrown - and is placed as a block
+     * otherwise. Its use asks first whether the body stands ({@code Condition ... Crouching: false})
+     * and places where that fails. In a game mode the question is not asked in (creative), no.
+     */
+    default boolean placedCrouching(String itemId) {
+        return false;
     }
 
     /** {@code true} once a client session is live and packets can be sent. */
